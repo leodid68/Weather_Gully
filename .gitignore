@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+weather/state.json
+weather/weather_state.json
+.claude/
+.DS_Store
+creds.json
+state.json
+weather_state.json
+*.pid
+*.heartbeat
+*.lock

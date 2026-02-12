@@ -1,0 +1,52 @@
+{
+  "markets": [
+    {
+      "id": "market-1",
+      "event_id": "evt-nyc-high-mar15",
+      "event_name": "What will be the highest temperature in NYC on March 15?",
+      "outcome_name": "44°F or below",
+      "external_price_yes": 0.08,
+      "status": "active"
+    },
+    {
+      "id": "market-2",
+      "event_id": "evt-nyc-high-mar15",
+      "event_name": "What will be the highest temperature in NYC on March 15?",
+      "outcome_name": "45-49°F",
+      "external_price_yes": 0.15,
+      "status": "active"
+    },
+    {
+      "id": "market-3",
+      "event_id": "evt-nyc-high-mar15",
+      "event_name": "What will be the highest temperature in NYC on March 15?",
+      "outcome_name": "50-54°F",
+      "external_price_yes": 0.35,
+      "status": "active"
+    },
+    {
+      "id": "market-4",
+      "event_id": "evt-nyc-high-mar15",
+      "event_name": "What will be the highest temperature in NYC on March 15?",
+      "outcome_name": "55-59°F",
+      "external_price_yes": 0.25,
+      "status": "active"
+    },
+    {
+      "id": "market-5",
+      "event_id": "evt-nyc-high-mar15",
+      "event_name": "What will be the highest temperature in NYC on March 15?",
+      "outcome_name": "60°F or higher",
+      "external_price_yes": 0.10,
+      "status": "active"
+    },
+    {
+      "id": "market-6",
+      "event_id": "evt-chicago-low-mar16",
+      "event_name": "What will be the lowest temperature in Chicago on March 16?",
+      "outcome_name": "30-35°F",
+      "external_price_yes": 0.12,
+      "status": "active"
+    }
+  ]
+}

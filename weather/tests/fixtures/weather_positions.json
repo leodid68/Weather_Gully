@@ -1,0 +1,27 @@
+{
+  "positions": [
+    {
+      "market_id": "market-3",
+      "question": "What will be the highest temperature in NYC on March 15?",
+      "outcome_name": "50-54°F",
+      "shares_yes": 20.0,
+      "shares_no": 0,
+      "current_price": 0.55,
+      "cost_basis": 0.10,
+      "pnl": 9.0,
+      "sources": ["clob:weather"],
+      "time_to_resolution": "2d 5h"
+    },
+    {
+      "market_id": "market-99",
+      "question": "Will Bitcoin exceed $100k by March 20?",
+      "outcome_name": "Yes",
+      "shares_yes": 10.0,
+      "shares_no": 0,
+      "current_price": 0.30,
+      "cost_basis": 0.25,
+      "pnl": 0.50,
+      "sources": ["manual"]
+    }
+  ]
+}

@@ -1,0 +1,243 @@
+"""Polymarket CLOB REST client — sync, with connection pooling and retry."""
+
+import json
+import logging
+import time
+
+import httpx
+
+from .auth import build_l2_headers, derive_api_key
+from .constants import CLOB_BASE_URL
+from .order import build_signed_order
+
+logger = logging.getLogger(__name__)
+
+_RETRYABLE_CODES = {429, 500, 502, 503, 504}
+
+# Compact JSON matching the official client (critical for HMAC validation)
+_json_compact = lambda obj: json.dumps(obj, separators=(",", ":"), ensure_ascii=False)
+
+
+class PolymarketClient:
+    """Synchronous client for the Polymarket CLOB API.
+
+    Args:
+        private_key: Ethereum private key (hex string with 0x prefix).
+        api_creds: Pre-existing API credentials dict with keys apiKey, secret, passphrase.
+            If None, credentials are derived automatically via L1 auth.
+        base_url: CLOB API base URL.
+        max_retries: Number of retries on transient HTTP errors.
+        base_delay: Initial backoff delay in seconds.
+    """
+
+    def __init__(
+        self,
+        private_key: str,
+        api_creds: dict | None = None,
+        base_url: str = CLOB_BASE_URL,
+        max_retries: int = 3,
+        base_delay: float = 1.0,
+    ):
+        self.private_key = private_key
+        self.base_url = base_url
+        self.max_retries = max_retries
+        self.base_delay = base_delay
+
+        from eth_account import Account as _Acct
+        self.address = _Acct.from_key(private_key).address
+
+        if api_creds is None:
+            api_creds = derive_api_key(private_key)
+        self.api_key = api_creds["apiKey"]
+        self.secret = api_creds["secret"]
+        self.passphrase = api_creds["passphrase"]
+
+        self._http = httpx.Client(base_url=base_url, timeout=15)
+
+    # ------------------------------------------------------------------
+    # Low-level request
+    # ------------------------------------------------------------------
+
+    def _request(
+        self, method: str, path: str, body: dict | list | None = None, auth: bool = True
+    ) -> dict | list:
+        body_str = _json_compact(body) if body is not None else ""
+        headers = {
+            "Content-Type": "application/json",
+            "User-Agent": "py_clob_client",
+            "Accept": "*/*",
+            "Connection": "keep-alive",
+        }
+        if auth:
+            headers.update(
+                build_l2_headers(
+                    self.api_key, self.secret, self.passphrase,
+                    self.address, method, path, body_str,
+                )
+            )
+
+        for attempt in range(self.max_retries + 1):
+            try:
+                resp = self._http.request(
+                    method,
+                    path,
+                    content=body_str.encode() if body_str else None,
+                    headers=headers,
+                )
+                if resp.status_code in _RETRYABLE_CODES and attempt < self.max_retries:
+                    delay = self.base_delay * (2**attempt)
+                    logger.warning(
+                        "CLOB %d on %s %s — retry %d/%d in %.1fs",
+                        resp.status_code, method, path, attempt + 1, self.max_retries, delay,
+                    )
+                    time.sleep(delay)
+                    continue
+                if resp.status_code >= 400:
+                    logger.error("CLOB %d %s %s: %s", resp.status_code, method, path, resp.text)
+                resp.raise_for_status()
+                return resp.json()
+            except httpx.TimeoutException:
+                if attempt < self.max_retries:
+                    delay = self.base_delay * (2**attempt)
+                    logger.warning(
+                        "CLOB timeout on %s %s — retry %d/%d in %.1fs",
+                        method, path, attempt + 1, self.max_retries, delay,
+                    )
+                    time.sleep(delay)
+                    continue
+                raise
+
+        raise httpx.HTTPStatusError(
+            f"Max retries exceeded for {method} {path}",
+            request=httpx.Request(method, path),
+            response=resp,
+        )
+
+    # ------------------------------------------------------------------
+    # Markets
+    # ------------------------------------------------------------------
+
+    def get_markets(self, **filters) -> list[dict]:
+        """Fetch available markets with optional query filters."""
+        params = "&".join(f"{k}={v}" for k, v in filters.items())
+        path = "/markets" + (f"?{params}" if params else "")
+        return self._request("GET", path, auth=False)
+
+    def get_market(self, condition_id: str) -> dict:
+        """Fetch a single market by condition ID."""
+        return self._request("GET", f"/markets/{condition_id}", auth=False)
+
+    # ------------------------------------------------------------------
+    # Orderbook
+    # ------------------------------------------------------------------
+
+    def get_orderbook(self, token_id: str) -> dict:
+        """Fetch the orderbook for a token. Returns {bids: [...], asks: [...]}."""
+        return self._request("GET", f"/book?token_id={token_id}", auth=False)
+
+    def get_price(self, token_id: str) -> dict:
+        """Fetch current midpoint price for a token."""
+        data = self._request("GET", f"/midpoint?token_id={token_id}", auth=False)
+        # Normalize: /midpoint returns {"mid": "0.xx"}, callers expect {"price": ...}
+        if "mid" in data and "price" not in data:
+            data["price"] = data["mid"]
+        return data
+
+    def is_neg_risk(self, token_id: str) -> bool:
+        """Check if a token uses the neg-risk exchange."""
+        resp = self._request("GET", f"/neg-risk?token_id={token_id}", auth=False)
+        return resp.get("neg_risk", False)
+
+    # ------------------------------------------------------------------
+    # Orders
+    # ------------------------------------------------------------------
+
+    def post_order(
+        self,
+        token_id: str,
+        side: str,
+        price: float,
+        size: float,
+        neg_risk: bool | None = None,
+        order_type: str = "GTC",
+        **kwargs,
+    ) -> dict:
+        """Build, sign, and submit an order to the CLOB.
+
+        If neg_risk is None, auto-detects from the API.
+        """
+        if neg_risk is None:
+            neg_risk = self.is_neg_risk(token_id)
+            logger.info("Auto-detected neg_risk=%s for token", neg_risk)
+        signed = build_signed_order(
+            maker=self.address,
+            token_id=token_id,
+            side=side,
+            price=price,
+            size=size,
+            private_key=self.private_key,
+            neg_risk=neg_risk,
+            **kwargs,
+        )
+        # Convert numeric fields to strings (CLOB API requirement)
+        order_payload = {
+            "salt": signed["salt"],
+            "maker": signed["maker"],
+            "signer": signed["signer"],
+            "taker": signed["taker"],
+            "tokenId": str(signed["tokenId"]),
+            "makerAmount": str(signed["makerAmount"]),
+            "takerAmount": str(signed["takerAmount"]),
+            "expiration": str(signed["expiration"]),
+            "nonce": str(signed["nonce"]),
+            "feeRateBps": str(signed["feeRateBps"]),
+            "side": "BUY" if signed["side"] == 0 else "SELL",
+            "signatureType": signed["signatureType"],
+            "signature": signed["signature"],
+        }
+        body = {
+            "order": order_payload,
+            "owner": self.api_key,
+            "orderType": order_type,
+            "postOnly": False,
+        }
+        logger.info("POST /order payload: %s", _json_compact(body))
+        return self._request("POST", "/order", body=body)
+
+    def cancel_order(self, order_id: str) -> dict:
+        """Cancel an open order by its ID."""
+        return self._request("DELETE", "/order", body={"orderID": order_id})
+
+    def cancel_all(self) -> dict:
+        """Cancel all open orders."""
+        return self._request("DELETE", "/cancel-all")
+
+    def get_open_orders(self, **filters) -> list[dict]:
+        """Fetch all open orders for the authenticated user."""
+        params = "&".join(f"{k}={v}" for k, v in filters.items())
+        path = "/data/orders" + (f"?{params}" if params else "")
+        return self._request("GET", path)
+
+    # ------------------------------------------------------------------
+    # Trades
+    # ------------------------------------------------------------------
+
+    def get_trades(self, **filters) -> list[dict]:
+        """Fetch trade history with optional filters."""
+        params = "&".join(f"{k}={v}" for k, v in filters.items())
+        path = "/data/trades" + (f"?{params}" if params else "")
+        return self._request("GET", path)
+
+    # ------------------------------------------------------------------
+    # Lifecycle
+    # ------------------------------------------------------------------
+
+    def close(self) -> None:
+        """Close the underlying HTTP connection pool."""
+        self._http.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        self.close()
