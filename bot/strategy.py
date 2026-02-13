@@ -140,7 +140,9 @@ def _run_weather_pipeline(
         )
 
         # Weather state is separate from bot state
-        weather_state_path = state_path.replace("state.json", "weather_state.json")
+        import os
+        base, ext = os.path.splitext(state_path)
+        weather_state_path = base + "_weather" + ext
         weather_state = WeatherState.load(weather_state_path)
 
         run_weather_strategy(
@@ -211,7 +213,6 @@ def run_strategy(
                     exit_side = "SELL" if pos.side == "BUY" else "BUY"
                     client.post_order(
                         pos.token_id, exit_side, current, pos.size,
-                        neg_risk=pos.neg_risk,
                     )
                     state.record_daily_pnl(pnl)
                     state.record_closed_trade(pos, current, pnl)
@@ -235,7 +236,6 @@ def run_strategy(
                 try:
                     client.post_order(
                         pos.token_id, "SELL", current, pos.size,
-                        neg_risk=pos.neg_risk,
                     )
                     state.record_daily_pnl(pnl)
                     state.record_closed_trade(pos, current, pnl)
@@ -254,7 +254,6 @@ def run_strategy(
                 try:
                     client.post_order(
                         pos.token_id, "BUY", current, pos.size,
-                        neg_risk=pos.neg_risk,
                     )
                     state.record_daily_pnl(pnl)
                     state.record_closed_trade(pos, current, pnl)

@@ -204,7 +204,6 @@ def run_scan_pipeline(
 
 def _scan_with_clob_fallback(client, config: "Config") -> list[dict]:
     """CLOB-based scan with book metrics computation (used as fallback)."""
-    from .scanner import compute_book_metrics, scan_markets
     try:
         raw_markets = scan_markets(client, limit=config.scan_limit)
     except Exception as exc:
