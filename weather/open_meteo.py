@@ -53,7 +53,7 @@ def _fetch_json(url: str, max_retries: int = 3, base_delay: float = 1.0) -> dict
 
 def _timezone_for_lon(lon: float) -> str:
     """Approximate US timezone from longitude."""
-    if lon > -82:
+    if lon > -85:
         return "America/New_York"
     elif lon > -100:
         return "America/Chicago"
@@ -141,13 +141,17 @@ def compute_ensemble_forecast(
     noaa_temp: float | None,
     open_meteo_data: dict | None,
     metric: str,
+    aviation_obs_temp: float | None = None,
+    aviation_obs_weight: float = 0.0,
 ) -> tuple[float | None, float]:
-    """Combine NOAA + Open-Meteo into a weighted ensemble forecast.
+    """Combine NOAA + Open-Meteo + Aviation observations into a weighted ensemble.
 
     Args:
         noaa_temp: NOAA point forecast (may be None).
         open_meteo_data: Open-Meteo data for the date (gfs_high, ecmwf_high, etc.).
         metric: ``"high"`` or ``"low"``.
+        aviation_obs_temp: Observed temperature from METAR (may be None).
+        aviation_obs_weight: Weight for the aviation observation (default 0.0).
 
     Returns:
         ``(ensemble_temp, model_spread)`` where model_spread is the std dev
@@ -169,6 +173,9 @@ def compute_ensemble_forecast(
         ecmwf_val = open_meteo_data.get(ecmwf_key)
         if ecmwf_val is not None:
             temps.append((ecmwf_val, MODEL_WEIGHTS.get("ecmwf_ifs025", 0.50)))
+
+    if aviation_obs_temp is not None and aviation_obs_weight > 0:
+        temps.append((aviation_obs_temp, aviation_obs_weight))
 
     if not temps:
         return None, 0.0

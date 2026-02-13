@@ -77,6 +77,7 @@ def main() -> None:
     parser.add_argument("--json-log", action="store_true", help="Output structured JSON logs")
     parser.add_argument("--no-safeguards", action="store_true", help="Disable context safeguards")
     parser.add_argument("--no-trends", action="store_true", help="Disable price trend detection")
+    parser.add_argument("--no-aviation", action="store_true", help="Disable METAR aviation observations")
 
     args = parser.parse_args()
 
@@ -119,6 +120,11 @@ def main() -> None:
             state_path=state_path,
         )
         return
+
+    # Disable aviation observations if requested
+    if args.no_aviation:
+        config.aviation_obs = False
+        logger.info("Aviation observations disabled via --no-aviation")
 
     # Build CLOB bridge
     dry_run = not args.live

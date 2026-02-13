@@ -1,0 +1,83 @@
+[
+  {
+    "icaoId": "KLGA",
+    "reportTime": "2025-03-15T14:51:00Z",
+    "temp": 12.0,
+    "dewp": 5.0,
+    "wdir": 270,
+    "wspd": 10,
+    "rawOb": "KLGA 151451Z 27010KT 10SM FEW250 12/05 A3012"
+  },
+  {
+    "icaoId": "KLGA",
+    "reportTime": "2025-03-15T13:51:00Z",
+    "temp": 11.0,
+    "dewp": 4.0,
+    "wdir": 260,
+    "wspd": 8,
+    "rawOb": "KLGA 151351Z 26008KT 10SM FEW250 11/04 A3014"
+  },
+  {
+    "icaoId": "KLGA",
+    "reportTime": "2025-03-15T12:51:00Z",
+    "temp": 10.0,
+    "dewp": 3.0,
+    "wdir": 250,
+    "wspd": 6,
+    "rawOb": "KLGA 151251Z 25006KT 10SM CLR 10/03 A3015"
+  },
+  {
+    "icaoId": "KLGA",
+    "reportTime": "2025-03-15T08:51:00Z",
+    "temp": 6.0,
+    "dewp": 1.0,
+    "wdir": 240,
+    "wspd": 4,
+    "rawOb": "KLGA 150851Z 24004KT 10SM CLR 06/01 A3018"
+  },
+  {
+    "icaoId": "KLGA",
+    "reportTime": "2025-03-15T05:51:00Z",
+    "temp": 3.0,
+    "dewp": -1.0,
+    "wdir": 230,
+    "wspd": 3,
+    "rawOb": "KLGA 150551Z 23003KT 10SM CLR 03/M01 A3020"
+  },
+  {
+    "icaoId": "KLGA",
+    "reportTime": "2025-03-14T22:51:00Z",
+    "temp": 8.0,
+    "dewp": 2.0,
+    "wdir": 280,
+    "wspd": 12,
+    "rawOb": "KLGA 142251Z 28012KT 10SM SCT250 08/02 A3010"
+  },
+  {
+    "icaoId": "KORD",
+    "reportTime": "2025-03-15T14:51:00Z",
+    "temp": 5.0,
+    "dewp": 0.0,
+    "wdir": 310,
+    "wspd": 15,
+    "rawOb": "KORD 151451Z 31015KT 10SM FEW250 05/00 A3025"
+  },
+  {
+    "icaoId": "KORD",
+    "reportTime": "2025-03-15T08:51:00Z",
+    "temp": -2.0,
+    "dewp": -6.0,
+    "wdir": 300,
+    "wspd": 10,
+    "rawOb": "KORD 150851Z 30010KT 10SM CLR M02/M06 A3028"
+  },
+  {
+    "icaoId": "KORD",
+    "reportTime": "2025-03-14T20:51:00Z",
+    "temp": 3.0,
+    "dewp": -2.0,
+    "wdir": 290,
+    "wspd": 8,
+    "rawOb": "KORD 142051Z 29008KT 10SM CLR 03/M02 A3022"
+  }
+]

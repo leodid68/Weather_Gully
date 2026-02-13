@@ -102,6 +102,8 @@ class TradingState:
     predictions: dict[str, PredictionRecord] = field(default_factory=dict)
     # Event tracking for correlation guard: event_id → market_id
     event_positions: dict[str, str] = field(default_factory=dict)
+    # Daily METAR observations: "location|date" → obs_data dict
+    daily_observations: dict[str, dict] = field(default_factory=dict)
 
     def record_trade(
         self,
@@ -186,6 +188,18 @@ class TradingState:
     def remove_event_position(self, event_id: str) -> None:
         self.event_positions.pop(event_id, None)
 
+    # -- Daily observations (METAR) --
+
+    def update_daily_obs(self, location: str, date: str, obs_data: dict) -> None:
+        """Store or update daily observation data for a location/date."""
+        key = f"{location}|{date}"
+        self.daily_observations[key] = obs_data
+
+    def get_daily_obs(self, location: str, date: str) -> dict | None:
+        """Retrieve stored daily observation data, or None if not available."""
+        key = f"{location}|{date}"
+        return self.daily_observations.get(key)
+
     def save(self, path: str) -> None:
         """Atomic save: write to temp file then rename (prevents corruption on crash)."""
         data = {
@@ -195,6 +209,7 @@ class TradingState:
             "previous_forecasts": self.previous_forecasts,
             "predictions": {mid: rec.to_dict() for mid, rec in self.predictions.items()},
             "event_positions": self.event_positions,
+            "daily_observations": self.daily_observations,
         }
         dir_name = os.path.dirname(path) or "."
         fd, tmp_path = tempfile.mkstemp(suffix=".tmp", dir=dir_name)
@@ -231,6 +246,7 @@ class TradingState:
                 for mid, rec in data.get("predictions", {}).items()
             }
             event_positions = data.get("event_positions", {})
+            daily_observations = data.get("daily_observations", {})
             return cls(
                 trades=trades,
                 analyzed_markets=analyzed,
@@ -238,6 +254,7 @@ class TradingState:
                 previous_forecasts=previous_forecasts,
                 predictions=predictions,
                 event_positions=event_positions,
+                daily_observations=daily_observations,
             )
         except (json.JSONDecodeError, IOError, KeyError) as exc:
             logger.warning("Failed to load state from %s: %s — starting fresh", path, exc)

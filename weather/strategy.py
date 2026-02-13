@@ -7,11 +7,17 @@ import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 
+from .aviation import get_aviation_daily_data
 from .config import Config, LOCATIONS, MIN_SHARES_PER_ORDER, MIN_TICK_SIZE
 from .noaa import get_noaa_forecast
 from .open_meteo import compute_ensemble_forecast, get_open_meteo_forecast
 from .parsing import parse_weather_event, parse_temperature_bucket
-from .probability import estimate_bucket_probability, get_horizon_days, get_noaa_probability
+from .probability import (
+    estimate_bucket_probability,
+    estimate_bucket_probability_with_obs,
+    get_horizon_days,
+    get_noaa_probability,
+)
 from .bridge import CLOBWeatherBridge
 from .sizing import compute_exit_threshold, compute_position_size
 from .state import PredictionRecord, TradingState
@@ -132,8 +138,21 @@ def score_buckets(
     forecast_temp: float,
     forecast_date: str,
     config: Config,
+    obs_data: dict | None = None,
+    metric: str = "high",
+    location: str = "",
 ) -> list[dict]:
     """Score all buckets in an event by expected value.
+
+    Args:
+        event_markets: Markets in the event.
+        forecast_temp: Ensemble forecast temperature.
+        forecast_date: Target date.
+        config: Strategy configuration.
+        obs_data: Optional METAR observation data for the date
+            (keys: ``obs_high``, ``obs_low``, ``latest_obs_time``, ``obs_count``).
+        metric: ``"high"`` or ``"low"`` — which extreme this event tracks.
+        location: Canonical location key (for timezone-aware sigma).
 
     Returns a list of ``{"market": dict, "bucket": tuple, "prob": float,
     "price": float, "ev": float}`` sorted by EV descending.
@@ -152,10 +171,21 @@ def score_buckets(
         if price < MIN_TICK_SIZE or price > (1 - MIN_TICK_SIZE):
             continue
 
-        prob = estimate_bucket_probability(
-            forecast_temp, bucket[0], bucket[1], forecast_date,
-            apply_seasonal=config.seasonal_adjustments,
-        )
+        if obs_data and obs_data.get("obs_count", 0) > 0:
+            loc_data = LOCATIONS.get(location, {})
+            station_lon = loc_data.get("lon", -74.0)
+            prob = estimate_bucket_probability_with_obs(
+                forecast_temp, bucket[0], bucket[1], forecast_date,
+                obs_data=obs_data,
+                metric=metric,
+                apply_seasonal=config.seasonal_adjustments,
+                station_lon=station_lon,
+            )
+        else:
+            prob = estimate_bucket_probability(
+                forecast_temp, bucket[0], bucket[1], forecast_date,
+                apply_seasonal=config.seasonal_adjustments,
+            )
 
         ev = prob - price  # Expected value above break-even
 
@@ -286,8 +316,12 @@ def _check_stop_loss_reversals(
     noaa_cache: dict[str, dict],
     open_meteo_cache: dict[str, dict],
     dry_run: bool,
+    aviation_cache: dict[str, dict] | None = None,
 ) -> int:
     """Exit positions where the forecast has shifted away from our bucket.
+
+    When aviation observations are available, uses the observed temperature
+    instead of the forecast for more reliable stop-loss decisions.
 
     Returns number of stop-loss exits executed.
     """
@@ -304,13 +338,64 @@ def _check_stop_loss_reversals(
         noaa_day = noaa_cache.get(trade.location, {}).get(trade.forecast_date, {})
         metric = trade.metric  # Use the metric stored at trade time
 
-        noaa_temp = noaa_day.get(metric)
-        om_data = open_meteo_cache.get(trade.location, {}).get(trade.forecast_date)
+        # Prefer observed temperature over forecast when available,
+        # but only if the observation is late enough in the day that the
+        # extreme is meaningful (avoid premature stop-loss in the morning).
+        obs_data = None
+        if aviation_cache:
+            obs_data = aviation_cache.get(trade.location, {}).get(trade.forecast_date)
 
-        if config.multi_source and (noaa_temp is not None or om_data):
-            current_temp, _ = compute_ensemble_forecast(noaa_temp, om_data, metric)
+        if obs_data:
+            obs_key = f"obs_{metric}"
+            obs_temp = obs_data.get(obs_key)
+            latest_time = obs_data.get("latest_obs_time", "")
+
+            # Only trust obs for stop-loss when the daily extreme is likely
+            # to have been reached: after ~14:00 local for highs, ~08:00 for lows.
+            loc_data = LOCATIONS.get(trade.location, {})
+            utc_offset = loc_data.get("lon", -74.0)
+            # Approximate local hour from UTC
+            if utc_offset > -85:
+                tz_offset = -5.0
+            elif utc_offset > -100:
+                tz_offset = -6.0
+            elif utc_offset > -115:
+                tz_offset = -7.0
+            else:
+                tz_offset = -8.0
+
+            obs_usable = False
+            if obs_temp is not None and latest_time:
+                try:
+                    utc_hour = int(latest_time[11:13])
+                    local_hour = (utc_hour + tz_offset) % 24
+                    # For highs: trust after 14:00 local (peak likely passed)
+                    # For lows: trust after 08:00 local (morning low passed)
+                    if metric == "high" and local_hour >= 14:
+                        obs_usable = True
+                    elif metric == "low" and local_hour >= 8:
+                        obs_usable = True
+                except (ValueError, IndexError):
+                    pass
+
+            if obs_usable:
+                current_temp = obs_temp
+                logger.debug("Stop-loss using observed %s=%.1f°F for %s",
+                             metric, current_temp, trade.location)
+            else:
+                current_temp = None
         else:
-            current_temp = noaa_temp
+            current_temp = None
+
+        # Fall back to forecast if no observation
+        if current_temp is None:
+            noaa_temp = noaa_day.get(metric)
+            om_data = open_meteo_cache.get(trade.location, {}).get(trade.forecast_date)
+
+            if config.multi_source and (noaa_temp is not None or om_data):
+                current_temp, _ = compute_ensemble_forecast(noaa_temp, om_data, metric)
+            else:
+                current_temp = noaa_temp
 
         if current_temp is None:
             continue
@@ -436,12 +521,19 @@ def run_weather_strategy(
 
     noaa_cache: dict[str, dict] = {}  # location → {date: {high, low}}
     open_meteo_cache: dict[str, dict] = {}  # location → {date: {gfs_high, ecmwf_high, ...}}
+    aviation_cache: dict[str, dict] = {}  # location → {date: {obs_high, obs_low, ...}}
     trades_executed = 0
     opportunities_found = 0
 
-    # Parallel pre-fetch: NOAA + Open-Meteo for all active locations
+    # Parallel pre-fetch: NOAA + Open-Meteo + Aviation for all active locations
     active_locs = config.active_locations
-    logger.info("Pre-fetching forecasts for %d locations in parallel...", len(active_locs))
+    sources = ["NOAA"]
+    if config.multi_source:
+        sources.append("Open-Meteo")
+    if config.aviation_obs:
+        sources.append("METAR")
+    logger.info("Pre-fetching forecasts for %d locations (%s) in parallel...",
+                len(active_locs), " + ".join(sources))
 
     def _fetch_noaa(loc_name: str) -> tuple[str, dict]:
         return loc_name, get_noaa_forecast(
@@ -460,13 +552,26 @@ def run_weather_strategy(
             base_delay=config.retry_base_delay,
         )
 
-    with ThreadPoolExecutor(max_workers=len(active_locs) * 2) as pool:
+    def _fetch_aviation() -> dict[str, dict]:
+        return get_aviation_daily_data(
+            active_locs,
+            hours=config.aviation_hours,
+            max_retries=config.max_retries,
+            base_delay=config.retry_base_delay,
+        )
+
+    max_workers = len(active_locs) * 2 + (1 if config.aviation_obs else 0)
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
         # Submit all NOAA fetches
         noaa_futures = {pool.submit(_fetch_noaa, loc): loc for loc in active_locs}
         # Submit all Open-Meteo fetches (if enabled)
         om_futures = {}
         if config.multi_source:
             om_futures = {pool.submit(_fetch_open_meteo, loc): loc for loc in active_locs}
+        # Submit aviation fetch (single call for all stations)
+        aviation_future = None
+        if config.aviation_obs:
+            aviation_future = pool.submit(_fetch_aviation)
 
         for fut in as_completed(list(noaa_futures) + list(om_futures)):
             is_noaa = fut in noaa_futures
@@ -485,7 +590,21 @@ def run_weather_strategy(
             except Exception as exc:
                 logger.error("%s fetch crashed for %s: %s", source, loc, exc)
 
-    logger.info("Forecasts ready: NOAA=%d, Open-Meteo=%d", len(noaa_cache), len(open_meteo_cache))
+        # Collect aviation results
+        if aviation_future is not None:
+            try:
+                aviation_cache = aviation_future.result()
+                if aviation_cache:
+                    for loc, dates in aviation_cache.items():
+                        for date_str, obs in dates.items():
+                            state.update_daily_obs(loc, date_str, obs)
+                else:
+                    logger.warning("Aviation API returned no observations")
+            except Exception as exc:
+                logger.error("Aviation fetch crashed: %s", exc)
+
+    logger.info("Forecasts ready: NOAA=%d, Open-Meteo=%d, METAR=%d",
+                len(noaa_cache), len(open_meteo_cache), len(aviation_cache))
 
     for event_id, event_markets in events.items():
         event_name = event_markets[0].get("event_name", "") if event_markets else ""
@@ -521,15 +640,44 @@ def run_weather_strategy(
         day_forecast = forecasts.get(date_str, {})
         noaa_temp = day_forecast.get(metric)
 
-        # Multi-source ensemble forecast
+        # Aviation observations for this location/date
+        obs_data = aviation_cache.get(location, {}).get(date_str)
+        aviation_obs_temp = None
+        effective_aviation_weight = 0.0
+
+        if obs_data and config.aviation_obs:
+            obs_key = f"obs_{metric}"
+            aviation_obs_temp = obs_data.get(obs_key)
+            if aviation_obs_temp is not None:
+                # Dynamic weight: ×2 for day-J (today), ×1 for J+1, 0 for J+2+
+                if days_ahead == 0:
+                    effective_aviation_weight = config.aviation_obs_weight * 2.0
+                elif days_ahead == 1:
+                    effective_aviation_weight = config.aviation_obs_weight
+                else:
+                    effective_aviation_weight = 0.0
+                    aviation_obs_temp = None  # Don't use obs for distant dates
+
+                if aviation_obs_temp is not None:
+                    logger.info("METAR observed %s: %.1f°F (%d obs, latest %s)",
+                                metric, aviation_obs_temp,
+                                obs_data.get("obs_count", 0),
+                                obs_data.get("latest_obs_time", "?"))
+
+        # Multi-source ensemble forecast (now with optional aviation obs)
         om_data = open_meteo_cache.get(location, {}).get(date_str)
-        if config.multi_source and (noaa_temp is not None or om_data):
-            ensemble_temp, model_spread = compute_ensemble_forecast(noaa_temp, om_data, metric)
+        if config.multi_source and (noaa_temp is not None or om_data or aviation_obs_temp is not None):
+            ensemble_temp, model_spread = compute_ensemble_forecast(
+                noaa_temp, om_data, metric,
+                aviation_obs_temp=aviation_obs_temp,
+                aviation_obs_weight=effective_aviation_weight,
+            )
             if ensemble_temp is not None:
-                logger.info("Ensemble forecast: %.1f°F (NOAA=%s, spread=%.1f°F)",
+                obs_str = f", obs={aviation_obs_temp:.0f}°F" if aviation_obs_temp is not None else ""
+                logger.info("Ensemble forecast: %.1f°F (NOAA=%s, spread=%.1f°F%s)",
                              ensemble_temp,
                              f"{noaa_temp}°F" if noaa_temp is not None else "N/A",
-                             model_spread)
+                             model_spread, obs_str)
                 forecast_temp = ensemble_temp
             else:
                 forecast_temp = noaa_temp
@@ -567,8 +715,12 @@ def run_weather_strategy(
         logger.info("NOAA probability: %.1f%% (horizon %d days)", noaa_prob * 100, days_ahead)
 
         # Score all buckets (adjacent scoring) or just the matching one
+        # Pass obs_data for day-J and J+1 only
+        scoring_obs = obs_data if (obs_data and days_ahead <= 1 and config.aviation_obs) else None
         if config.adjacent_buckets:
-            scored = score_buckets(event_markets, forecast_temp, date_str, config)
+            scored = score_buckets(event_markets, forecast_temp, date_str, config,
+                                   obs_data=scoring_obs, metric=metric,
+                                   location=location)
             tradeable = [s for s in scored if s["ev"] >= config.min_ev_threshold]
         else:
             # Legacy: single-match
@@ -717,7 +869,8 @@ def run_weather_strategy(
 
     # Stop-loss: check if forecast has reversed away from our held positions
     if config.stop_loss_reversal:
-        _check_stop_loss_reversals(client, config, state, noaa_cache, open_meteo_cache, dry_run)
+        _check_stop_loss_reversals(client, config, state, noaa_cache, open_meteo_cache, dry_run,
+                                    aviation_cache=aviation_cache or None)
 
     # Check exits
     exits_found, exits_executed = check_exit_opportunities(

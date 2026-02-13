@@ -93,6 +93,11 @@ class Config:
     # Max exposure for portfolio calculation
     max_exposure: float = 50.0
 
+    # Aviation Weather observations (METAR)
+    aviation_obs: bool = True
+    aviation_obs_weight: float = 0.40
+    aviation_hours: int = 24
+
     @property
     def active_locations(self) -> list[str]:
         """Return canonical location keys matching LOCATIONS dict keys.
