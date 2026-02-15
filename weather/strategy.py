@@ -143,6 +143,7 @@ def score_buckets(
     metric: str = "high",
     location: str = "",
     weather_data: dict | None = None,
+    sigma_override: float | None = None,
 ) -> list[dict]:
     """Score all buckets in an event by expected value.
 
@@ -189,6 +190,7 @@ def score_buckets(
                 station_tz=station_tz,
                 location=location,
                 weather_data=weather_data,
+                sigma_override=sigma_override,
             )
         else:
             prob = estimate_bucket_probability(
@@ -197,6 +199,7 @@ def score_buckets(
                 location=location,
                 weather_data=weather_data,
                 metric=metric,
+                sigma_override=sigma_override,
             )
 
         ev = prob - price  # Expected value above break-even

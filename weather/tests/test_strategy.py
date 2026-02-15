@@ -3,6 +3,7 @@
 import json
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -318,6 +319,22 @@ class TestScoreBucketsWithNewParams(unittest.TestCase):
         self.assertEqual(len(center), 1)
         # Should use external_price_yes (0.35)
         self.assertAlmostEqual(center[0]["price"], 0.35, places=2)
+
+
+class TestScoreBucketsSigmaOverride(unittest.TestCase):
+
+    def test_sigma_override_affects_probability(self):
+        from weather.config import Config
+        config = Config()
+        config.min_probability = 0.0  # Don't filter out
+        markets = [
+            {"outcome_name": "50-54\u00b0F", "external_price_yes": 0.30, "best_ask": 0.30},
+        ]
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        scored_wide = score_buckets(markets, 52.0, today, config, metric="high", sigma_override=20.0)
+        scored_narrow = score_buckets(markets, 52.0, today, config, metric="high", sigma_override=2.0)
+        if scored_wide and scored_narrow:
+            self.assertGreater(scored_narrow[0]["prob"], scored_wide[0]["prob"])
 
 
 class TestActiveLocations(unittest.TestCase):

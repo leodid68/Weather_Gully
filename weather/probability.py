@@ -456,6 +456,7 @@ def estimate_bucket_probability_with_obs(
     station_tz: str = "",
     location: str = "",
     weather_data: dict | None = None,
+    sigma_override: float | None = None,
 ) -> float:
     """Estimate bucket probability with observation-based uncertainty reduction.
 
@@ -485,6 +486,7 @@ def estimate_bucket_probability_with_obs(
             forecast_temp, bucket_low, bucket_high,
             forecast_date, apply_seasonal=apply_seasonal,
             location=location, weather_data=weather_data,
+            sigma_override=sigma_override,
         )
 
     latest_obs_time = obs_data.get("latest_obs_time", "")
@@ -496,26 +498,30 @@ def estimate_bucket_probability_with_obs(
             forecast_temp, bucket_low, bucket_high,
             forecast_date, apply_seasonal=apply_seasonal,
             location=location, weather_data=weather_data,
+            sigma_override=sigma_override,
         )
 
     # Constrain forecast by observed extreme
     effective_temp = constrained_forecast(obs_extreme, forecast_temp, metric)
 
-    # Use intraday sigma (tighter than horizon-based sigma on resolution day)
-    tz_name = station_tz or _tz_from_lon(station_lon)
-    sigma = _intraday_sigma(latest_obs_time, metric, tz_name=tz_name)
+    if sigma_override is not None:
+        sigma = sigma_override
+    else:
+        # Use intraday sigma (tighter than horizon-based sigma on resolution day)
+        tz_name = station_tz or _tz_from_lon(station_lon)
+        sigma = _intraday_sigma(latest_obs_time, metric, tz_name=tz_name)
 
-    if apply_seasonal:
-        try:
-            month = int(forecast_date.split("-")[1])
-        except (IndexError, ValueError):
-            month = datetime.now(timezone.utc).month
-        factor = _get_seasonal_factor(month, location=location)
-        sigma *= factor
+        if apply_seasonal:
+            try:
+                month = int(forecast_date.split("-")[1])
+            except (IndexError, ValueError):
+                month = datetime.now(timezone.utc).month
+            factor = _get_seasonal_factor(month, location=location)
+            sigma *= factor
 
-    # Weather-based sigma adjustment
-    if weather_data:
-        sigma *= _weather_sigma_multiplier(weather_data, metric)
+        # Weather-based sigma adjustment
+        if weather_data:
+            sigma *= _weather_sigma_multiplier(weather_data, metric)
 
     # Guard against zero sigma
     if sigma <= 0:
