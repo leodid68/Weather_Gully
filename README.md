@@ -8,6 +8,7 @@ Polymarket lists daily temperature markets for 6 US cities: *"Will the highest t
 
 ## Table of Contents
 
+- [Code Quality](#code-quality)
 - [Architecture](#architecture)
 - [Data Pipeline](#data-pipeline)
 - [Weather Data Sources](#weather-data-sources)
@@ -26,6 +27,22 @@ Polymarket lists daily temperature markets for 6 US cities: *"Will the highest t
 - [Testing](#testing)
 - [Project Structure](#project-structure)
 - [Key Algorithms](#key-algorithms)
+
+---
+
+## Code Quality
+
+This codebase has been through **3 rounds of comprehensive code audit**, covering all 3 modules (`weather/`, `bot/`, `polymarket/`). ~50 bugs were identified and fixed across the audit rounds.
+
+**Current status:** 0 critical issues, 0 important issues remaining. 449 tests, all green.
+
+| Category | Examples of fixes applied |
+|----------|-------------------------|
+| **Security** | Private keys filtered from logs, API credentials use underscore-prefixed attributes with `__repr__` redaction |
+| **Order integrity** | Decimal arithmetic (no float rounding), zero-amount order guards, salt stringified, tick size validated |
+| **Robustness** | Atomic file writes (tempfile + `os.replace`), file locking (`fcntl.flock`), circuit breaker (5xx only), retry with exponential backoff |
+| **Trading logic** | Kelly/exposure formulas correct for BUY and SELL, stop-loss uses state (not API), seasonal month parsed from forecast date, pending orders verified before removal |
+| **Data pipeline** | Historical actuals chunked for >90 day ranges, Open-Meteo multi-location batching (6 cities in 3 API calls), Bessel's correction on model spread |
 
 ---
 
@@ -626,7 +643,7 @@ These match the exact stations Polymarket uses for market resolution.
 
 ### Prerequisites
 
-- Python 3.11+
+- Python 3.11+ (developed on Python 3.14)
 - An Ethereum wallet with USDC on Polygon (for live trading only)
 
 ### Setup
@@ -849,80 +866,396 @@ python3 -m polymarket price <token_id>
 
 ## Usage Recommendations
 
-### Getting Started
+### Step-by-Step Getting Started
 
-1. **Start with dry-run mode** — Always run without `--live` first to understand what the bot would trade. Check the logs for opportunity detection, probability estimates, and edge calculations.
+Follow these steps **in order** — each one builds on the previous.
 
-2. **Calibrate before trading** — Run `python3 -m weather.calibrate` to generate `calibration.json`. Without it, the bot uses hardcoded defaults that are reasonable but not optimized for current conditions.
+#### Step 1: Install and verify
 
-3. **Paper trade first** — Run `python3 -m weather.paper_trade` daily to simulate trading with real Polymarket prices. This accumulates price snapshots and tracks predictions for resolution. Review the P&L summary after a few days.
+```bash
+git clone <repo-url> && cd Weather_Gully
+pip install httpx eth-account eth-abi eth-utils websockets certifi
+python3 -m pytest -q  # 449 tests should pass
+```
 
-4. **Backtest** — Use `python3 -m weather.backtest` to validate on historical data. After accumulating paper trading data, use `--snapshot-path weather/price_snapshots.json` for realistic pricing. Aim for a Brier score < 0.25 and a positive total P&L before going live.
+#### Step 2: First dry-run
 
-5. **Start with 1 location** — Begin with `--set locations=NYC` (highest liquidity) before adding more cities. Each location adds API calls and potential positions.
+```bash
+python3 -m weather --dry-run --verbose
+```
+
+Read the output carefully. You should see:
+- `Fetched N markets from M events` — Polymarket connection works
+- `NOAA forecast for NYC: 7 days` — NOAA API works
+- `Open-Meteo: 6 locations in 3 request(s)` — Open-Meteo works
+- `METAR: N observations across 6 stations` — aviation API works
+- `Bucket: XX-YY°F @ $0.xx — prob=XX.X% EV=0.xxx` — probability model works
+- `Safeguard blocked: ...` — safeguards correctly prevent reckless trades
+
+If any API fails, the bot logs warnings and continues with available data sources.
+
+#### Step 3: Calibrate
+
+```bash
+python3 -m weather.calibrate \
+  --locations NYC,Chicago,Seattle,Atlanta,Dallas,Miami \
+  --start-date 2025-01-01 --end-date 2026-01-01
+```
+
+This takes 2-5 minutes (chunked API calls). It produces `weather/calibration.json` with empirical sigma values, seasonal factors, and model weights. **Without calibration, the bot uses hardcoded defaults that are reasonable but not optimized.**
+
+Run dry-run again after calibration — you should see `Loaded calibration data (8760 samples)` in the logs.
+
+#### Step 4: Paper trade (1-2 weeks)
+
+```bash
+# Run daily (or set up a cron job)
+python3 -m weather.paper_trade --verbose
+```
+
+Paper trading uses real Polymarket prices but submits no orders. It:
+- Records trades in `weather/paper_state.json` (separate from real state)
+- Saves price snapshots to `weather/price_snapshots.json`
+- Resolves past predictions and prints a P&L summary
+
+After a few days, you'll have a track record to evaluate.
+
+#### Step 5: Backtest
+
+```bash
+# With real price snapshots from paper trading
+python3 -m weather.backtest --locations NYC \
+  --start-date 2026-02-01 --end-date 2026-02-15 \
+  --snapshot-path weather/price_snapshots.json
+
+# Or with synthetic pricing on historical data
+python3 -m weather.backtest --locations NYC,Chicago \
+  --start-date 2025-06-01 --end-date 2025-12-31 \
+  --output backtest_report.json
+```
+
+**Target metrics before going live:**
+- Brier score < 0.25 (probability estimates are well-calibrated)
+- Positive total P&L
+- Max drawdown < 30% of total risked
+
+#### Step 6: Go live (small)
+
+```bash
+# Set up credentials
+export POLY_PRIVATE_KEY=0x...
+
+# Ensure on-chain approvals are in place
+python3 -m polymarket.approve
+
+# Start with 1 location, low limits
+python3 -m weather --live \
+  --set locations=NYC \
+  --set max_position_usd=2.00 \
+  --set max_exposure=20.00 \
+  --verbose
+```
+
+Monitor the first few trades closely. Once comfortable, expand:
+
+```bash
+# All 6 locations with higher limits
+python3 -m weather --live \
+  --set locations=NYC,Chicago,Seattle,Atlanta,Dallas,Miami \
+  --set max_position_usd=5.00 \
+  --set max_exposure=50.00
+```
+
+#### Step 7: Automate with cron
+
+```bash
+# Edit crontab
+crontab -e
+
+# Run every 30 minutes from 8am to 10pm UTC, Monday-Sunday
+*/30 8-22 * * * cd /path/to/Weather_Gully && python3 -m weather --live --json-log >> /var/log/weather_gully.log 2>&1
+```
+
+The file lock prevents concurrent runs — if a previous run is still active, the new one exits cleanly.
+
+For continuous operation, use daemon mode instead:
+
+```bash
+# Start daemon (runs in background with auto-restart)
+nohup python3 -m bot --daemon --live --weather > /var/log/weather_gully.log 2>&1 &
+
+# Check health
+python3 -m bot --health
+```
+
+---
 
 ### Optimal Timing
 
-- **Best edge:** Resolution day (day-J), especially after 14:00 local time. Intraday sigma drops to 0.5-1.0°F, enabling high-confidence trades. The observed running extreme constrains the forecast, often creating mispriced tails.
+| Window | Horizon | Sigma | Edge Quality | Recommendation |
+|--------|---------|-------|--------------|----------------|
+| **Day-J after 14:00 local** | 0 days | 0.5-1.0°F | Excellent | Best time to trade. METAR observations constrain the forecast, creating high-confidence mispriced tails. |
+| **Day-J morning** | 0 days | 2.0-3.0°F | Good | Intraday sigma is still moderate. Only trade if edge > 20c. |
+| **Day J-1** | 1 day | ~2.6°F | Good | Forecasts are fairly tight. Markets haven't fully adjusted. |
+| **Day J-2 to J-3** | 2-3 days | 3.3-3.9°F | Moderate | Tradeable only with large discrepancies (edge > 15c). |
+| **Day J-5+** | 5+ days | >5°F | Weak | Sigma too wide for reliable probability estimates. Skip unless edge > 25c. |
 
-- **Good edge:** Day before resolution (J-1), when the ensemble forecast is already fairly tight (sigma ~2.6°F) and markets haven't fully adjusted.
+**Key insight:** The bot's biggest advantage is on **resolution day afternoons**. At 15:00 local time, if the running observed high is 52°F and the market for "55°F or higher" is at 20c, the intraday sigma (0.5-1.0°F) tells you this bucket has only ~2% probability — a massive edge.
 
-- **Weak edge:** Day J-5 and beyond. Sigma grows rapidly (>5°F), making probability estimates wide. Only trade if there's a very large discrepancy between your estimate and the market price.
+**Run frequency:**
+- **Cron:** Every 30 minutes during market hours captures intraday observation updates
+- **Daemon:** `run_interval_seconds=300` (5 minutes) is a good default
+- **Manual:** At minimum, run once in the morning and once in the afternoon for each resolution day
 
-- **Run frequency:** For a cron-based setup, run every 30-60 minutes during market hours. For daemon mode, the `run_interval_seconds` config controls the cycle (default: 300s). More frequent runs capture intraday observation updates.
+---
 
-### Risk Tuning
+### Risk Tuning Guide
 
-- **Conservative start:** Keep defaults (`kelly_fraction=0.25`, `max_position_usd=2.00`, `max_exposure=50.00`). Quarter-Kelly is intentionally conservative — full Kelly is theoretically optimal but has extreme variance.
+#### Conservative (recommended for start)
 
-- **Entry threshold:** The default 0.15 (15c edge) is strict. Lower to 0.10 for more trades with smaller edges, or raise to 0.20 for fewer but higher-conviction trades.
+```bash
+python3 -m weather --live \
+  --set kelly_fraction=0.25 \
+  --set max_position_usd=2.00 \
+  --set max_exposure=20.00 \
+  --set entry_threshold=0.15
+```
 
-- **Stop-loss threshold:** The default 5°F shift is reasonable for most markets. In volatile winter weather, consider raising to 7°F to avoid premature stop-losses from normal forecast oscillation.
+- Quarter-Kelly limits downside variance
+- $2 max per position limits individual trade risk
+- $20 total exposure means max 10 concurrent positions
+- 15c entry threshold = only high-conviction trades
 
-- **Correlation guard:** Keep enabled (`correlation_guard=true`). Without it, the bot could take positions on multiple buckets of the same event, creating correlated risk.
+#### Moderate (after 2+ weeks of profitable paper trading)
 
-### Location-Specific Notes
+```bash
+python3 -m weather --live \
+  --set kelly_fraction=0.25 \
+  --set max_position_usd=5.00 \
+  --set max_exposure=50.00 \
+  --set entry_threshold=0.12
+```
 
-- **NYC (LaGuardia):** Highest volume, tightest spreads. Best liquidity for all bucket positions. Coastal location means higher winter uncertainty (nor'easters, ocean influence).
+#### Aggressive (experienced, with proven Brier < 0.20)
 
-- **Chicago (O'Hare):** Continental climate — large daily temperature swings, especially in spring/fall. Forecast uncertainty is moderate. Good liquidity.
+```bash
+python3 -m weather --live \
+  --set kelly_fraction=0.35 \
+  --set max_position_usd=10.00 \
+  --set max_exposure=100.00 \
+  --set entry_threshold=0.10
+```
 
-- **Miami:** Subtropical — smallest daily variation, most stable forecasts (low sigma). Markets tend to be tighter but the edge is correspondingly smaller.
+**Never exceed `kelly_fraction=0.50`** — above half-Kelly, variance grows exponentially while expected return plateaus.
 
-- **Seattle:** Marine climate — narrow temperature range but cloud cover and maritime influence create forecast challenges. Higher sigma for highs due to cloud cover effects.
+#### Key Parameters Explained
 
-- **Dallas/Atlanta:** Good liquidity with moderate forecast difficulty. Summer forecasts are very stable (high confidence), but severe weather days can create large errors.
+| Parameter | Effect of raising | Effect of lowering |
+|-----------|------------------|--------------------|
+| `entry_threshold` | Fewer trades, higher average edge | More trades, includes marginal opportunities |
+| `kelly_fraction` | Larger position sizes, higher variance | Smaller positions, smoother equity curve |
+| `max_position_usd` | More capital per trade | Limits individual trade exposure |
+| `max_exposure` | More total capital at risk | Limits aggregate portfolio risk |
+| `stop_loss_reversal_threshold` | Tolerates more forecast drift | Exits faster on reversal (may be premature in winter) |
+| `slippage_max_pct` | Accepts wider spreads | Requires tighter spreads (may miss opportunities) |
+
+---
+
+### Location-Specific Strategy
+
+| City | Calibrated Sigma | Best Season | Liquidity | Notes |
+|------|-----------------|-------------|-----------|-------|
+| **NYC** | 2.15°F | Summer | Highest | Best starting location. Coastal — higher winter uncertainty (nor'easters). Tightest spreads on Polymarket. |
+| **Chicago** | 1.83°F | Fall | Good | Continental climate — large swings in spring/fall. Good calibration data. |
+| **Miami** | 1.94°F | Year-round | Moderate | Subtropical — smallest daily variation, most stable forecasts. Tight markets but smaller edges. |
+| **Seattle** | 1.73°F | Summer | Moderate | Marine — narrow range but cloud cover creates forecast challenges. Lowest sigma = tightest probability estimates. |
+| **Atlanta** | 1.89°F | Fall | Good | Moderate difficulty. Severe weather days (thunderstorms) can create large errors. |
+| **Dallas** | 1.99°F | Summer | Good | Hot summers are very predictable. Winter cold fronts add uncertainty. |
+
+**Recommendations:**
+- Start with **NYC only** (highest liquidity, most trades available)
+- Add **Chicago + Atlanta** after 1 week (good liquidity, different climate)
+- Add **Miami + Dallas + Seattle** once comfortable (full coverage)
+- **Seasonal re-calibration:** Winter months (Dec-Feb) have higher sigma — the bot adjusts automatically via `seasonal_factors`, but re-running calibration quarterly improves accuracy
+
+---
+
+### Reading the Logs
+
+The bot outputs structured logs. Here's how to interpret key messages:
+
+#### Healthy Operation
+
+```
+Fetched 452 active weather markets           # Market discovery successful
+Open-Meteo: 6 locations in 3 request(s)     # API batching working (6 locations, 3 API calls)
+METAR: 160 observations across 6 stations   # Real-time observations available
+Ensemble forecast: 48.0°F (NOAA=47°F, spread=1.3°F)  # Low spread = models agree
+Bucket: 46-47°F @ $0.08 — prob=34.8% EV=0.269        # Good edge found
+[DRY RUN] Would buy ...                     # Trade correctly blocked in dry-run
+```
+
+#### Warnings to Watch
+
+```
+Safeguard blocked: Slippage too high: 45%    # Spread too wide — normal for illiquid buckets
+Safeguard blocked: Resolves in 0.0h — too soon  # Market resolving now — correct to skip
+Price $0.30 above entry threshold — skip     # Price already too high — no edge
+Exit check: 2 trade(s) have no cached market data  # Stale positions — may need manual review
+STOP-LOSS: NYC forecast shifted 7.2°F       # Forecast reversed — position exited
+```
+
+#### Problems to Investigate
+
+```
+Open-Meteo failed after 3 retries           # API rate limit or outage — bot continues with NOAA only
+NOAA forecast for NYC: 0 days               # NOAA API down — ensemble uses Open-Meteo + METAR only
+Trade failed: Circuit breaker OPEN           # 5+ consecutive server errors — wait 60s cooldown
+Could not verify fill for order              # Exchange API timeout — check position manually
+```
+
+---
 
 ### Monitoring & Maintenance
 
-- **Check logs regularly** — Look for `STOP-LOSS`, `EXIT`, and `Trade failed` messages. Frequent stop-losses may indicate the sigma is too narrow or the entry threshold is too low.
+#### Daily Checks
 
-- **Re-calibrate periodically** — Run calibration quarterly or when you notice Brier scores degrading. Weather model accuracy varies seasonally and improves as NWP models are updated.
+1. **Review trade log:** Look for unexpected stop-losses or failed fills
+2. **Check positions:** `python3 -m weather --positions` shows open positions
+3. **Verify state file:** `weather/weather_state.json` should contain current trades
 
-- **Monitor Brier score** — Use `python3 -m bot --calibration` to check prediction quality. A degrading Brier score signals that your probability model needs recalibration.
+#### Weekly Checks
 
-- **State file health** — The state file (`weather_state.json`) is written atomically and locked for concurrent access. If it becomes corrupted (rare), simply delete it — the bot will start fresh with no open positions.
+1. **Check calibration scores:** `python3 -m bot --calibration`
+   - Brier score < 0.25 = good calibration
+   - Brier score > 0.30 = re-calibrate immediately
+2. **Review paper trade P&L** (if running in parallel): `python3 -m weather.paper_trade`
+3. **Check for stale pending orders:** Look for `Removing stale pending_fill` in logs
 
-- **Daemon health check** — `python3 -m bot --health` checks PID file and heartbeat. If the heartbeat is stale (>5 minutes), the daemon may be stuck.
+#### Quarterly Maintenance
+
+1. **Re-calibrate:**
+   ```bash
+   python3 -m weather.calibrate \
+     --locations NYC,Chicago,Seattle,Atlanta,Dallas,Miami \
+     --start-date <12-months-ago> --end-date <today>
+   ```
+2. **Update dependencies:** `pip install --upgrade httpx eth-account eth-abi`
+3. **Prune state file:** Old predictions are auto-pruned, but if the file grows >1MB, delete and restart clean
+
+#### State File Recovery
+
+If the state file becomes corrupted (extremely rare thanks to atomic writes):
+
+```bash
+# Back up the corrupted file
+cp weather/weather_state.json weather/weather_state.json.bak
+
+# Delete it — the bot starts fresh with no positions
+rm weather/weather_state.json
+
+# IMPORTANT: Manually close any open positions on Polymarket
+# The bot won't know about positions from the deleted state
+```
+
+#### Daemon Management
+
+```bash
+# Start
+nohup python3 -m bot --daemon --live --weather > weather.log 2>&1 &
+
+# Check status
+python3 -m bot --health
+
+# Graceful stop (SIGTERM — completes current cycle)
+kill $(cat /tmp/weather_bot.pid)
+
+# Emergency stop (SIGINT)
+kill -INT $(cat /tmp/weather_bot.pid)
+
+# View recent logs
+tail -f weather.log | grep -E "INFO|WARNING|ERROR"
+```
+
+---
 
 ### What to Avoid
 
-- **Don't disable safeguards in live mode** — The `--no-safeguards` flag exists for testing. In production, slippage checks and time-to-resolution guards prevent bad trades.
+| Mistake | Why It's Dangerous | What to Do Instead |
+|---------|-------------------|-------------------|
+| `--live` without dry-run first | You don't know what the bot would trade | Always `--dry-run` first on a new config |
+| `kelly_fraction > 0.50` | Exponential variance growth, risk of ruin | Stay at 0.25 (quarter-Kelly) |
+| `--no-safeguards` in live mode | Removes slippage, time-to-resolution, correlation checks | Only use for testing/paper trading |
+| Trading without `calibration.json` | Hardcoded sigma is an average — not optimal for any specific city | Run `python3 -m weather.calibrate` first |
+| Multiple instances on same state file | File lock prevents corruption but causes skipped runs | Use separate state files or daemon mode |
+| Ignoring model spread > 5°F | GFS and ECMWF disagree = high uncertainty | Bot logs spread — manually review trades when spread is high |
+| Going live on day 1 | No track record to validate | Paper trade for 1-2 weeks first |
+| Setting `max_exposure` too high | One bad day can wipe out gains | Start with $20, raise to $50 after profitability confirmed |
+| Ignoring stale cache warnings | Positions may not be exitable | Check `Exit check: N trade(s) have no cached market data` warnings |
+| Running during API outages | Partial data leads to poor probability estimates | Bot degrades gracefully but consider pausing if 2+ sources are down |
 
-- **Don't trade without calibration on new locations** — Hardcoded defaults are averages. If Polymarket adds new cities, calibrate on historical data before trading there.
+---
 
-- **Don't set `kelly_fraction` > 0.5** — Higher Kelly fractions increase theoretical returns but also dramatically increase drawdown variance. Quarter-Kelly (0.25) is the recommended ceiling.
+### Troubleshooting
 
-- **Don't ignore the model spread** — When GFS and ECMWF disagree by >5°F, forecast uncertainty is much higher than sigma alone suggests. The bot logs model spread for this reason.
+| Symptom | Cause | Solution |
+|---------|-------|----------|
+| `0 weather markets found` | Gamma API down or no active weather events | Wait — Polymarket may not have events for today |
+| `Open-Meteo failed after 3 retries` | Rate limited (free API, 10K req/day) | Wait 1-2 minutes. Bot batches locations to minimize calls (6 locations = 3 requests). |
+| `No tradeable buckets above EV threshold` | No edge — market prices already efficient | Normal. Bot is working correctly — no trade is the right call. |
+| `Safeguard blocked: Resolves in 0.0h` | Market is resolving right now | Correct behavior — don't trade at resolution time |
+| `Circuit breaker OPEN` | 5+ consecutive CLOB API server errors | Wait 60s. If persistent, check Polymarket status. |
+| `Could not verify fill` | Exchange API slow | Order may be filled — check Polymarket UI. Bot records as `pending_fill`. |
+| `State lock: another instance running` | Concurrent bot run | Wait for the other instance to finish, or kill it. |
+| All tests fail with `ModuleNotFoundError` | Dependencies not installed | Run `pip install httpx eth-account eth-abi eth-utils websockets certifi` |
+| `SSL: CERTIFICATE_VERIFY_FAILED` | macOS Python missing certificates | Run `pip install certifi`. The bot auto-falls back but logs a CRITICAL warning. |
 
-- **Don't run multiple bot instances on the same state file** — The file lock prevents corruption, but two instances fighting for the lock will cause skipped runs. Use separate state files if you need parallel instances.
+---
+
+### Advanced: Multi-Strategy Setup
+
+You can run the weather bot alongside the general market bot for diversified edge:
+
+```bash
+# Terminal 1: Weather strategy (temperature markets)
+python3 -m weather --live --set locations=NYC,Chicago,Miami
+
+# Terminal 2: General bot (longshot bias, arbitrage, microstructure)
+python3 -m bot --live --daemon
+
+# They use separate state files and don't conflict
+# Weather: weather/weather_state.json
+# Bot:     state.json
+```
+
+### Advanced: Custom Calibration Periods
+
+```bash
+# Summer-only calibration (most stable, good for summer trading)
+python3 -m weather.calibrate --locations NYC \
+  --start-date 2025-06-01 --end-date 2025-09-01
+
+# Winter-only (most challenging, calibrates for worst case)
+python3 -m weather.calibrate --locations NYC,Chicago \
+  --start-date 2024-12-01 --end-date 2025-03-01
+
+# Rolling 6-month (recent data, captures model improvements)
+python3 -m weather.calibrate \
+  --locations NYC,Chicago,Seattle,Atlanta,Dallas,Miami \
+  --start-date 2025-08-01 --end-date 2026-02-01
+```
+
+Choose the calibration window based on what you're trading:
+- **Trading in summer?** Calibrate on last summer's data
+- **Year-round?** Use a full year for the most robust sigma
+- **Conservative?** Calibrate on winter data (highest sigma = widest uncertainty bands)
 
 ---
 
 ## Testing
 
 ```bash
-# Run all 380 tests
+# Run all 449 tests
 python3 -m pytest -q
 
 # Weather tests only
@@ -943,9 +1276,9 @@ python3 -m pytest weather/tests/test_strategy.py -v
 
 | Package | Tests | Key coverage |
 |---------|-------|-------------|
-| `weather/` | ~254 tests | Strategy, bridge, paper bridge, NOAA, Open-Meteo, aviation/METAR, probability, calibration, backtesting, sizing, state, parsing |
-| `bot/` | ~80 tests | Scanner, signals, scoring, sizing, daemon, Gamma API |
-| `polymarket/` | ~46 tests | Order signing, HMAC auth, client REST, fill detection |
+| `weather/` | ~266 tests | Strategy, bridge, paper bridge, NOAA, Open-Meteo (single + multi-location), aviation/METAR, probability, calibration, backtesting, sizing, state, parsing |
+| `bot/` | ~137 tests | Scanner, signals, scoring, sizing, daemon, Gamma API, strategy, state |
+| `polymarket/` | ~46 tests | Order signing, HMAC auth, client REST, circuit breaker, fill detection |
 
 All external API calls are mocked. Test fixtures in `weather/tests/fixtures/` include realistic METAR responses.
 
