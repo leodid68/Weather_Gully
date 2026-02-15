@@ -22,6 +22,7 @@ from .probability import (
 )
 from .bridge import CLOBWeatherBridge
 from .feedback import FeedbackState
+from .sigma_log import log_sigma_signals
 from .sizing import compute_exit_threshold, compute_position_size
 from .state import PredictionRecord, TradingState
 
@@ -749,6 +750,16 @@ def run_weather_strategy(
             adaptive_sigma_value = compute_adaptive_sigma(
                 ensemble_result, model_spread if config.multi_source else 0.0,
                 ema_error, date_str, location,
+            )
+            log_sigma_signals(
+                location=location,
+                date=date_str,
+                metric=metric,
+                ensemble_stddev=ensemble_result.ensemble_stddev,
+                model_spread=model_spread if config.multi_source else 0.0,
+                ema_error=ema_error,
+                final_sigma=adaptive_sigma_value,
+                forecast_temp=forecast_temp,
             )
 
         # Feedback bias correction (before delta detection so both use corrected temp)
