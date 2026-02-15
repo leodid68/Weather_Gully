@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -151,7 +153,8 @@ class PaperBridge:
             "cost_basis": avg_cost,
         }
         self._total_exposure += price * shares
-        self._position_count += 1
+        if old_shares == 0:
+            self._position_count += 1
 
         logger.info(
             "[PAPER] BUY %.1f shares of %s @ $%.4f ($%.2f)",
@@ -245,7 +248,7 @@ class PaperBridge:
             })
 
     def save_snapshots(self, path: str) -> None:
-        """Append collected snapshots to a JSON file."""
+        """Append collected snapshots to a JSON file (atomic write)."""
         if not self._snapshots:
             return
 
@@ -260,8 +263,17 @@ class PaperBridge:
 
         existing.extend(self._snapshots)
 
-        with open(file_path, "w") as f:
-            json.dump(existing, f, indent=2)
+        fd, tmp = tempfile.mkstemp(dir=str(file_path.parent), suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w") as f:
+                json.dump(existing, f, indent=2)
+            os.replace(tmp, str(file_path))
+        except BaseException:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
 
         logger.info("Saved %d price snapshots to %s (total: %d)",
                      len(self._snapshots), path, len(existing))

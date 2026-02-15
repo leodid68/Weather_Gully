@@ -17,7 +17,7 @@ from pathlib import Path
 from .config import Config
 from .feedback import FeedbackState
 from .paper_bridge import PaperBridge
-from .state import TradingState
+from .state import TradingState, state_lock
 from .strategy import run_weather_strategy
 
 logger = logging.getLogger(__name__)
@@ -167,35 +167,37 @@ def main() -> None:
     )
     paper_bridge = PaperBridge(real_bridge)
 
-    # Load paper-specific state (separate from real trading state)
-    state = TradingState.load(_PAPER_STATE_FILE)
-    logger.info("Loaded paper state: %d trades, %d predictions",
-                len(state.trades), len(state.predictions))
+    # Acquire exclusive lock to prevent concurrent paper runs from corrupting state
+    with state_lock(_PAPER_STATE_FILE):
+        # Load paper-specific state (separate from real trading state)
+        state = TradingState.load(_PAPER_STATE_FILE)
+        logger.info("Loaded paper state: %d trades, %d predictions",
+                    len(state.trades), len(state.predictions))
 
-    # Resolve past predictions and feed feedback
-    _resolve_predictions(state, gamma)
-    feedback = FeedbackState.load()
-    _feed_feedback(state, feedback)
-    feedback.save()
-    _print_pnl_summary(state)
+        # Resolve past predictions and feed feedback
+        _resolve_predictions(state, gamma)
+        feedback = FeedbackState.load()
+        _feed_feedback(state, feedback)
+        feedback.save()
+        _print_pnl_summary(state)
 
-    # Run strategy with PaperBridge — dry_run=False so trades go through
-    # the bridge (which simulates them), not skipped as dry_run
-    run_weather_strategy(
-        client=paper_bridge,
-        config=config,
-        state=state,
-        dry_run=False,
-        use_safeguards=not args.no_safeguards,
-        state_path=_PAPER_STATE_FILE,
-    )
+        # Run strategy with PaperBridge — dry_run=False so trades go through
+        # the bridge (which simulates them), not skipped as dry_run
+        run_weather_strategy(
+            client=paper_bridge,
+            config=config,
+            state=state,
+            dry_run=False,
+            use_safeguards=not args.no_safeguards,
+            state_path=_PAPER_STATE_FILE,
+        )
 
-    # Save price snapshots
-    paper_bridge.save_snapshots(_SNAPSHOTS_FILE)
+        # Save price snapshots
+        paper_bridge.save_snapshots(_SNAPSHOTS_FILE)
 
-    # Save paper state
-    state.save(_PAPER_STATE_FILE)
-    logger.info("Paper state saved to %s", _PAPER_STATE_FILE)
+        # Save paper state
+        state.save(_PAPER_STATE_FILE)
+        logger.info("Paper state saved to %s", _PAPER_STATE_FILE)
 
 
 if __name__ == "__main__":

@@ -24,8 +24,8 @@ def _make_client(**kwargs) -> PolymarketClient:
 class TestClientInit:
     def test_stores_creds(self):
         client = _make_client()
-        assert client.api_key == "test-api-key"
-        assert client.passphrase == "test-passphrase"
+        assert client._api_key == "test-api-key"
+        assert client._passphrase == "test-passphrase"
         client.close()
 
     @patch("polymarket.client.derive_api_key")
@@ -33,7 +33,7 @@ class TestClientInit:
         mock_derive.return_value = _FAKE_CREDS
         client = PolymarketClient(private_key=_FAKE_KEY)
         mock_derive.assert_called_once_with(_FAKE_KEY)
-        assert client.api_key == "test-api-key"
+        assert client._api_key == "test-api-key"
         client.close()
 
 
@@ -270,4 +270,4 @@ class TestCircuitBreaker:
 class TestContextManager:
     def test_context_manager(self):
         with _make_client() as client:
-            assert client.api_key == "test-api-key"
+            assert client._api_key == "test-api-key"

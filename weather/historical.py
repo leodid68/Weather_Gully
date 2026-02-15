@@ -145,35 +145,48 @@ def get_historical_actuals(
             ...
         }
     """
-    url = (
-        f"{_ACTUALS_ARCHIVE_BASE}"
-        f"?latitude={lat}&longitude={lon}"
-        f"&daily=temperature_2m_max,temperature_2m_min"
-        f"&temperature_unit=fahrenheit"
-        f"&timezone={tz_name}"
-        f"&start_date={start_date}"
-        f"&end_date={end_date}"
-    )
-
-    data = _fetch_json(url, max_retries=max_retries, base_delay=base_delay)
-    if not data or "daily" not in data:
-        logger.error("Historical actuals: no daily data returned")
-        return {}
-
-    daily = data["daily"]
-    dates = daily.get("time", [])
-    highs = daily.get("temperature_2m_max", [])
-    lows = daily.get("temperature_2m_min", [])
+    start_dt = datetime.strptime(start_date, "%Y-%m-%d")
+    end_dt = datetime.strptime(end_date, "%Y-%m-%d")
 
     actuals: dict[str, dict] = {}
-    for i, date_str in enumerate(dates):
-        entry: dict = {}
-        if i < len(highs) and highs[i] is not None:
-            entry["high"] = round(float(highs[i]), 1)
-        if i < len(lows) and lows[i] is not None:
-            entry["low"] = round(float(lows[i]), 1)
-        if entry:
-            actuals[date_str] = entry
+    _CHUNK_DAYS = 90  # Open-Meteo allows up to ~92 days per request
+
+    current = start_dt
+    while current <= end_dt:
+        chunk_end = min(current + timedelta(days=_CHUNK_DAYS - 1), end_dt)
+        chunk_start_str = current.strftime("%Y-%m-%d")
+        chunk_end_str = chunk_end.strftime("%Y-%m-%d")
+
+        url = (
+            f"{_ACTUALS_ARCHIVE_BASE}"
+            f"?latitude={lat}&longitude={lon}"
+            f"&daily=temperature_2m_max,temperature_2m_min"
+            f"&temperature_unit=fahrenheit"
+            f"&timezone={tz_name}"
+            f"&start_date={chunk_start_str}"
+            f"&end_date={chunk_end_str}"
+        )
+
+        data = _fetch_json(url, max_retries=max_retries, base_delay=base_delay)
+        if data and "daily" in data:
+            daily = data["daily"]
+            dates = daily.get("time", [])
+            highs = daily.get("temperature_2m_max", [])
+            lows = daily.get("temperature_2m_min", [])
+
+            for i, date_str in enumerate(dates):
+                if date_str in actuals:
+                    continue
+                entry: dict = {}
+                if i < len(highs) and highs[i] is not None:
+                    entry["high"] = round(float(highs[i]), 1)
+                if i < len(lows) and lows[i] is not None:
+                    entry["low"] = round(float(lows[i]), 1)
+                if entry:
+                    actuals[date_str] = entry
+
+        current = chunk_end + timedelta(days=1)
+        time.sleep(0.3)
 
     logger.info("Historical actuals: %d days loaded", len(actuals))
     return actuals

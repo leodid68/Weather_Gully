@@ -23,6 +23,12 @@ from .constants import (
 )
 
 POLYGON_RPC = "https://polygon-rpc.com"
+
+
+class ApprovalError(Exception):
+    """Raised when an approval transaction reverts."""
+
+
 MAX_UINT256 = 2**256 - 1
 
 # Third spender: Neg Risk Adapter (wraps ConditionalTokens for neg-risk markets)
@@ -69,10 +75,11 @@ def _get_gas_params() -> tuple[int, int]:
     return max_fee, max_priority
 
 
-def _send_tx(private_key: str, to: str, calldata: bytes) -> str:
+def _send_tx(private_key: str, to: str, calldata: bytes, nonce: int | None = None) -> str:
     """Build, sign, and send an EIP-1559 transaction. Returns tx hash."""
     acct = Account.from_key(private_key)
-    nonce = int(_rpc("eth_getTransactionCount", [acct.address, "latest"]), 16)
+    if nonce is None:
+        nonce = int(_rpc("eth_getTransactionCount", [acct.address, "latest"]), 16)
     max_fee, max_priority = _get_gas_params()
 
     gas_estimate = int(_rpc("eth_estimateGas", [{
@@ -120,8 +127,7 @@ def _confirm_tx(tx_hash: str, label: str) -> None:
     if status == 1:
         print(f"    SUCCESS (block {int(receipt['blockNumber'], 16)})")
     else:
-        print(f"    REVERTED! {label}")
-        sys.exit(1)
+        raise ApprovalError(f"Transaction reverted: {label} (tx: {tx_hash})")
 
 
 # -- Check functions --
@@ -138,24 +144,15 @@ def check_ct_approval(owner: str, operator: str) -> bool:
     return int(result, 16) != 0
 
 
-# -- Approve functions --
-
-def approve_usdc(private_key: str, spender: str) -> str:
-    calldata = APPROVE_SELECTOR + encode(["address", "uint256"], [spender, MAX_UINT256])
-    return _send_tx(private_key, USDC_ADDRESS, calldata)
-
-
-def approve_ct(private_key: str, operator: str) -> str:
-    calldata = SET_APPROVAL_FOR_ALL_SELECTOR + encode(["address", "bool"], [operator, True])
-    return _send_tx(private_key, CONDITIONAL_TOKENS, calldata)
-
-
 # -- Main --
 
 def approve_exchanges(private_key: str) -> None:
     """Set all 6 approvals needed for Polymarket trading."""
     acct = Account.from_key(private_key)
     print(f"Wallet: {acct.address}\n")
+
+    # Track nonce locally to avoid collisions on rapid transactions
+    nonce = int(_rpc("eth_getTransactionCount", [acct.address, "latest"]), 16)
 
     # Part 1: USDC.e approve for all 3 spenders
     print("=== USDC.e Approvals ===")
@@ -165,7 +162,9 @@ def approve_exchanges(private_key: str) -> None:
             print(f"  {name}: already approved")
             continue
         print(f"  {name} ({spender}): approving USDC.e...")
-        tx_hash = approve_usdc(private_key, spender)
+        calldata = APPROVE_SELECTOR + encode(["address", "uint256"], [spender, MAX_UINT256])
+        tx_hash = _send_tx(private_key, USDC_ADDRESS, calldata, nonce=nonce)
+        nonce += 1
         _confirm_tx(tx_hash, f"USDC approve for {name}")
 
     # Part 2: ConditionalTokens setApprovalForAll for all 3 spenders
@@ -176,7 +175,9 @@ def approve_exchanges(private_key: str) -> None:
             print(f"  {name}: already approved")
             continue
         print(f"  {name} ({spender}): approving ConditionalTokens...")
-        tx_hash = approve_ct(private_key, spender)
+        calldata = SET_APPROVAL_FOR_ALL_SELECTOR + encode(["address", "bool"], [spender, True])
+        tx_hash = _send_tx(private_key, CONDITIONAL_TOKENS, calldata, nonce=nonce)
+        nonce += 1
         _confirm_tx(tx_hash, f"CT setApprovalForAll for {name}")
 
     # Final verification

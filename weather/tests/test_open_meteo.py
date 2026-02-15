@@ -72,36 +72,24 @@ class TestLocationWeights(unittest.TestCase):
         weights = _get_model_weights("")
         self.assertEqual(weights, MODEL_WEIGHTS)
 
-    def test_default_weights_for_unknown_location(self):
+    @patch("weather.probability._load_calibration", return_value={})
+    def test_default_weights_for_unknown_location(self, mock_cal):
         from weather.open_meteo import MODEL_WEIGHTS
         weights = _get_model_weights("UNKNOWN_LOCATION")
         self.assertEqual(weights, MODEL_WEIGHTS)
 
-    @patch("weather.open_meteo._CALIBRATION_PATH")
-    def test_calibrated_weights_used(self, mock_path):
+    @patch("weather.probability._load_calibration")
+    def test_calibrated_weights_used(self, mock_cal):
         fixture_path = Path(__file__).parent / "fixtures" / "calibration.json"
-        mock_path.exists.return_value = True
+        import json
+        with open(fixture_path) as f:
+            cal_data = json.load(f)
+        mock_cal.return_value = cal_data
 
-        # Patch open to use fixture
-        import builtins
-        original_open = builtins.open
-
-        def patched_open(path, *args, **kwargs):
-            if str(path) == str(mock_path):
-                return original_open(fixture_path, *args, **kwargs)
-            return original_open(path, *args, **kwargs)
-
-        with patch("builtins.open", side_effect=patched_open):
-            import weather.open_meteo as om_module
-            old_path = om_module._CALIBRATION_PATH
-            om_module._CALIBRATION_PATH = fixture_path
-            try:
-                weights = _get_model_weights("NYC")
-                # Should use calibrated weights from fixture
-                self.assertAlmostEqual(weights["ecmwf_ifs025"], 0.55, places=2)
-                self.assertAlmostEqual(weights["noaa"], 0.20, places=2)
-            finally:
-                om_module._CALIBRATION_PATH = old_path
+        weights = _get_model_weights("NYC")
+        # Should use calibrated weights from fixture
+        self.assertAlmostEqual(weights["ecmwf_ifs025"], 0.55, places=2)
+        self.assertAlmostEqual(weights["noaa"], 0.20, places=2)
 
 
 class TestEnsembleWithLocation(unittest.TestCase):
@@ -188,6 +176,121 @@ class TestAuxiliaryWeatherVariables(unittest.TestCase):
         self.assertIn("gfs_high", day)
         # Auxiliary keys should just be absent
         self.assertNotIn("cloud_cover_max", day)
+
+
+class TestGetOpenMeteoForecastMulti(unittest.TestCase):
+    """Tests for multi-location batch forecast fetching."""
+
+    def _make_daily(self, dates, gfs_highs, gfs_lows, ecmwf_highs, ecmwf_lows):
+        """Helper to build a daily response dict."""
+        return {
+            "daily": {
+                "time": dates,
+                "temperature_2m_max_gfs_seamless": gfs_highs,
+                "temperature_2m_min_gfs_seamless": gfs_lows,
+                "temperature_2m_max_ecmwf_ifs025": ecmwf_highs,
+                "temperature_2m_min_ecmwf_ifs025": ecmwf_lows,
+            }
+        }
+
+    @patch("weather.open_meteo._fetch_json")
+    def test_single_location(self, mock_fetch):
+        """Single location — API returns a dict with 'daily' key."""
+        from weather.open_meteo import get_open_meteo_forecast_multi
+
+        mock_fetch.return_value = self._make_daily(
+            ["2025-06-15"], [85.0], [68.0], [87.0], [69.0],
+        )
+
+        locations = {"NYC": {"lat": 40.77, "lon": -73.87, "tz": "America/New_York"}}
+        result = get_open_meteo_forecast_multi(locations)
+
+        self.assertIn("NYC", result)
+        self.assertIn("2025-06-15", result["NYC"])
+        day = result["NYC"]["2025-06-15"]
+        self.assertEqual(day["gfs_high"], 85)
+        self.assertEqual(day["ecmwf_high"], 87)
+        mock_fetch.assert_called_once()
+
+    @patch("weather.open_meteo._fetch_json")
+    def test_multiple_locations_same_timezone(self, mock_fetch):
+        """Multiple locations in the same timezone — API returns a list."""
+        from weather.open_meteo import get_open_meteo_forecast_multi
+
+        mock_fetch.return_value = [
+            self._make_daily(["2025-06-15"], [85.0], [68.0], [87.0], [69.0]),
+            self._make_daily(["2025-06-15"], [78.0], [62.0], [80.0], [63.0]),
+        ]
+
+        locations = {
+            "NYC": {"lat": 40.77, "lon": -73.87, "tz": "America/New_York"},
+            "Atlanta": {"lat": 33.75, "lon": -84.39, "tz": "America/New_York"},
+        }
+        result = get_open_meteo_forecast_multi(locations)
+
+        self.assertIn("NYC", result)
+        self.assertIn("Atlanta", result)
+        self.assertEqual(result["NYC"]["2025-06-15"]["gfs_high"], 85)
+        self.assertEqual(result["Atlanta"]["2025-06-15"]["gfs_high"], 78)
+        # Same timezone → single API call
+        mock_fetch.assert_called_once()
+
+    @patch("weather.open_meteo._fetch_json")
+    def test_multiple_timezone_groups(self, mock_fetch):
+        """Locations in different timezones — multiple API calls."""
+        from weather.open_meteo import get_open_meteo_forecast_multi
+
+        # First call for America/New_York, second for America/Chicago
+        mock_fetch.side_effect = [
+            self._make_daily(["2025-06-15"], [85.0], [68.0], [87.0], [69.0]),
+            self._make_daily(["2025-06-15"], [90.0], [72.0], [92.0], [73.0]),
+        ]
+
+        locations = {
+            "NYC": {"lat": 40.77, "lon": -73.87, "tz": "America/New_York"},
+            "Chicago": {"lat": 41.88, "lon": -87.63, "tz": "America/Chicago"},
+        }
+        result = get_open_meteo_forecast_multi(locations)
+
+        self.assertIn("NYC", result)
+        self.assertIn("Chicago", result)
+        self.assertEqual(result["NYC"]["2025-06-15"]["gfs_high"], 85)
+        self.assertEqual(result["Chicago"]["2025-06-15"]["gfs_high"], 90)
+        self.assertEqual(mock_fetch.call_count, 2)
+
+    @patch("weather.open_meteo._fetch_json")
+    def test_api_failure_partial_data(self, mock_fetch):
+        """One timezone group fails — that group returns empty, others succeed."""
+        from weather.open_meteo import get_open_meteo_forecast_multi
+
+        # First call succeeds, second returns None (failure)
+        mock_fetch.side_effect = [
+            self._make_daily(["2025-06-15"], [85.0], [68.0], [87.0], [69.0]),
+            None,
+        ]
+
+        locations = {
+            "NYC": {"lat": 40.77, "lon": -73.87, "tz": "America/New_York"},
+            "Chicago": {"lat": 41.88, "lon": -87.63, "tz": "America/Chicago"},
+        }
+        result = get_open_meteo_forecast_multi(locations)
+
+        self.assertIn("NYC", result)
+        self.assertIn("Chicago", result)
+        # NYC should have data
+        self.assertIn("2025-06-15", result["NYC"])
+        # Chicago group failed — empty dict
+        self.assertEqual(result["Chicago"], {})
+
+    @patch("weather.open_meteo._fetch_json")
+    def test_empty_locations(self, mock_fetch):
+        """Empty locations dict — returns empty result, no API calls."""
+        from weather.open_meteo import get_open_meteo_forecast_multi
+
+        result = get_open_meteo_forecast_multi({})
+
+        self.assertEqual(result, {})
+        mock_fetch.assert_not_called()
 
 
 if __name__ == "__main__":

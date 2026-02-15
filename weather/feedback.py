@@ -8,6 +8,8 @@ State is stored separately in ``feedback_state.json`` — deleting the file rese
 
 import json
 import logging
+import os
+import tempfile
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
@@ -86,13 +88,22 @@ class FeedbackState:
         return None
 
     def save(self, path: str | None = None) -> None:
-        """Persist feedback state to JSON."""
+        """Persist feedback state to JSON (atomic write)."""
         save_path = Path(path) if path else _FEEDBACK_STATE_PATH
         data = {}
         for key, entry in self.entries.items():
             data[key] = asdict(entry)
-        with open(save_path, "w") as f:
-            json.dump(data, f, indent=2)
+        fd, tmp = tempfile.mkstemp(dir=str(save_path.parent), suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w") as f:
+                json.dump(data, f, indent=2)
+            os.replace(tmp, str(save_path))
+        except BaseException:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
         logger.debug("Feedback state saved to %s (%d entries)", save_path, len(data))
 
     @classmethod

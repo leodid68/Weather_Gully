@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from .aviation import get_aviation_daily_data
 from .config import Config, LOCATIONS, MIN_SHARES_PER_ORDER, MIN_TICK_SIZE
 from .noaa import get_noaa_forecast
-from .open_meteo import compute_ensemble_forecast, get_open_meteo_forecast
+from .open_meteo import compute_ensemble_forecast, get_open_meteo_forecast, get_open_meteo_forecast_multi
 from .parsing import parse_weather_event, parse_temperature_bucket
 from .probability import (
     estimate_bucket_probability,
@@ -317,6 +317,14 @@ def check_exit_opportunities(
                 outcome_name, current_price, exit_threshold,
             )
 
+    # Warn about trades with no cached market data (may need manual review)
+    unchecked = [mid for mid in state.trades if mid not in client._market_cache]
+    if unchecked:
+        logger.warning(
+            "Exit check: %d trade(s) have no cached market data — may need manual review: %s",
+            len(unchecked), ", ".join(mid[:16] for mid in unchecked),
+        )
+
     return exits_found, exits_executed
 
 
@@ -419,11 +427,9 @@ def _check_stop_loss_reversals(
                 trade.location, shift, trade.forecast_temp, current_temp, trade.outcome_name,
             )
 
-            # Attempt to sell
-            fresh = client.get_position(market_id)
-            fresh_shares = 0.0
-            if fresh:
-                fresh_shares = fresh.get("shares_yes") or fresh.get("shares") or 0
+            # Attempt to sell — use state-based lookup (bridge returns None)
+            fresh_trade = state.trades.get(market_id)
+            fresh_shares = fresh_trade.shares if fresh_trade else 0.0
 
             if fresh_shares < MIN_SHARES_PER_ORDER:
                 logger.info("Position already closed for %s", market_id)
@@ -431,9 +437,9 @@ def _check_stop_loss_reversals(
                 continue
 
             if dry_run:
-                logger.info("[DRY RUN] Would stop-loss sell %.1f shares of %s", fresh_shares, trade.outcome_name)
+                logger.info("[DRY RUN] Would stop-loss sell %.1f shares of %s", fresh_shares, fresh_trade.outcome_name)
             else:
-                logger.info("Stop-loss selling %.1f shares of %s...", fresh_shares, trade.outcome_name)
+                logger.info("Stop-loss selling %.1f shares of %s...", fresh_shares, fresh_trade.outcome_name)
                 result = client.execute_sell(market_id, fresh_shares)
                 if result.get("success"):
                     exits += 1
@@ -443,7 +449,7 @@ def _check_stop_loss_reversals(
                         if mid == market_id:
                             state.remove_event_position(eid)
                             break
-                    logger.info("Stop-loss executed for %s", trade.outcome_name)
+                    logger.info("Stop-loss executed for %s", fresh_trade.outcome_name)
                 else:
                     logger.error("Stop-loss sell failed: %s", result.get("error", "Unknown"))
 
@@ -483,6 +489,8 @@ def run_weather_strategy(
     if show_config:
         from dataclasses import fields as dc_fields
         for f in dc_fields(config):
+            if f.name == "private_key":
+                continue
             logger.info("  %s = %s", f.name, getattr(config, f.name))
         return
 
@@ -556,17 +564,6 @@ def run_weather_strategy(
             base_delay=config.retry_base_delay,
         )
 
-    def _fetch_open_meteo(loc_name: str) -> tuple[str, dict]:
-        loc_data = LOCATIONS.get(loc_name)
-        if not loc_data:
-            return loc_name, {}
-        return loc_name, get_open_meteo_forecast(
-            loc_data["lat"], loc_data["lon"],
-            max_retries=config.max_retries,
-            base_delay=config.retry_base_delay,
-            tz_name=loc_data.get("tz", ""),
-        )
-
     def _fetch_aviation() -> dict[str, dict]:
         return get_aviation_daily_data(
             active_locs,
@@ -575,35 +572,43 @@ def run_weather_strategy(
             base_delay=config.retry_base_delay,
         )
 
-    max_workers = len(active_locs) * 2 + (1 if config.aviation_obs else 0)
+    def _fetch_open_meteo_all() -> dict[str, dict[str, dict]]:
+        loc_subset = {k: v for k, v in LOCATIONS.items() if k in active_locs}
+        return get_open_meteo_forecast_multi(
+            loc_subset,
+            max_retries=config.max_retries,
+            base_delay=config.retry_base_delay,
+        )
+
+    max_workers = len(active_locs) + 2  # NOAA per location + 1 Open-Meteo + 1 aviation
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
-        # Submit all NOAA fetches
+        # Submit all NOAA fetches (still per-location)
         noaa_futures = {pool.submit(_fetch_noaa, loc): loc for loc in active_locs}
-        # Submit all Open-Meteo fetches (if enabled)
-        om_futures = {}
+        # Submit single Open-Meteo multi-location fetch
+        om_future = None
         if config.multi_source:
-            om_futures = {pool.submit(_fetch_open_meteo, loc): loc for loc in active_locs}
+            om_future = pool.submit(_fetch_open_meteo_all)
         # Submit aviation fetch (single call for all stations)
         aviation_future = None
         if config.aviation_obs:
             aviation_future = pool.submit(_fetch_aviation)
 
-        for fut in as_completed(list(noaa_futures) + list(om_futures)):
-            is_noaa = fut in noaa_futures
-            loc = noaa_futures.get(fut) or om_futures.get(fut, "?")
-            source = "NOAA" if is_noaa else "Open-Meteo"
+        for fut in as_completed(list(noaa_futures)):
+            loc = noaa_futures.get(fut, "?")
             try:
                 loc_name, data = fut.result()
-                if is_noaa:
-                    noaa_cache[loc_name] = data
-                    if not data:
-                        logger.warning("NOAA returned empty forecast for %s", loc_name)
-                else:
-                    open_meteo_cache[loc_name] = data
-                    if not data:
-                        logger.warning("Open-Meteo returned empty forecast for %s", loc_name)
+                noaa_cache[loc_name] = data
+                if not data:
+                    logger.warning("NOAA returned empty forecast for %s", loc_name)
             except Exception as exc:
-                logger.error("%s fetch crashed for %s: %s", source, loc, exc)
+                logger.error("NOAA fetch crashed for %s: %s", loc, exc)
+
+        # Collect Open-Meteo results (single batch)
+        if om_future is not None:
+            try:
+                open_meteo_cache = om_future.result()
+            except Exception as exc:
+                logger.error("Open-Meteo multi-location fetch crashed: %s", exc)
 
         # Collect aviation results
         if aviation_future is not None:
@@ -709,6 +714,8 @@ def run_weather_strategy(
                 forecast_temp = ensemble_temp
             else:
                 forecast_temp = noaa_temp
+                if forecast_temp is None:
+                    continue
         elif noaa_temp is not None:
             forecast_temp = noaa_temp
         elif om_data:

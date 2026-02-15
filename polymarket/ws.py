@@ -72,9 +72,15 @@ class PolymarketWS:
                     async for raw in ws:
                         try:
                             data = json.loads(raw)
-                            self.on_message(data)
                         except json.JSONDecodeError:
                             logger.warning("Non-JSON WS message: %s", raw[:200])
+                            continue
+                        try:
+                            result = self.on_message(data)
+                            if asyncio.iscoroutine(result):
+                                await result
+                        except Exception:
+                            logger.exception("Error in on_message callback")
 
             except websockets.ConnectionClosed as exc:
                 logger.warning("WebSocket closed: %s — reconnecting in %.1fs", exc, backoff)

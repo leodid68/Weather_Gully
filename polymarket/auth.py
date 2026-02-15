@@ -88,6 +88,7 @@ def build_hmac_signature(
     secret: str, timestamp: str, method: str, path: str, body: str = ""
 ) -> str:
     """Compute HMAC-SHA256 signature for L2 request authentication."""
+    method = method.upper()
     message = timestamp + method + path
     if body:
         message += body

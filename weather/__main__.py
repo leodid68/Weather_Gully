@@ -102,7 +102,8 @@ def main() -> None:
         if updates:
             config.update(updates)
             config.save(config_dir)
-            logger.info("Config updated: %s", updates)
+            safe_updates = {k: v for k, v in updates.items() if k != "private_key"}
+            logger.info("Config updated: %s", safe_updates)
 
     # Resolve state file path relative to config dir
     state_path = config.state_file

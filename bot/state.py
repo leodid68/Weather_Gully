@@ -48,12 +48,18 @@ class TradingState:
     def record_trade(self, **kwargs) -> None:
         kwargs.setdefault("timestamp", datetime.now(timezone.utc).isoformat())
         rec = TradeRecord(**kwargs)
-        self.trades[rec.market_id] = rec
+        key = f"{rec.market_id}:{rec.token_id}" if rec.token_id else rec.market_id
+        if key in self.trades:
+            logger.warning("Overwriting existing trade for %s", key)
+        self.trades[key] = rec
 
-    def remove_trade(self, market_id: str) -> None:
-        self.trades.pop(market_id, None)
+    def remove_trade(self, key: str) -> None:
+        self.trades.pop(key, None)
 
-    def open_positions(self) -> list[TradeRecord]:
+    def open_positions(self, active_only: bool = False) -> list[TradeRecord]:
+        if active_only:
+            return [t for t in self.trades.values()
+                    if getattr(t, 'memo', None) not in ('pending_exit', 'pending_fill')]
         return list(self.trades.values())
 
     # ── Calibration tracking ──────────────────────────────────────────

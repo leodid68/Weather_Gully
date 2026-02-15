@@ -1,7 +1,7 @@
 """Polymarket CLOB order construction and EIP-712 signing."""
 
 import secrets
-from decimal import Decimal, ROUND_HALF_UP
+from decimal import Decimal, ROUND_DOWN, ROUND_HALF_UP
 
 from eth_abi import encode
 from eth_account import Account
@@ -129,18 +129,30 @@ def build_order(
     Returns:
         Dict with all 12 Order fields.
     """
+    if not (0 < price < 1):
+        raise ValueError(f"price must be in (0, 1), got {price}")
+    if size <= 0:
+        raise ValueError(f"size must be positive, got {size}")
+
     side_int = _SIDE_MAP[side.upper()]
 
     # Amount calculations (USDC 6 decimals) — use Decimal to avoid float rounding
+    # Size rounds DOWN (conservative, matches official client)
     d_price = Decimal(str(price))
     d_size = Decimal(str(size))
     d_unit = Decimal(USDC_UNIT)
     if side_int == SIDE_BUY:
-        maker_amount = int((d_price * d_size * d_unit).to_integral_value(rounding=ROUND_HALF_UP))
-        taker_amount = int((d_size * d_unit).to_integral_value(rounding=ROUND_HALF_UP))
+        taker_amount = int((d_size * d_unit).to_integral_value(rounding=ROUND_DOWN))
+        maker_amount = int((d_price * Decimal(taker_amount)).to_integral_value(rounding=ROUND_HALF_UP))
     else:
-        maker_amount = int((d_size * d_unit).to_integral_value(rounding=ROUND_HALF_UP))
-        taker_amount = int((d_price * d_size * d_unit).to_integral_value(rounding=ROUND_HALF_UP))
+        maker_amount = int((d_size * d_unit).to_integral_value(rounding=ROUND_DOWN))
+        taker_amount = int((d_price * Decimal(maker_amount)).to_integral_value(rounding=ROUND_HALF_UP))
+
+    if maker_amount <= 0 or taker_amount <= 0:
+        raise ValueError(
+            f"Order amounts too small: makerAmount={maker_amount}, "
+            f"takerAmount={taker_amount} (price={price}, size={size})"
+        )
 
     return {
         "salt": _generate_salt(),

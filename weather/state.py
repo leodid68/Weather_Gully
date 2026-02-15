@@ -249,11 +249,12 @@ class TradingState:
         max_forecasts: int = 500,
     ) -> None:
         """Remove old entries to prevent unbounded state growth."""
-        # Cap analyzed_markets (keep newest by sorting, since IDs contain timestamps)
+        # Cap analyzed_markets (IDs are hex hashes without timestamps;
+        # remove arbitrary entries to stay within bounds)
         if len(self.analyzed_markets) > max_analyzed:
-            sorted_ids = sorted(self.analyzed_markets)
-            excess = len(sorted_ids) - max_analyzed
-            self.analyzed_markets -= set(sorted_ids[:excess])
+            excess = len(self.analyzed_markets) - max_analyzed
+            to_remove = list(self.analyzed_markets)[:excess]
+            self.analyzed_markets -= set(to_remove)
 
         # Prune resolved predictions beyond cap
         resolved = [(k, v) for k, v in self.predictions.items() if v.resolved]

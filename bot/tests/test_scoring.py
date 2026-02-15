@@ -23,7 +23,7 @@ class TestBrierScore(unittest.TestCase):
         self.assertAlmostEqual(brier_score(preds, outcomes), 0.25)
 
     def test_empty(self):
-        self.assertEqual(brier_score([], []), 0.0)
+        self.assertTrue(math.isnan(brier_score([], [])))
 
     def test_single(self):
         self.assertAlmostEqual(brier_score([0.7], [1]), 0.09)
@@ -44,7 +44,7 @@ class TestLogScore(unittest.TestCase):
         self.assertLess(score, -1)  # penalised heavily
 
     def test_empty(self):
-        self.assertEqual(log_score([], []), 0.0)
+        self.assertTrue(math.isnan(log_score([], [])))
 
     def test_clipping(self):
         # Should not raise with extreme values

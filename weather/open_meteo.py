@@ -32,15 +32,13 @@ def _get_model_weights(location: str = "") -> dict[str, float]:
 
     Lookup chain: calibration.json location weights → default MODEL_WEIGHTS.
     """
-    if location and _CALIBRATION_PATH.exists():
-        try:
-            with open(_CALIBRATION_PATH) as f:
-                cal = json.load(f)
+    if location:
+        from .probability import _load_calibration
+        cal = _load_calibration()
+        if cal:
             loc_weights = cal.get("model_weights", {}).get(location)
             if loc_weights:
                 return loc_weights
-        except (json.JSONDecodeError, IOError):
-            pass
     return MODEL_WEIGHTS
 
 _MODELS = "gfs_seamless,ecmwf_ifs025"
@@ -171,6 +169,126 @@ def get_open_meteo_forecast(
     return forecasts
 
 
+def get_open_meteo_forecast_multi(
+    locations: dict[str, dict],
+    max_retries: int = 3,
+    base_delay: float = 1.0,
+) -> dict[str, dict[str, dict]]:
+    """Fetch multi-model forecasts for all locations in minimal API calls.
+
+    Groups locations by timezone (Open-Meteo requires one tz per request),
+    then issues one request per timezone group.
+
+    Args:
+        locations: Dict of location_name → {"lat": float, "lon": float, "tz": str}.
+
+    Returns:
+        {location_name: {date_str: {gfs_high, gfs_low, ecmwf_high, ...}}}
+    """
+    # Group locations by timezone
+    tz_groups: dict[str, list[tuple[str, dict]]] = {}
+    for name, loc_data in locations.items():
+        tz = loc_data.get("tz", "")
+        if not tz:
+            from .probability import _tz_from_lon
+            tz = _tz_from_lon(loc_data["lon"])
+        tz_groups.setdefault(tz, []).append((name, loc_data))
+
+    _AUX_VARS = (
+        "cloud_cover_max,cloud_cover_mean,"
+        "wind_speed_10m_max,wind_gusts_10m_max,"
+        "precipitation_sum,precipitation_probability_max"
+    )
+
+    result: dict[str, dict[str, dict]] = {}
+
+    for tz, group in tz_groups.items():
+        lats = ",".join(str(loc["lat"]) for _, loc in group)
+        lons = ",".join(str(loc["lon"]) for _, loc in group)
+
+        url = (
+            f"{OPEN_METEO_BASE}"
+            f"?latitude={lats}&longitude={lons}"
+            f"&daily=temperature_2m_max,temperature_2m_min,{_AUX_VARS}"
+            f"&temperature_unit=fahrenheit"
+            f"&timezone={tz}"
+            f"&models={_MODELS}"
+            f"&forecast_days=10"
+        )
+
+        data = _fetch_json(url, max_retries=max_retries, base_delay=base_delay)
+        if not data:
+            for name, _ in group:
+                result[name] = {}
+            continue
+
+        # Multi-location returns a list; single location returns a dict
+        if isinstance(data, list):
+            entries = data
+        elif isinstance(data, dict) and "daily" in data:
+            entries = [data]
+        else:
+            for name, _ in group:
+                result[name] = {}
+            continue
+
+        for idx, (name, _) in enumerate(group):
+            if idx >= len(entries):
+                result[name] = {}
+                continue
+            entry_data = entries[idx]
+            daily = entry_data.get("daily", {})
+            dates = daily.get("time", [])
+            forecasts: dict[str, dict] = {}
+
+            for i, date_str in enumerate(dates):
+                entry: dict = {}
+
+                gfs_high = _safe_get(daily, "temperature_2m_max_gfs_seamless", i)
+                gfs_low = _safe_get(daily, "temperature_2m_min_gfs_seamless", i)
+                if gfs_high is not None:
+                    entry["gfs_high"] = round(gfs_high)
+                if gfs_low is not None:
+                    entry["gfs_low"] = round(gfs_low)
+
+                ecmwf_high = _safe_get(daily, "temperature_2m_max_ecmwf_ifs025", i)
+                ecmwf_low = _safe_get(daily, "temperature_2m_min_ecmwf_ifs025", i)
+                if ecmwf_high is not None:
+                    entry["ecmwf_high"] = round(ecmwf_high)
+                if ecmwf_low is not None:
+                    entry["ecmwf_low"] = round(ecmwf_low)
+
+                for aux_key, entry_key in [
+                    ("cloud_cover_max", "cloud_cover_max"),
+                    ("cloud_cover_mean", "cloud_cover_mean"),
+                    ("wind_speed_10m_max", "wind_speed_max"),
+                    ("wind_gusts_10m_max", "wind_gusts_max"),
+                    ("precipitation_sum", "precip_sum"),
+                    ("precipitation_probability_max", "precip_prob_max"),
+                ]:
+                    values = []
+                    for model_suffix in ["_gfs_seamless", "_ecmwf_ifs025"]:
+                        val = _safe_get(daily, aux_key + model_suffix, i)
+                        if val is not None:
+                            values.append(val)
+                    if not values:
+                        val = _safe_get(daily, aux_key, i)
+                        if val is not None:
+                            values.append(val)
+                    if values:
+                        entry[entry_key] = round(sum(values) / len(values), 1)
+
+                if entry:
+                    forecasts[date_str] = entry
+
+            result[name] = forecasts
+
+    total_days = sum(len(v) for v in result.values())
+    logger.info("Open-Meteo: %d locations in %d request(s), %d total forecast-days",
+                len(result), len(tz_groups), total_days)
+    return result
+
+
 def _safe_get(daily: dict, key: str, index: int) -> float | None:
     """Safely get a value from the daily arrays."""
     arr = daily.get(key)
@@ -231,11 +349,11 @@ def compute_ensemble_forecast(
     total_weight = sum(w for _, w in temps)
     ensemble = sum(t * w for t, w in temps) / total_weight
 
-    # Model spread (std dev of raw temps — indicates uncertainty)
+    # Model spread (sample std dev of raw temps — indicates uncertainty)
     raw_temps = [t for t, _ in temps]
     if len(raw_temps) >= 2:
         mean = sum(raw_temps) / len(raw_temps)
-        variance = sum((t - mean) ** 2 for t in raw_temps) / len(raw_temps)
+        variance = sum((t - mean) ** 2 for t in raw_temps) / (len(raw_temps) - 1)
         spread = variance ** 0.5
     else:
         spread = 0.0

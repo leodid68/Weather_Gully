@@ -42,6 +42,7 @@ class CLOBWeatherBridge:
         # Exposure tracking (deducted from max_exposure for portfolio)
         self._total_exposure: float = 0.0
         self._position_count: int = 0
+        self._known_positions: set[str] = set()  # market_ids with open positions
 
     def sync_exposure_from_state(self, trades: dict) -> None:
         """Initialize exposure tracking from persisted weather state trades.
@@ -58,6 +59,11 @@ class CLOBWeatherBridge:
             count += 1
         self._total_exposure = total
         self._position_count = count
+        self._known_positions = set()
+        for trade in trades.values():
+            market_id = getattr(trade, "market_id", "")
+            if market_id:
+                self._known_positions.add(market_id)
         if count > 0:
             logger.info("Bridge: synced exposure from state — $%.2f across %d positions",
                         total, count)
@@ -364,9 +370,13 @@ class CLOBWeatherBridge:
                         "error": f"Order not filled within {fill_timeout}s",
                         "trade_id": order_id,
                     }
+            elif fill_timeout == 0:
+                logger.debug("No fill verification — exposure is estimated, not confirmed")
 
             self._total_exposure += price * shares
-            self._position_count += 1
+            if market_id not in self._known_positions:
+                self._position_count += 1
+                self._known_positions.add(market_id)
             return {
                 "success": True,
                 "shares_bought": shares,
@@ -459,8 +469,11 @@ class CLOBWeatherBridge:
                         "error": f"Sell order not filled within {fill_timeout}s",
                         "trade_id": order_id,
                     }
+            elif fill_timeout == 0:
+                logger.debug("No fill verification — exposure is estimated, not confirmed")
 
             self._total_exposure = max(0.0, self._total_exposure - price * actual_shares)
+            self._known_positions.discard(market_id)
             self._position_count = max(0, self._position_count - 1)
             return {
                 "success": True,
@@ -469,4 +482,3 @@ class CLOBWeatherBridge:
         except Exception as exc:
             logger.error("Bridge sell failed: %s", exc)
             return {"error": str(exc), "success": False}
-

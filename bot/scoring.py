@@ -14,7 +14,7 @@ def brier_score(predictions: list[float], outcomes: list[int]) -> float:
     Range [0, 1] — 0 is perfect.  Polymarket median is ~0.058 over 12h.
     """
     if not predictions:
-        return 0.0
+        return float('nan')
     n = len(predictions)
     return sum((p - o) ** 2 for p, o in zip(predictions, outcomes)) / n
 
@@ -26,7 +26,7 @@ def log_score(predictions: list[float], outcomes: list[int]) -> float:
     Clips to [1e-10, 1-1e-10] to avoid log(0).
     """
     if not predictions:
-        return 0.0
+        return float('nan')
     eps = 1e-10
     total = 0.0
     for p, o in zip(predictions, outcomes):
@@ -84,6 +84,6 @@ def edge_confidence(
 
     expected_rate = market_price if market_price > 0 else 0.5
     sample_factor = min(1.0, math.sqrt(n_similar / 30))
-    rate_factor = hit_rate / expected_rate if expected_rate > 0 else 0.0
+    rate_factor = min(hit_rate / expected_rate, 3.0) if expected_rate > 0 else 0.0
 
     return edge * sample_factor * rate_factor

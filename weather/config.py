@@ -3,6 +3,7 @@
 import json
 import logging
 import os
+import tempfile
 from dataclasses import dataclass, fields
 from pathlib import Path
 
@@ -152,12 +153,21 @@ class Config:
         return cls(**kwargs)
 
     def save(self, config_dir: str) -> None:
-        """Persist current config to config.json."""
+        """Persist current config to config.json (atomic write)."""
         config_path = Path(config_dir) / "config.json"
         data = {f.name: getattr(self, f.name) for f in fields(self)}
         data.pop("private_key", None)  # Never persist the private key
-        with open(config_path, "w") as f:
-            json.dump(data, f, indent=2)
+        fd, tmp = tempfile.mkstemp(dir=config_dir, suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w") as f:
+                json.dump(data, f, indent=2)
+            os.replace(tmp, str(config_path))
+        except BaseException:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
         logger.info("Config saved to %s", config_path)
 
     def update(self, overrides: dict) -> None:

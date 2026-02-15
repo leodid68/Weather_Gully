@@ -4,7 +4,10 @@ Uses certifi bundle if available (fixes macOS Python missing certs),
 falls back to system defaults, then to unverified as last resort.
 """
 
+import logging
 import ssl
+
+_logger = logging.getLogger(__name__)
 
 
 def make_ssl_context() -> ssl.SSLContext:
@@ -28,6 +31,9 @@ def make_ssl_context() -> ssl.SSLContext:
         pass
 
     # 3. Last resort: unverified (not ideal, but functional)
+    _logger.critical(
+        "SSL certificate verification DISABLED — install 'certifi': pip install certifi"
+    )
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
     ctx.check_hostname = False
     ctx.verify_mode = ssl.CERT_NONE

@@ -61,10 +61,16 @@ def detect_longshot_bias(
     Default min_edge=0.004 is below the max bias (0.008) to allow detection.
     """
     bias = 0.0
-    for lo, hi, b in _BIAS_TABLE:
-        if lo <= market_price <= hi:
-            bias = b
-            break
+    for i, (lo, hi, b) in enumerate(_BIAS_TABLE):
+        # Half-open intervals [lo, hi) except for the last row which is [lo, hi]
+        if i == len(_BIAS_TABLE) - 1:
+            if lo <= market_price <= hi:
+                bias = b
+                break
+        else:
+            if lo <= market_price < hi:
+                bias = b
+                break
 
     if bias == 0.0:
         return None

@@ -92,7 +92,7 @@ class PolymarketClient:
         max_retries: int = 3,
         base_delay: float = 1.0,
     ):
-        self.private_key = private_key
+        self._private_key = private_key
         self.base_url = base_url
         self.max_retries = max_retries
         self.base_delay = base_delay
@@ -102,12 +102,15 @@ class PolymarketClient:
 
         if api_creds is None:
             api_creds = derive_api_key(private_key)
-        self.api_key = api_creds["apiKey"]
-        self.secret = api_creds["secret"]
-        self.passphrase = api_creds["passphrase"]
+        self._api_key = api_creds["apiKey"]
+        self._secret = api_creds["secret"]
+        self._passphrase = api_creds["passphrase"]
 
         self._http = httpx.Client(base_url=base_url, timeout=15)
         self._breaker = _CircuitBreaker()
+
+    def __repr__(self) -> str:
+        return f"PolymarketClient(address={self.address})"
 
     # ------------------------------------------------------------------
     # Low-level request
@@ -136,7 +139,7 @@ class PolymarketClient:
             if auth:
                 headers.update(
                     build_l2_headers(
-                        self.api_key, self.secret, self.passphrase,
+                        self._api_key, self._secret, self._passphrase,
                         self.address, method, path, body_str,
                     )
                 )
@@ -156,7 +159,10 @@ class PolymarketClient:
                     )
                     time.sleep(delay)
                     continue
-                if resp.status_code >= 400:
+                if resp.status_code >= 500:
+                    logger.error("CLOB %d %s %s: %s", resp.status_code, method, path, resp.text)
+                    self._breaker.record_failure()
+                elif resp.status_code >= 400:
                     logger.error("CLOB %d %s %s: %s", resp.status_code, method, path, resp.text)
                 resp.raise_for_status()
                 self._breaker.record_success()
@@ -174,6 +180,10 @@ class PolymarketClient:
                 raise
 
         self._breaker.record_failure()
+        if resp is None:
+            raise httpx.ConnectError(
+                f"All {self.max_retries} retries timed out for {method} {path}"
+            )
         raise httpx.HTTPStatusError(
             f"Max retries exceeded for {method} {path}",
             request=httpx.Request(method, path),
@@ -214,6 +224,15 @@ class PolymarketClient:
         resp = self._request("GET", f"/neg-risk?token_id={token_id}", auth=False)
         return resp.get("neg_risk", False)
 
+    def get_tick_size(self, token_id: str) -> str:
+        """Fetch minimum tick size for a token from the CLOB API."""
+        try:
+            resp = self._request("GET", f"/tick-size?token_id={token_id}", auth=False)
+            return resp.get("minimum_tick_size", "0.01")
+        except Exception as exc:
+            logger.warning("Could not fetch tick_size for %s: %s", token_id[:16], exc)
+            return "0.01"
+
     # ------------------------------------------------------------------
     # Orders
     # ------------------------------------------------------------------
@@ -235,19 +254,20 @@ class PolymarketClient:
         if neg_risk is None:
             neg_risk = self.is_neg_risk(token_id)
             logger.info("Auto-detected neg_risk=%s for token", neg_risk)
+        tick_size = self.get_tick_size(token_id)
         signed = build_signed_order(
             maker=self.address,
             token_id=token_id,
             side=side,
             price=price,
             size=size,
-            private_key=self.private_key,
+            private_key=self._private_key,
             neg_risk=neg_risk,
             **kwargs,
         )
         # Convert numeric fields to strings (CLOB API requirement)
         order_payload = {
-            "salt": signed["salt"],
+            "salt": str(signed["salt"]),
             "maker": signed["maker"],
             "signer": signed["signer"],
             "taker": signed["taker"],
@@ -263,9 +283,10 @@ class PolymarketClient:
         }
         body = {
             "order": order_payload,
-            "owner": self.api_key,
+            "owner": self._api_key,
             "orderType": order_type,
             "postOnly": False,
+            "tickSize": tick_size,
         }
         logger.debug("POST /order side=%s price=%s size=%s",
                      order_payload["side"], order_payload["makerAmount"], order_payload["takerAmount"])

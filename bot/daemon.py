@@ -71,6 +71,7 @@ def run_daemon(client_factory, config: Config, state_path: str, dry_run: bool = 
         except Exception as exc:
             consecutive_failures += 1
             logger.exception("Unexpected error in run: %s", exc)
+            _write_heartbeat(state_path)  # prevent false stale alerts
             if consecutive_failures >= config.retry_max_attempts * 2:
                 logger.critical("Too many failures — exiting")
                 break

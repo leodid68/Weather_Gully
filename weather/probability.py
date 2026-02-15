@@ -14,23 +14,31 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 _calibration_cache: dict | None = None
+_calibration_mtime: float = 0.0
 _CALIBRATION_PATH = Path(__file__).parent / "calibration.json"
 
 
 def _load_calibration() -> dict:
-    """Load calibration data from calibration.json with caching.
+    """Load calibration data from calibration.json with mtime-based cache invalidation.
 
     Falls back to empty dict if file doesn't exist or is invalid,
     causing all lookups to use the hardcoded default tables.
     """
-    global _calibration_cache
-    if _calibration_cache is not None:
+    global _calibration_cache, _calibration_mtime
+
+    try:
+        current_mtime = _CALIBRATION_PATH.stat().st_mtime
+    except OSError:
+        current_mtime = 0.0
+
+    if _calibration_cache is not None and current_mtime == _calibration_mtime:
         return _calibration_cache
 
     if _CALIBRATION_PATH.exists():
         try:
             with open(_CALIBRATION_PATH) as f:
                 _calibration_cache = json.load(f)
+            _calibration_mtime = current_mtime
             logger.info("Loaded calibration data from %s (%d samples)",
                         _CALIBRATION_PATH,
                         _calibration_cache.get("metadata", {}).get("samples", 0))
@@ -39,6 +47,7 @@ def _load_calibration() -> dict:
             logger.warning("Failed to load calibration data: %s — using defaults", exc)
 
     _calibration_cache = {}
+    _calibration_mtime = current_mtime
     return _calibration_cache
 
 # NOAA forecast accuracy curve (days ahead → probability of being correct)
@@ -92,12 +101,11 @@ def _normal_cdf(x: float) -> float:
 def get_horizon_days(forecast_date: str) -> int:
     """Number of days between now (UTC) and the forecast date."""
     try:
-        target = datetime.strptime(forecast_date, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+        target = datetime.strptime(forecast_date, "%Y-%m-%d").date()
     except ValueError:
         return 999  # Invalid date — will be filtered by max_days_ahead
-    now = datetime.now(timezone.utc)
-    delta = (target - now).total_seconds() / 86400
-    return max(0, round(delta))
+    today = datetime.now(timezone.utc).date()
+    return max(0, (target - today).days)
 
 
 def get_noaa_probability(forecast_date: str, apply_seasonal: bool = True) -> float:
@@ -114,7 +122,10 @@ def get_noaa_probability(forecast_date: str, apply_seasonal: bool = True) -> flo
         base_prob = max(0.40, 0.50 - 0.02 * (days_ahead - 10))
 
     if apply_seasonal:
-        month = datetime.now(timezone.utc).month
+        try:
+            month = int(forecast_date.split("-")[1])
+        except (IndexError, ValueError):
+            month = datetime.now(timezone.utc).month
         factor = _SEASONAL_FACTORS.get(month, 1.0)
         # factor > 1.0 = harder month = lower accuracy
         base_prob /= factor
@@ -241,7 +252,10 @@ def estimate_bucket_probability(
     """
     sigma = _get_stddev(forecast_date, location=location)
     if apply_seasonal:
-        month = datetime.now(timezone.utc).month
+        try:
+            month = int(forecast_date.split("-")[1])
+        except (IndexError, ValueError):
+            month = datetime.now(timezone.utc).month
         factor = _get_seasonal_factor(month, location=location)
         # factor > 1.0 → harder month → widen sigma; < 1.0 → easier → narrow
         sigma *= factor
@@ -409,7 +423,10 @@ def estimate_bucket_probability_with_obs(
     sigma = _intraday_sigma(latest_obs_time, metric, tz_name=tz_name)
 
     if apply_seasonal:
-        month = datetime.now(timezone.utc).month
+        try:
+            month = int(forecast_date.split("-")[1])
+        except (IndexError, ValueError):
+            month = datetime.now(timezone.utc).month
         factor = _get_seasonal_factor(month, location=location)
         sigma *= factor
 

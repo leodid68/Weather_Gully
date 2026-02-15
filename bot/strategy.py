@@ -96,6 +96,11 @@ def _build_token_pairs(tradeable: list[dict]) -> dict[str, tuple[str, str]]:
     return pairs
 
 
+def _trade_key(pos) -> str:
+    """Build the composite trade key matching state.record_trade logic."""
+    return f"{pos.market_id}:{pos.token_id}" if pos.token_id else pos.market_id
+
+
 # ── Weather pipeline ──────────────────────────────────────────────────
 
 def _run_weather_pipeline(
@@ -167,6 +172,28 @@ def run_strategy(
 ) -> None:
     """Main entry point — called once per run."""
     trades_this_run = 0
+
+    # Reconcile stale pending orders from previous runs
+    stale_keys = [
+        key for key, t in list(state.trades.items())
+        if getattr(t, 'memo', None) in ('pending_exit', 'pending_fill')
+    ]
+    for key in stale_keys:
+        trade = state.trades[key]
+        memo = trade.memo
+        # For pending_fill, verify with the exchange before removing
+        if memo == 'pending_fill' and trade.order_id:
+            try:
+                if client.is_order_filled(trade.order_id):
+                    # Order was actually filled — promote to active position
+                    trade.memo = ""
+                    logger.info("Pending order %s was filled — promoting to active position: %s",
+                                trade.order_id, key)
+                    continue
+            except Exception:
+                logger.debug("Could not verify fill status for order %s", trade.order_id)
+        logger.warning("Removing stale %s trade: %s", memo, key)
+        state.remove_trade(key)
 
     # ── 1. Check exits on existing positions ─────────────────────────
     positions = state.open_positions()
@@ -246,7 +273,7 @@ def run_strategy(
                     if filled:
                         state.record_daily_pnl(pnl)
                         state.record_closed_trade(pos, current, pnl)
-                        state.remove_trade(pos.market_id)
+                        state.remove_trade(_trade_key(pos))
                     else:
                         logger.warning("Stop-loss order %s pending fill", order_id)
                 except Exception as exc:
@@ -279,7 +306,7 @@ def run_strategy(
                     if filled:
                         state.record_daily_pnl(pnl)
                         state.record_closed_trade(pos, current, pnl)
-                        state.remove_trade(pos.market_id)
+                        state.remove_trade(_trade_key(pos))
                     else:
                         state.record_trade(
                             market_id=pos.market_id, token_id=pos.token_id,
@@ -292,40 +319,42 @@ def run_strategy(
                     logger.error("Exit order failed: %s", exc)
 
         # Take-profit: SELL exit (price dropped enough to lock in profit)
-        # For SELL, we profit when price drops. Exit when profit is sufficient:
-        # profit_pct = (entry - current) / entry >= (threshold - entry) / entry
-        elif pos.side == "SELL" and current <= 2 * pos.price - threshold:
-            pnl = _compute_pnl(pos, current)
-            logger.info(
-                "EXIT SELL: %s @ %.4f (entry %.4f, pnl $%.2f)",
-                pos.token_id[:16], current, pos.price, pnl,
-            )
-            if not dry_run:
-                try:
-                    result = client.post_order(
-                        pos.token_id, "BUY", current, pos.size,
-                    )
-                    order_id = result.get("orderID", "")
-                    filled = False
-                    if order_id:
-                        try:
-                            filled = client.is_order_filled(order_id)
-                        except Exception:
-                            pass
-                    if filled:
-                        state.record_daily_pnl(pnl)
-                        state.record_closed_trade(pos, current, pnl)
-                        state.remove_trade(pos.market_id)
-                    else:
-                        state.record_trade(
-                            market_id=pos.market_id, token_id=pos.token_id,
-                            side=pos.side, price=pos.price, size=pos.size,
-                            order_id=order_id, memo="pending_exit",
-                            end_date=pos.end_date, condition_id=pos.condition_id,
+        # For SELL, profit target mirrors the BUY profit amount
+        elif pos.side == "SELL":
+            buy_profit = threshold - pos.price  # profit a BUY would make
+            sell_target = max(0.01, pos.price - buy_profit)
+            if current <= sell_target:
+                pnl = _compute_pnl(pos, current)
+                logger.info(
+                    "EXIT SELL: %s @ %.4f (entry %.4f, pnl $%.2f)",
+                    pos.token_id[:16], current, pos.price, pnl,
+                )
+                if not dry_run:
+                    try:
+                        result = client.post_order(
+                            pos.token_id, "BUY", current, pos.size,
                         )
-                        logger.warning("Exit order %s pending fill", order_id)
-                except Exception as exc:
-                    logger.error("Exit order failed: %s", exc)
+                        order_id = result.get("orderID", "")
+                        filled = False
+                        if order_id:
+                            try:
+                                filled = client.is_order_filled(order_id)
+                            except Exception:
+                                pass
+                        if filled:
+                            state.record_daily_pnl(pnl)
+                            state.record_closed_trade(pos, current, pnl)
+                            state.remove_trade(_trade_key(pos))
+                        else:
+                            state.record_trade(
+                                market_id=pos.market_id, token_id=pos.token_id,
+                                side=pos.side, price=pos.price, size=pos.size,
+                                order_id=order_id, memo="pending_exit",
+                                end_date=pos.end_date, condition_id=pos.condition_id,
+                            )
+                            logger.warning("Exit order %s pending fill", order_id)
+                    except Exception as exc:
+                        logger.error("Exit order failed: %s", exc)
 
     # ── 2. Scan markets (Gamma preferred, CLOB fallback) ─────────────
     multi_choice_groups = []
@@ -416,10 +445,28 @@ def run_strategy(
                 logger.info("Max trades per run reached (%d)", config.max_trades_per_run)
                 break
 
+            # Find the condition_id and end_date for this token (needed for dedup key)
+            condition_id = _find_condition_id(tradeable, sig.token_id)
+            end_date = _find_end_date(tradeable, sig.token_id)
+
+            # Check for existing position on same token
+            market_id = condition_id or sig.token_id
+            trade_key = f"{market_id}:{sig.token_id}" if sig.token_id else market_id
+            if trade_key in state.trades:
+                logger.info("Already have position for %s, skipping duplicate", trade_key[:24])
+                continue
+
+            # Available capital: account for SELL exposure correctly
+            current_exposure = sum(
+                (1.0 - t.price) * t.size if getattr(t, 'side', 'BUY') == 'SELL' else t.price * t.size
+                for t in state.trades.values()
+                if getattr(t, 'memo', None) not in ('pending_exit', 'pending_fill')
+            )
+            available_bankroll = max(0.0, config.max_total_exposure - current_exposure)
             size_usd = position_size(
                 probability=sig.fair_value,
                 price=sig.market_price,
-                bankroll=config.max_total_exposure,
+                bankroll=available_bankroll,
                 max_position=config.max_position_usd,
                 kelly_frac=config.kelly_fraction,
                 side=sig.side,
@@ -433,10 +480,6 @@ def run_strategy(
             if not allowed:
                 logger.info("Risk limit: %s — skipping %s", reason, sig.token_id[:16])
                 continue
-
-            # Find the condition_id and end_date for this token
-            condition_id = _find_condition_id(tradeable, sig.token_id)
-            end_date = _find_end_date(tradeable, sig.token_id)
 
             logger.info(
                 "TRADE: %s %s @ %.4f, size=$%.2f, edge=%.4f [%s]",
@@ -504,7 +547,11 @@ def run_strategy(
                     logger.error("Order failed: %s", exc)
                     continue
             else:
-                dry_shares = size_usd / sig.market_price if sig.market_price > 0 else 0
+                if sig.side == "SELL":
+                    denom = 1.0 - sig.market_price
+                    dry_shares = size_usd / denom if denom > 0.01 else 0
+                else:
+                    dry_shares = size_usd / sig.market_price if sig.market_price > 0 else 0
                 if dry_shares > 0:
                     logger.info(
                         "[DRY RUN] Would %s %.2f shares of %s @ %.4f ($%.2f)",
@@ -551,5 +598,3 @@ def run_strategy(
         logger.critical("FAILED TO SAVE STATE: %s", exc)
         raise
     logger.info("Done.")
-
-

@@ -142,9 +142,10 @@ class TestSharpeRatio(unittest.TestCase):
 
 class TestRunBacktest(unittest.TestCase):
 
+    @patch("weather.probability._load_calibration", return_value={})
     @patch("weather.backtest.get_historical_actuals")
     @patch("weather.backtest.get_historical_forecasts")
-    def test_basic_backtest(self, mock_forecasts, mock_actuals):
+    def test_basic_backtest(self, mock_forecasts, mock_actuals, _mock_cal):
         # Forecasts are keyed by target_date (API deduplication)
         mock_forecasts.return_value = {
             "2025-06-04": {
@@ -184,9 +185,10 @@ class TestRunBacktest(unittest.TestCase):
 
         self.assertEqual(len(result.trades), 0)
 
+    @patch("weather.probability._load_calibration", return_value={})
     @patch("weather.backtest.get_historical_actuals")
     @patch("weather.backtest.get_historical_forecasts")
-    def test_hundred_percent_win(self, mock_forecasts, mock_actuals):
+    def test_hundred_percent_win(self, mock_forecasts, mock_actuals, _mock_cal):
         """When forecast perfectly matches actual, trades should win."""
         # Forecasts are keyed by target_date (API deduplication)
         mock_forecasts.return_value = {

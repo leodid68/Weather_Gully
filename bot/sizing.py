@@ -8,6 +8,7 @@ generic bot.  Uses the simplified Kelly formula for prediction markets:
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -105,7 +106,7 @@ def check_risk_limits(
 
     Returns (allowed, reason).
     """
-    positions = state.open_positions()
+    positions = state.open_positions(active_only=True)
 
     # 1. Total exposure (BUY: cost = price*size, SELL: max loss = (1-price)*size)
     total_exposure = sum(
@@ -124,10 +125,15 @@ def check_risk_limits(
             f"{len(positions)} positions — at limit of {config.max_open_positions}"
         )
 
-    # 3. Daily loss (realized + unrealized)
+    # 3. Daily loss (realized + unrealized for today's positions only)
     today_pnl = state.get_today_pnl()
     if current_prices:
+        today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         for pos in positions:
+            # Only count unrealized PnL from positions opened today
+            pos_date = getattr(pos, "timestamp", "")[:10]
+            if pos_date and pos_date != today_str:
+                continue
             cp = current_prices.get(pos.token_id)
             if cp is not None:
                 if pos.side == "BUY":
