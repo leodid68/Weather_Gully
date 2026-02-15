@@ -142,10 +142,22 @@ class TestSharpeRatio(unittest.TestCase):
 
 class TestRunBacktest(unittest.TestCase):
 
-    @patch("weather.probability._load_calibration", return_value={})
+    def setUp(self):
+        """Reset calibration cache to avoid pollution from other test modules."""
+        import weather.probability as _prob
+        self._saved_cache = _prob._calibration_cache
+        self._saved_mtime = _prob._calibration_mtime
+        _prob._calibration_cache = None
+        _prob._calibration_mtime = 0.0
+
+    def tearDown(self):
+        import weather.probability as _prob
+        _prob._calibration_cache = self._saved_cache
+        _prob._calibration_mtime = self._saved_mtime
+
     @patch("weather.backtest.get_historical_actuals")
     @patch("weather.backtest.get_historical_forecasts")
-    def test_basic_backtest(self, mock_forecasts, mock_actuals, _mock_cal):
+    def test_basic_backtest(self, mock_forecasts, mock_actuals):
         # Forecasts are keyed by target_date (API deduplication)
         mock_forecasts.return_value = {
             "2025-06-04": {
@@ -185,10 +197,9 @@ class TestRunBacktest(unittest.TestCase):
 
         self.assertEqual(len(result.trades), 0)
 
-    @patch("weather.probability._load_calibration", return_value={})
     @patch("weather.backtest.get_historical_actuals")
     @patch("weather.backtest.get_historical_forecasts")
-    def test_hundred_percent_win(self, mock_forecasts, mock_actuals, _mock_cal):
+    def test_hundred_percent_win(self, mock_forecasts, mock_actuals):
         """When forecast perfectly matches actual, trades should win."""
         # Forecasts are keyed by target_date (API deduplication)
         mock_forecasts.return_value = {

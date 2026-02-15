@@ -11,3 +11,5 @@ weather_state.json
 *.pid
 *.heartbeat
 *.lock
+weather/cache/
+weather/sigma_log.json
