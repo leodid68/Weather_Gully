@@ -314,6 +314,7 @@ def estimate_bucket_probability(
     location: str = "",
     weather_data: dict | None = None,
     metric: str = "high",
+    sigma_override: float | None = None,
 ) -> float:
     """Estimate P(actual temperature ∈ [bucket_low, bucket_high]).
 
@@ -332,19 +333,19 @@ def estimate_bucket_probability(
         weather_data: Optional auxiliary weather data for sigma adjustment.
         metric: ``"high"`` or ``"low"`` — which extreme this event tracks.
     """
-    sigma = _get_stddev(forecast_date, location=location)
-    if apply_seasonal:
-        try:
-            month = int(forecast_date.split("-")[1])
-        except (IndexError, ValueError):
-            month = datetime.now(timezone.utc).month
-        factor = _get_seasonal_factor(month, location=location)
-        # factor > 1.0 → harder month → widen sigma; < 1.0 → easier → narrow
-        sigma *= factor
-
-    # Weather-based sigma adjustment
-    if weather_data:
-        sigma *= _weather_sigma_multiplier(weather_data, metric)
+    if sigma_override is not None:
+        sigma = sigma_override
+    else:
+        sigma = _get_stddev(forecast_date, location=location)
+        if apply_seasonal:
+            try:
+                month = int(forecast_date.split("-")[1])
+            except (IndexError, ValueError):
+                month = datetime.now(timezone.utc).month
+            factor = _get_seasonal_factor(month, location=location)
+            sigma *= factor
+        if weather_data:
+            sigma *= _weather_sigma_multiplier(weather_data, metric)
 
     # Guard against zero sigma
     if sigma <= 0:

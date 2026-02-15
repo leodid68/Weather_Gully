@@ -356,5 +356,27 @@ class TestComputeAdaptiveSigma(unittest.TestCase):
         self.assertGreater(result, 0)
 
 
+class TestSigmaOverride(unittest.TestCase):
+
+    def test_override_bypasses_internal_sigma(self):
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        prob_wide = estimate_bucket_probability(50.0, 49, 51, today, sigma_override=20.0)
+        prob_narrow = estimate_bucket_probability(50.0, 49, 51, today, sigma_override=0.5)
+        self.assertGreater(prob_narrow, prob_wide)
+
+    def test_override_none_uses_internal_sigma(self):
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        prob_default = estimate_bucket_probability(50.0, 49, 51, today)
+        prob_none = estimate_bucket_probability(50.0, 49, 51, today, sigma_override=None)
+        self.assertAlmostEqual(prob_default, prob_none, places=4)
+
+    def test_override_ignores_weather_data(self):
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        weather = {"cloud_cover_max": 100, "wind_speed_max": 60, "precip_sum": 20}
+        prob_with = estimate_bucket_probability(50.0, 49, 51, today, sigma_override=3.0, weather_data=weather)
+        prob_without = estimate_bucket_probability(50.0, 49, 51, today, sigma_override=3.0)
+        self.assertAlmostEqual(prob_with, prob_without, places=4)
+
+
 if __name__ == "__main__":
     unittest.main()
