@@ -8,7 +8,6 @@ generic bot.  Uses the simplified Kelly formula for prediction markets:
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -108,8 +107,11 @@ def check_risk_limits(
     """
     positions = state.open_positions()
 
-    # 1. Total exposure
-    total_exposure = sum(p.price * p.size for p in positions)
+    # 1. Total exposure (BUY: cost = price*size, SELL: max loss = (1-price)*size)
+    total_exposure = sum(
+        (1.0 - p.price) * p.size if p.side == "SELL" else p.price * p.size
+        for p in positions
+    )
     if total_exposure + new_trade_usd > config.max_total_exposure:
         return False, (
             f"Total exposure ${total_exposure + new_trade_usd:.2f} "

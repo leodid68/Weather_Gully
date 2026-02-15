@@ -7,6 +7,7 @@ routing all operations through the Polymarket CLOB and Gamma APIs.
 from __future__ import annotations
 
 import logging
+import time
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
@@ -38,6 +39,28 @@ class CLOBWeatherBridge:
         self.max_exposure = max_exposure
         # Cache: condition_id → GammaMarket (populated by fetch_weather_markets)
         self._market_cache: dict[str, GammaMarket] = {}
+        # Exposure tracking (deducted from max_exposure for portfolio)
+        self._total_exposure: float = 0.0
+        self._position_count: int = 0
+
+    def sync_exposure_from_state(self, trades: dict) -> None:
+        """Initialize exposure tracking from persisted weather state trades.
+
+        Args:
+            trades: Dict of market_id → TradeRecord (from weather.state).
+        """
+        total = 0.0
+        count = 0
+        for trade in trades.values():
+            cost_basis = getattr(trade, "cost_basis", 0.0)
+            shares = getattr(trade, "shares", 0.0)
+            total += cost_basis * shares
+            count += 1
+        self._total_exposure = total
+        self._position_count = count
+        if count > 0:
+            logger.info("Bridge: synced exposure from state — $%.2f across %d positions",
+                        total, count)
 
     # ------------------------------------------------------------------
     # Markets
@@ -98,15 +121,14 @@ class CLOBWeatherBridge:
     # ------------------------------------------------------------------
 
     def get_portfolio(self) -> dict:
-        """Derive portfolio info from max_exposure and state.
+        """Derive portfolio info from max_exposure minus tracked positions.
 
-        Returns a synthetic portfolio based on max_exposure
-        (the CLOB has no portfolio endpoint).
+        Deducts exposure from open positions tracked via record_exposure().
         """
         return {
-            "balance_usdc": self.max_exposure,
-            "total_exposure": 0.0,
-            "positions_count": 0,
+            "balance_usdc": max(0.0, self.max_exposure - self._total_exposure),
+            "total_exposure": self._total_exposure,
+            "positions_count": self._position_count,
         }
 
     def get_positions(self) -> list:
@@ -124,9 +146,7 @@ class CLOBWeatherBridge:
     # Market context
     # ------------------------------------------------------------------
 
-    def get_market_context(
-        self, market_id: str, my_probability: float | None = None,
-    ) -> dict | None:
+    def get_market_context(self, market_id: str, **kwargs) -> dict | None:
         """Build market context from CLOB orderbook data.
 
         Returns a dict compatible with check_context_safeguards():
@@ -155,7 +175,8 @@ class CLOBWeatherBridge:
 
         # Slippage estimate from spread
         spread = gm.spread
-        mid = (gm.best_bid + gm.best_ask) / 2 if (gm.best_bid + gm.best_ask) > 0 else 0.5
+        bid_ask_sum = gm.best_bid + gm.best_ask
+        mid = bid_ask_sum / 2 if bid_ask_sum > 0 else 0.0
         slippage_pct = spread / mid if mid > 0 else 0.0
 
         return {
@@ -174,16 +195,100 @@ class CLOBWeatherBridge:
         return []
 
     # ------------------------------------------------------------------
+    # Fill verification
+    # ------------------------------------------------------------------
+
+    def verify_fill(
+        self,
+        order_id: str,
+        timeout_seconds: float = 30.0,
+        poll_interval: float = 2.0,
+    ) -> dict:
+        """Poll order status until filled, partially filled, or timeout.
+
+        Returns:
+            {"filled": bool, "partial": bool, "size_matched": float,
+             "original_size": float, "status": str}
+        """
+        deadline = time.monotonic() + timeout_seconds
+        last_status = "UNKNOWN"
+        size_matched = 0.0
+        original_size = 0.0
+
+        while time.monotonic() < deadline:
+            try:
+                order = self.clob.get_order(order_id)
+                if not order:
+                    time.sleep(poll_interval)
+                    continue
+
+                last_status = order.get("status", "UNKNOWN")
+                size_matched = float(order.get("size_matched", 0))
+                original_size = float(order.get("original_size", order.get("size", 0)))
+
+                if last_status == "MATCHED":
+                    return {
+                        "filled": True,
+                        "partial": False,
+                        "size_matched": size_matched,
+                        "original_size": original_size,
+                        "status": last_status,
+                    }
+                elif last_status == "CANCELLED":
+                    return {
+                        "filled": size_matched > 0,
+                        "partial": 0 < size_matched < original_size,
+                        "size_matched": size_matched,
+                        "original_size": original_size,
+                        "status": last_status,
+                    }
+            except Exception as exc:
+                logger.debug("verify_fill poll error: %s", exc)
+
+            time.sleep(poll_interval)
+
+        # Timeout — check if partially filled
+        return {
+            "filled": size_matched > 0,
+            "partial": 0 < size_matched < original_size,
+            "size_matched": size_matched,
+            "original_size": original_size,
+            "status": f"TIMEOUT ({last_status})",
+        }
+
+    def cancel_order(self, order_id: str) -> bool:
+        """Cancel an open order. Returns True if cancellation succeeded."""
+        try:
+            self.clob.cancel_order(order_id)
+            logger.info("Cancelled order %s", order_id)
+            return True
+        except Exception as exc:
+            logger.error("Failed to cancel order %s: %s", order_id, exc)
+            return False
+
+    # ------------------------------------------------------------------
     # Trading
     # ------------------------------------------------------------------
 
-    def execute_trade(self, market_id: str, side: str, amount: float) -> dict:
-        """Execute a buy trade via CLOB limit order at best ask.
+    def execute_trade(
+        self,
+        market_id: str,
+        side: str,
+        amount: float,
+        fill_timeout: float = 0.0,
+        fill_poll_interval: float = 2.0,
+    ) -> dict:
+        """Execute a buy trade via CLOB limit order at fresh best ask.
+
+        Re-fetches the orderbook before trading to avoid stale prices.
+        When ``fill_timeout > 0``, verifies fill and cancels unfilled orders.
 
         Args:
             market_id: condition_id of the market.
             side: "yes" or "no".
             amount: USD amount to spend.
+            fill_timeout: Seconds to wait for fill verification (0 = skip).
+            fill_poll_interval: Seconds between fill status polls.
 
         Returns:
             {"success": bool, "shares_bought": float, "trade_id": str}
@@ -197,13 +302,27 @@ class CLOBWeatherBridge:
             if not gm.clob_token_ids:
                 return {"error": "No YES token ID", "success": False}
             token_id = gm.clob_token_ids[0]
-            price = gm.best_ask if gm.best_ask > 0 else gm.outcome_prices[0] if gm.outcome_prices else 0.5
         else:
             if len(gm.clob_token_ids) < 2:
                 return {"error": "No NO token ID", "success": False}
             token_id = gm.clob_token_ids[1]
-            no_price = gm.outcome_prices[1] if len(gm.outcome_prices) > 1 else 1.0 - (gm.outcome_prices[0] if gm.outcome_prices else 0.5)
-            price = no_price
+
+        # Re-fetch fresh price from orderbook
+        try:
+            book = self.clob.get_orderbook(token_id)
+            asks = book.get("asks") or []
+            if asks:
+                price = float(asks[0]["price"])
+            else:
+                # Fallback to cached price
+                price = gm.best_ask if gm.best_ask > 0 else (
+                    gm.outcome_prices[0] if gm.outcome_prices else 0.5
+                )
+        except Exception:
+            price = gm.best_ask if gm.best_ask > 0 else (
+                gm.outcome_prices[0] if gm.outcome_prices else 0.5
+            )
+            logger.warning("Could not refresh price for %s, using cached %.4f", token_id[:16], price)
 
         if price <= 0:
             return {"error": "Invalid price", "success": False}
@@ -223,6 +342,31 @@ class CLOBWeatherBridge:
                 "Bridge trade: BUY %.1f shares of %s @ %.4f (order %s)",
                 shares, token_id[:16], price, order_id,
             )
+
+            # Fill verification
+            if fill_timeout > 0 and order_id:
+                fill = self.verify_fill(order_id, fill_timeout, fill_poll_interval)
+                if fill["filled"] and not fill["partial"]:
+                    actual_shares = fill["size_matched"]
+                    logger.info("Order %s fully filled: %.1f shares", order_id, actual_shares)
+                    shares = actual_shares
+                elif fill["partial"]:
+                    actual_shares = fill["size_matched"]
+                    logger.warning("Order %s partially filled: %.1f/%.1f shares — cancelling remainder",
+                                   order_id, actual_shares, fill["original_size"])
+                    self.cancel_order(order_id)
+                    shares = actual_shares
+                else:
+                    logger.warning("Order %s not filled within %.1fs — cancelling", order_id, fill_timeout)
+                    self.cancel_order(order_id)
+                    return {
+                        "success": False,
+                        "error": f"Order not filled within {fill_timeout}s",
+                        "trade_id": order_id,
+                    }
+
+            self._total_exposure += price * shares
+            self._position_count += 1
             return {
                 "success": True,
                 "shares_bought": shares,
@@ -232,12 +376,23 @@ class CLOBWeatherBridge:
             logger.error("Bridge trade failed: %s", exc)
             return {"error": str(exc), "success": False}
 
-    def execute_sell(self, market_id: str, shares: float) -> dict:
-        """Execute a sell trade via CLOB limit order at best bid.
+    def execute_sell(
+        self,
+        market_id: str,
+        shares: float,
+        fill_timeout: float = 0.0,
+        fill_poll_interval: float = 2.0,
+    ) -> dict:
+        """Execute a sell trade via CLOB limit order at fresh best bid.
+
+        Re-fetches the orderbook before selling to avoid stale prices.
+        When ``fill_timeout > 0``, verifies fill and cancels unfilled orders.
 
         Args:
             market_id: condition_id of the market.
             shares: Number of shares to sell.
+            fill_timeout: Seconds to wait for fill verification (0 = skip).
+            fill_poll_interval: Seconds between fill status polls.
 
         Returns:
             {"success": bool, "trade_id": str}
@@ -250,7 +405,22 @@ class CLOBWeatherBridge:
             return {"error": "No token ID", "success": False}
 
         token_id = gm.clob_token_ids[0]  # YES token
-        price = gm.best_bid if gm.best_bid > 0 else gm.outcome_prices[0] if gm.outcome_prices else 0.5
+
+        # Re-fetch fresh price from orderbook
+        try:
+            book = self.clob.get_orderbook(token_id)
+            bids = book.get("bids") or []
+            if bids:
+                price = float(bids[0]["price"])
+            else:
+                price = gm.best_bid if gm.best_bid > 0 else (
+                    gm.outcome_prices[0] if gm.outcome_prices else 0.5
+                )
+        except Exception:
+            price = gm.best_bid if gm.best_bid > 0 else (
+                gm.outcome_prices[0] if gm.outcome_prices else 0.5
+            )
+            logger.warning("Could not refresh bid for %s, using cached %.4f", token_id[:16], price)
 
         if price <= 0:
             return {"error": "Invalid bid price", "success": False}
@@ -268,6 +438,30 @@ class CLOBWeatherBridge:
                 "Bridge sell: SELL %.1f shares of %s @ %.4f (order %s)",
                 shares, token_id[:16], price, order_id,
             )
+
+            # Fill verification
+            actual_shares = shares
+            if fill_timeout > 0 and order_id:
+                fill = self.verify_fill(order_id, fill_timeout, fill_poll_interval)
+                if fill["filled"] and not fill["partial"]:
+                    actual_shares = fill["size_matched"]
+                    logger.info("Sell order %s fully filled: %.1f shares", order_id, actual_shares)
+                elif fill["partial"]:
+                    actual_shares = fill["size_matched"]
+                    logger.warning("Sell order %s partially filled: %.1f/%.1f — cancelling remainder",
+                                   order_id, actual_shares, fill["original_size"])
+                    self.cancel_order(order_id)
+                else:
+                    logger.warning("Sell order %s not filled within %.1fs — cancelling", order_id, fill_timeout)
+                    self.cancel_order(order_id)
+                    return {
+                        "success": False,
+                        "error": f"Sell order not filled within {fill_timeout}s",
+                        "trade_id": order_id,
+                    }
+
+            self._total_exposure = max(0.0, self._total_exposure - price * actual_shares)
+            self._position_count = max(0, self._position_count - 1)
             return {
                 "success": True,
                 "trade_id": order_id,
@@ -276,18 +470,3 @@ class CLOBWeatherBridge:
             logger.error("Bridge sell failed: %s", exc)
             return {"error": str(exc), "success": False}
 
-    # ------------------------------------------------------------------
-    # Risk monitoring (no-op — managed by bot/strategy instead)
-    # ------------------------------------------------------------------
-
-    def set_risk_monitor(self, market_id: str, side: str,
-                         stop_loss_pct: float = 0.20,
-                         take_profit_pct: float = 0.50) -> dict | None:
-        """No-op — risk monitoring is done by the strategy, not the API."""
-        return None
-
-    def get_risk_monitors(self) -> dict | None:
-        return None
-
-    def remove_risk_monitor(self, market_id: str, side: str) -> dict:
-        return {}

@@ -21,15 +21,10 @@ class TradeRecord:
     price: float
     size: float
     order_id: str = ""
-    neg_risk: bool = False
     timestamp: str = ""
     memo: str = ""
     end_date: str = ""
     condition_id: str = ""
-    # Weather-specific fields
-    location: str = ""
-    forecast_temp: float | None = None
-    outcome_name: str = ""
 
     def to_dict(self) -> dict:
         return self.__dict__.copy()
@@ -125,7 +120,29 @@ class TradingState:
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         return self.daily_pnl.get(today, 0.0)
 
+    def prune(self, max_pnl_history: int = 500, max_prediction_days: int = 90) -> None:
+        """Remove old entries to prevent unbounded state growth."""
+        # Cap pnl_history
+        if len(self.pnl_history) > max_pnl_history:
+            self.pnl_history = self.pnl_history[-max_pnl_history:]
+
+        # Keep last N resolved predictions + all unresolved
+        resolved = [(k, v) for k, v in self.predictions.items() if v.get("resolved")]
+        if len(resolved) > max_pnl_history:
+            # Sort by timestamp, keep newest
+            resolved.sort(key=lambda kv: kv[1].get("timestamp", ""), reverse=True)
+            to_remove = {k for k, _ in resolved[max_pnl_history:]}
+            for k in to_remove:
+                del self.predictions[k]
+
+        # Prune daily_pnl older than 90 days
+        if len(self.daily_pnl) > max_prediction_days:
+            sorted_days = sorted(self.daily_pnl.keys())
+            for day in sorted_days[:-max_prediction_days]:
+                del self.daily_pnl[day]
+
     def save(self, path: str) -> None:
+        self.prune()
         data = {
             "trades": {mid: rec.to_dict() for mid, rec in self.trades.items()},
             "last_run": datetime.now(timezone.utc).isoformat(),
@@ -177,20 +194,33 @@ class TradingState:
 
 
 @contextlib.contextmanager
-def state_lock(state_path: str):
-    """Exclusive file lock around state access (fcntl.flock, LOCK_EX | LOCK_NB).
+def state_lock(state_path: str, retries: int = 3, delay: float = 0.2):
+    """Exclusive file lock around state access with brief retry.
 
     Prevents concurrent bot runs from corrupting state.
+    Retries a few times with short delays before giving up.
     """
+    import time
+
     lock_path = state_path + ".lock"
     fd = open(lock_path, "w")
+    acquired = False
     try:
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        logger.debug("Acquired state lock: %s", lock_path)
+        for attempt in range(retries + 1):
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                acquired = True
+                logger.debug("Acquired state lock: %s", lock_path)
+                break
+            except OSError:
+                if attempt < retries:
+                    time.sleep(delay)
+                    continue
+                logger.error("Failed to acquire state lock after %d attempts — another instance running?",
+                             retries + 1)
+                raise
         yield
-    except OSError:
-        logger.error("Failed to acquire state lock — another instance running?")
-        raise
     finally:
-        fcntl.flock(fd, fcntl.LOCK_UN)
+        if acquired:
+            fcntl.flock(fd, fcntl.LOCK_UN)
         fd.close()

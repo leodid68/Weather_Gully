@@ -6,6 +6,8 @@ import time
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
+from ._ssl import SSL_CTX as _SSL_CTX
+
 logger = logging.getLogger(__name__)
 
 NOAA_API_BASE = "https://api.weather.gov"
@@ -28,7 +30,7 @@ def _fetch_json(
     for attempt in range(max_retries + 1):
         try:
             req = Request(url, headers=hdrs)
-            with urlopen(req, timeout=30) as resp:
+            with urlopen(req, timeout=30, context=_SSL_CTX) as resp:
                 return json.loads(resp.read().decode())
         except HTTPError as exc:
             if exc.code in _RETRYABLE_CODES and attempt < max_retries:

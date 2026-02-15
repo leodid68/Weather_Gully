@@ -6,8 +6,11 @@ Fetches GFS and ECMWF forecasts and returns a combined/ensemble view.
 import json
 import logging
 import time
+from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
+
+from ._ssl import SSL_CTX as _SSL_CTX
 
 logger = logging.getLogger(__name__)
 
@@ -19,6 +22,25 @@ MODEL_WEIGHTS = {
     "gfs_seamless": 0.30,
     "noaa": 0.20,
 }
+
+_CALIBRATION_PATH = Path(__file__).parent / "calibration.json"
+
+
+def _get_model_weights(location: str = "") -> dict[str, float]:
+    """Get model weights, preferring calibrated per-location weights.
+
+    Lookup chain: calibration.json location weights → default MODEL_WEIGHTS.
+    """
+    if location and _CALIBRATION_PATH.exists():
+        try:
+            with open(_CALIBRATION_PATH) as f:
+                cal = json.load(f)
+            loc_weights = cal.get("model_weights", {}).get(location)
+            if loc_weights:
+                return loc_weights
+        except (json.JSONDecodeError, IOError):
+            pass
+    return MODEL_WEIGHTS
 
 _MODELS = "gfs_seamless,ecmwf_ifs025"
 
@@ -34,7 +56,7 @@ def _fetch_json(url: str, max_retries: int = 3, base_delay: float = 1.0) -> dict
                 "Accept": "application/json",
                 "User-Agent": _USER_AGENT,
             })
-            with urlopen(req, timeout=30) as resp:
+            with urlopen(req, timeout=30, context=_SSL_CTX) as resp:
                 return json.loads(resp.read().decode())
         except (HTTPError, URLError, TimeoutError) as exc:
             if attempt < max_retries:
@@ -51,22 +73,12 @@ def _fetch_json(url: str, max_retries: int = 3, base_delay: float = 1.0) -> dict
     return None
 
 
-def _timezone_for_lon(lon: float) -> str:
-    """Approximate US timezone from longitude."""
-    if lon > -85:
-        return "America/New_York"
-    elif lon > -100:
-        return "America/Chicago"
-    elif lon > -115:
-        return "America/Denver"
-    return "America/Los_Angeles"
-
-
 def get_open_meteo_forecast(
     lat: float,
     lon: float,
     max_retries: int = 3,
     base_delay: float = 1.0,
+    tz_name: str = "",
 ) -> dict[str, dict]:
     """Fetch multi-model forecasts from Open-Meteo.
 
@@ -80,11 +92,20 @@ def get_open_meteo_forecast(
             ...
         }
     """
-    tz = _timezone_for_lon(lon)
+    if not tz_name:
+        from .probability import _tz_from_lon
+        tz_name = _tz_from_lon(lon)
+    tz = tz_name
+    # Auxiliary weather variables for sigma adjustment
+    _AUX_VARS = (
+        "cloud_cover_max,cloud_cover_mean,"
+        "wind_speed_10m_max,wind_gusts_10m_max,"
+        "precipitation_sum,precipitation_probability_max"
+    )
     url = (
         f"{OPEN_METEO_BASE}"
         f"?latitude={lat}&longitude={lon}"
-        f"&daily=temperature_2m_max,temperature_2m_min"
+        f"&daily=temperature_2m_max,temperature_2m_min,{_AUX_VARS}"
         f"&temperature_unit=fahrenheit"
         f"&timezone={tz}"
         f"&models={_MODELS}"
@@ -120,6 +141,28 @@ def get_open_meteo_forecast(
         if ecmwf_low is not None:
             entry["ecmwf_low"] = round(ecmwf_low)
 
+        # Auxiliary weather variables (average across models where applicable)
+        for aux_key, entry_key in [
+            ("cloud_cover_max", "cloud_cover_max"),
+            ("cloud_cover_mean", "cloud_cover_mean"),
+            ("wind_speed_10m_max", "wind_speed_max"),
+            ("wind_gusts_10m_max", "wind_gusts_max"),
+            ("precipitation_sum", "precip_sum"),
+            ("precipitation_probability_max", "precip_prob_max"),
+        ]:
+            # Try model-specific keys first, then plain key
+            values = []
+            for model_suffix in ["_gfs_seamless", "_ecmwf_ifs025"]:
+                val = _safe_get(daily, aux_key + model_suffix, i)
+                if val is not None:
+                    values.append(val)
+            if not values:
+                val = _safe_get(daily, aux_key, i)
+                if val is not None:
+                    values.append(val)
+            if values:
+                entry[entry_key] = round(sum(values) / len(values), 1)
+
         if entry:
             forecasts[date_str] = entry
 
@@ -143,6 +186,7 @@ def compute_ensemble_forecast(
     metric: str,
     aviation_obs_temp: float | None = None,
     aviation_obs_weight: float = 0.0,
+    location: str = "",
 ) -> tuple[float | None, float]:
     """Combine NOAA + Open-Meteo + Aviation observations into a weighted ensemble.
 
@@ -152,15 +196,17 @@ def compute_ensemble_forecast(
         metric: ``"high"`` or ``"low"``.
         aviation_obs_temp: Observed temperature from METAR (may be None).
         aviation_obs_weight: Weight for the aviation observation (default 0.0).
+        location: Canonical location key for calibrated model weights.
 
     Returns:
         ``(ensemble_temp, model_spread)`` where model_spread is the std dev
         across available models (useful for adjusting confidence).
     """
+    weights = _get_model_weights(location)
     temps: list[tuple[float, float]] = []  # (temp, weight)
 
     if noaa_temp is not None:
-        temps.append((noaa_temp, MODEL_WEIGHTS.get("noaa", 0.20)))
+        temps.append((noaa_temp, weights.get("noaa", 0.20)))
 
     if open_meteo_data:
         gfs_key = f"gfs_{metric}"
@@ -168,11 +214,11 @@ def compute_ensemble_forecast(
 
         gfs_val = open_meteo_data.get(gfs_key)
         if gfs_val is not None:
-            temps.append((gfs_val, MODEL_WEIGHTS.get("gfs_seamless", 0.30)))
+            temps.append((gfs_val, weights.get("gfs_seamless", 0.30)))
 
         ecmwf_val = open_meteo_data.get(ecmwf_key)
         if ecmwf_val is not None:
-            temps.append((ecmwf_val, MODEL_WEIGHTS.get("ecmwf_ifs025", 0.50)))
+            temps.append((ecmwf_val, weights.get("ecmwf_ifs025", 0.50)))
 
     if aviation_obs_temp is not None and aviation_obs_weight > 0:
         temps.append((aviation_obs_temp, aviation_obs_weight))

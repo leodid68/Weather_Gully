@@ -1,0 +1,9 @@
+{
+  "daily": {
+    "time": ["2025-01-15", "2025-01-16", "2025-01-17"],
+    "temperature_2m_max_gfs_seamless": [42.0, 45.0, 48.0],
+    "temperature_2m_min_gfs_seamless": [30.0, 32.0, 35.0],
+    "temperature_2m_max_ecmwf_ifs025": [44.0, 46.0, 50.0],
+    "temperature_2m_min_ecmwf_ifs025": [31.0, 33.0, 36.0]
+  }
+}

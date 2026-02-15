@@ -141,6 +141,7 @@ def score_buckets(
     obs_data: dict | None = None,
     metric: str = "high",
     location: str = "",
+    weather_data: dict | None = None,
 ) -> list[dict]:
     """Score all buckets in an event by expected value.
 
@@ -153,6 +154,7 @@ def score_buckets(
             (keys: ``obs_high``, ``obs_low``, ``latest_obs_time``, ``obs_count``).
         metric: ``"high"`` or ``"low"`` — which extreme this event tracks.
         location: Canonical location key (for timezone-aware sigma).
+        weather_data: Optional auxiliary weather data (cloud/wind/precip).
 
     Returns a list of ``{"market": dict, "bucket": tuple, "prob": float,
     "price": float, "ev": float}`` sorted by EV descending.
@@ -165,7 +167,9 @@ def score_buckets(
         if not bucket:
             continue
 
-        price = market.get("external_price_yes") or 0.5
+        # Use best_ask for pricing when available (more accurate than mid-price)
+        best_ask = market.get("best_ask")
+        price = best_ask if best_ask and best_ask > 0 else (market.get("external_price_yes") or 0.5)
 
         # Skip extreme prices
         if price < MIN_TICK_SIZE or price > (1 - MIN_TICK_SIZE):
@@ -174,17 +178,23 @@ def score_buckets(
         if obs_data and obs_data.get("obs_count", 0) > 0:
             loc_data = LOCATIONS.get(location, {})
             station_lon = loc_data.get("lon", -74.0)
+            station_tz = loc_data.get("tz", "")
             prob = estimate_bucket_probability_with_obs(
                 forecast_temp, bucket[0], bucket[1], forecast_date,
                 obs_data=obs_data,
                 metric=metric,
                 apply_seasonal=config.seasonal_adjustments,
                 station_lon=station_lon,
+                station_tz=station_tz,
+                location=location,
+                weather_data=weather_data,
             )
         else:
             prob = estimate_bucket_probability(
                 forecast_temp, bucket[0], bucket[1], forecast_date,
                 apply_seasonal=config.seasonal_adjustments,
+                location=location,
+                weather_data=weather_data,
             )
 
         ev = prob - price  # Expected value above break-even
@@ -213,52 +223,61 @@ def check_exit_opportunities(
     dry_run: bool = True,
     use_safeguards: bool = True,
 ) -> tuple[int, int]:
-    """Check open positions for exit opportunities. Returns ``(found, executed)``."""
-    positions = client.get_positions()
-    if not positions:
+    """Check open positions for exit opportunities. Returns ``(found, executed)``.
+
+    Uses state-tracked trades instead of API positions (bridge.get_positions()
+    returns [] since weather positions are tracked in state).
+    """
+    if not state.trades:
         return 0, 0
 
-    weather_positions = []
-    for pos in positions:
-        question = pos.get("question", "").lower()
-        sources = pos.get("sources", [])
-        if _TRADE_SOURCE in sources or any(
-            kw in question for kw in ["temperature", "\u00b0f", "highest temp", "lowest temp"]
-        ):
-            weather_positions.append(pos)
-
-    if not weather_positions:
-        return 0, 0
-
-    logger.info("Checking %d weather positions for exit...", len(weather_positions))
+    logger.info("Checking %d weather positions for exit...", len(state.trades))
     exits_found = 0
     exits_executed = 0
 
-    for pos in weather_positions:
-        market_id = pos.get("market_id")
-        current_price = pos.get("current_price") or pos.get("price_yes") or 0
-        shares = pos.get("shares_yes") or pos.get("shares") or 0
-        question = pos.get("question", "Unknown")[:50]
-
+    for market_id, trade in list(state.trades.items()):
+        shares = trade.shares
         if shares < MIN_SHARES_PER_ORDER:
             continue
 
+        # Fetch current price from orderbook
+        gm = client._market_cache.get(market_id)
+        if not gm or not gm.clob_token_ids:
+            continue
+        token_id = gm.clob_token_ids[0]
+        try:
+            book = client.clob.get_orderbook(token_id)
+            bids = book.get("bids") or []
+            current_price = float(bids[0]["price"]) if bids else 0.0
+        except Exception:
+            continue
+
+        if current_price <= 0:
+            continue
+
         # Dynamic exit threshold
-        cost_basis = state.get_cost_basis(market_id) or config.exit_threshold
+        cost_basis = trade.cost_basis or config.exit_threshold
         if config.dynamic_exits:
-            time_str = pos.get("time_to_resolution", "")
-            hours = _parse_time_to_hours(time_str) if time_str else 168.0  # default 7 days
-            if hours is None:
-                hours = 168.0
+            # Estimate hours to resolution from end_date in cached market
+            hours = 168.0
+            if gm.end_date:
+                try:
+                    end_dt = datetime.fromisoformat(gm.end_date.replace("Z", "+00:00"))
+                    delta = end_dt - datetime.now(timezone.utc)
+                    hours = max(0, delta.total_seconds() / 3600)
+                except (ValueError, TypeError):
+                    pass
             exit_threshold = compute_exit_threshold(cost_basis, hours)
         else:
             exit_threshold = config.exit_threshold
+
+        outcome_name = trade.outcome_name[:50]
 
         if current_price >= exit_threshold:
             exits_found += 1
             logger.info(
                 "EXIT: %s — price $%.2f >= threshold $%.2f",
-                question, current_price, exit_threshold,
+                outcome_name, current_price, exit_threshold,
             )
 
             if use_safeguards:
@@ -270,26 +289,16 @@ def check_exit_opportunities(
                 if reasons:
                     logger.info("Exit warnings: %s", "; ".join(reasons))
 
-            # Race condition guard: re-read fresh position
-            fresh = client.get_position(market_id)
-            fresh_shares = 0.0
-            if fresh:
-                fresh_shares = fresh.get("shares_yes") or fresh.get("shares") or 0
-            if fresh_shares < MIN_SHARES_PER_ORDER:
-                logger.info("Position already closed for %s, skipping", market_id)
-                continue
-
             if dry_run:
-                logger.info("[DRY RUN] Would sell %.1f shares of %s", fresh_shares, question)
+                logger.info("[DRY RUN] Would sell %.1f shares of %s", shares, outcome_name)
             else:
-                logger.info("Selling %.1f shares of %s...", fresh_shares, question)
-                result = client.execute_sell(market_id, fresh_shares)
+                logger.info("Selling %.1f shares of %s...", shares, outcome_name)
+                result = client.execute_sell(market_id, shares)
 
                 if result.get("success"):
                     exits_executed += 1
-                    logger.info("Sold %.1f shares @ $%.2f", fresh_shares, current_price)
+                    logger.info("Sold %.1f shares @ $%.2f", shares, current_price)
                     state.remove_trade(market_id)
-                    # Clean up correlation guard
                     for eid, mid in list(state.event_positions.items()):
                         if mid == market_id:
                             state.remove_event_position(eid)
@@ -299,7 +308,7 @@ def check_exit_opportunities(
         else:
             logger.debug(
                 "HOLD: %s — price $%.2f < threshold $%.2f",
-                question, current_price, exit_threshold,
+                outcome_name, current_price, exit_threshold,
             )
 
     return exits_found, exits_executed
@@ -353,29 +362,23 @@ def _check_stop_loss_reversals(
             # Only trust obs for stop-loss when the daily extreme is likely
             # to have been reached: after ~14:00 local for highs, ~08:00 for lows.
             loc_data = LOCATIONS.get(trade.location, {})
-            utc_offset = loc_data.get("lon", -74.0)
-            # Approximate local hour from UTC
-            if utc_offset > -85:
-                tz_offset = -5.0
-            elif utc_offset > -100:
-                tz_offset = -6.0
-            elif utc_offset > -115:
-                tz_offset = -7.0
-            else:
-                tz_offset = -8.0
+            tz_name = loc_data.get("tz", "America/New_York")
 
             obs_usable = False
             if obs_temp is not None and latest_time:
                 try:
-                    utc_hour = int(latest_time[11:13])
-                    local_hour = (utc_hour + tz_offset) % 24
+                    from datetime import datetime as _dt
+                    from zoneinfo import ZoneInfo
+                    utc_dt = _dt.fromisoformat(latest_time.replace("Z", "+00:00"))
+                    local_dt = utc_dt.astimezone(ZoneInfo(tz_name))
+                    local_hour = local_dt.hour
                     # For highs: trust after 14:00 local (peak likely passed)
                     # For lows: trust after 08:00 local (morning low passed)
                     if metric == "high" and local_hour >= 14:
                         obs_usable = True
                     elif metric == "low" and local_hour >= 8:
                         obs_usable = True
-                except (ValueError, IndexError):
+                except (ValueError, IndexError, KeyError):
                     pass
 
             if obs_usable:
@@ -491,6 +494,9 @@ def run_weather_strategy(
                 )
         return
 
+    # Sync bridge exposure from persisted state
+    client.sync_exposure_from_state(state.trades)
+
     # Parallel fetch: portfolio + markets
     logger.info("Fetching portfolio and markets in parallel...")
     with ThreadPoolExecutor(max_workers=2) as pool:
@@ -550,6 +556,7 @@ def run_weather_strategy(
             loc_data["lat"], loc_data["lon"],
             max_retries=config.max_retries,
             base_delay=config.retry_base_delay,
+            tz_name=loc_data.get("tz", ""),
         )
 
     def _fetch_aviation() -> dict[str, dict]:
@@ -671,6 +678,7 @@ def run_weather_strategy(
                 noaa_temp, om_data, metric,
                 aviation_obs_temp=aviation_obs_temp,
                 aviation_obs_weight=effective_aviation_weight,
+                location=location,
             )
             if ensemble_temp is not None:
                 obs_str = f", obs={aviation_obs_temp:.0f}°F" if aviation_obs_temp is not None else ""
@@ -685,7 +693,7 @@ def run_weather_strategy(
             forecast_temp = noaa_temp
         elif om_data:
             # Fallback: NOAA failed but Open-Meteo available
-            fallback_temp, _ = compute_ensemble_forecast(None, om_data, metric)
+            fallback_temp, _ = compute_ensemble_forecast(None, om_data, metric, location=location)
             if fallback_temp is not None:
                 logger.warning("NOAA unavailable for %s %s — falling back to Open-Meteo (%.1f°F)",
                                location, date_str, fallback_temp)
@@ -715,12 +723,18 @@ def run_weather_strategy(
         logger.info("NOAA probability: %.1f%% (horizon %d days)", noaa_prob * 100, days_ahead)
 
         # Score all buckets (adjacent scoring) or just the matching one
-        # Pass obs_data for day-J and J+1 only
-        scoring_obs = obs_data if (obs_data and days_ahead <= 1 and config.aviation_obs) else None
+        # When multi_source is enabled, aviation obs is already baked into
+        # forecast_temp via compute_ensemble_forecast(), so we must NOT also
+        # pass it to score_buckets() — that would double-weight the observation.
+        # Only pass obs_data to scoring when it was NOT used in the ensemble.
+        if config.multi_source and aviation_obs_temp is not None:
+            scoring_obs = None  # Already incorporated in ensemble forecast
+        else:
+            scoring_obs = obs_data if (obs_data and days_ahead <= 1 and config.aviation_obs) else None
         if config.adjacent_buckets:
             scored = score_buckets(event_markets, forecast_temp, date_str, config,
                                    obs_data=scoring_obs, metric=metric,
-                                   location=location)
+                                   location=location, weather_data=om_data)
             tradeable = [s for s in scored if s["ev"] >= config.min_ev_threshold]
         else:
             # Legacy: single-match
@@ -729,11 +743,14 @@ def run_weather_strategy(
                 outcome_name = market.get("outcome_name", "")
                 bucket = parse_temperature_bucket(outcome_name)
                 if bucket and bucket[0] <= forecast_temp <= bucket[1]:
-                    price = market.get("external_price_yes") or 0.5
+                    best_ask = market.get("best_ask")
+                    price = best_ask if best_ask and best_ask > 0 else (market.get("external_price_yes") or 0.5)
                     if MIN_TICK_SIZE <= price <= (1 - MIN_TICK_SIZE):
                         prob = estimate_bucket_probability(
                             forecast_temp, bucket[0], bucket[1], date_str,
                             apply_seasonal=config.seasonal_adjustments,
+                            location=location,
+                            weather_data=om_data,
                         )
                         tradeable.append({
                             "market": market,

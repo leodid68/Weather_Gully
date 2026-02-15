@@ -1,6 +1,7 @@
 """Polymarket CLOB order construction and EIP-712 signing."""
 
-import random
+import secrets
+from decimal import Decimal, ROUND_HALF_UP
 
 from eth_abi import encode
 from eth_account import Account
@@ -44,9 +45,8 @@ _VERSION_HASH = keccak(b"1")
 
 
 def _generate_salt() -> int:
-    """Generate a random salt matching the official client format."""
-    import time
-    return round(time.time() * random.random())
+    """Generate a cryptographically random salt."""
+    return secrets.randbelow(2**128)
 
 
 def _compute_domain_separator(neg_risk: bool) -> bytes:
@@ -131,13 +131,16 @@ def build_order(
     """
     side_int = _SIDE_MAP[side.upper()]
 
-    # Amount calculations (USDC 6 decimals)
+    # Amount calculations (USDC 6 decimals) — use Decimal to avoid float rounding
+    d_price = Decimal(str(price))
+    d_size = Decimal(str(size))
+    d_unit = Decimal(USDC_UNIT)
     if side_int == SIDE_BUY:
-        maker_amount = round(price * size * USDC_UNIT)
-        taker_amount = round(size * USDC_UNIT)
+        maker_amount = int((d_price * d_size * d_unit).to_integral_value(rounding=ROUND_HALF_UP))
+        taker_amount = int((d_size * d_unit).to_integral_value(rounding=ROUND_HALF_UP))
     else:
-        maker_amount = round(size * USDC_UNIT)
-        taker_amount = round(price * size * USDC_UNIT)
+        maker_amount = int((d_size * d_unit).to_integral_value(rounding=ROUND_HALF_UP))
+        taker_amount = int((d_price * d_size * d_unit).to_integral_value(rounding=ROUND_HALF_UP))
 
     return {
         "salt": _generate_salt(),

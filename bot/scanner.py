@@ -18,6 +18,8 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+_GRADE_RANK = {"A": 0, "B": 1, "C": 2, "D": 3}
+
 _GRADE_BPS = {"A": 50, "B": 100, "C": 200}
 
 
@@ -218,7 +220,7 @@ def _scan_with_clob_fallback(client, config: "Config") -> list[dict]:
                 metrics = compute_book_metrics(book)
                 tok["metrics"] = metrics
                 grade = metrics["liquidity_grade"]
-                if {"A": 0, "B": 1, "C": 2, "D": 3}.get(grade, 3) < {"A": 0, "B": 1, "C": 2, "D": 3}.get(best_grade, 3):
+                if _GRADE_RANK.get(grade, 3) < _GRADE_RANK.get(best_grade, 3):
                     best_grade = grade
             except Exception:
                 tok["metrics"] = {"liquidity_grade": "D"}
@@ -234,13 +236,12 @@ def filter_tradeable(
     Grade ordering: A > B > C > D.  Markets graded below *min_liquidity*
     are excluded.
     """
-    grade_order = {"A": 0, "B": 1, "C": 2, "D": 3}
-    cutoff = grade_order.get(min_liquidity, 2)
+    cutoff = _GRADE_RANK.get(min_liquidity, 2)
 
     result = []
     for m in markets:
         grade = m.get("liquidity_grade", "D")
-        if grade_order.get(grade, 3) <= cutoff:
+        if _GRADE_RANK.get(grade, 3) <= cutoff:
             result.append(m)
 
     logger.info(

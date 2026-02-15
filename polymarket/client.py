@@ -3,6 +3,7 @@
 import json
 import logging
 import time
+from urllib.parse import urlencode
 
 import httpx
 
@@ -62,21 +63,24 @@ class PolymarketClient:
         self, method: str, path: str, body: dict | list | None = None, auth: bool = True
     ) -> dict | list:
         body_str = _json_compact(body) if body is not None else ""
-        headers = {
-            "Content-Type": "application/json",
-            "User-Agent": "py_clob_client",
-            "Accept": "*/*",
-            "Connection": "keep-alive",
-        }
-        if auth:
-            headers.update(
-                build_l2_headers(
-                    self.api_key, self.secret, self.passphrase,
-                    self.address, method, path, body_str,
-                )
-            )
+        resp = None
 
         for attempt in range(self.max_retries + 1):
+            # Build headers inside retry loop so HMAC timestamp is fresh
+            headers = {
+                "Content-Type": "application/json",
+                "User-Agent": "py_clob_client",
+                "Accept": "*/*",
+                "Connection": "keep-alive",
+            }
+            if auth:
+                headers.update(
+                    build_l2_headers(
+                        self.api_key, self.secret, self.passphrase,
+                        self.address, method, path, body_str,
+                    )
+                )
+
             try:
                 resp = self._http.request(
                     method,
@@ -119,8 +123,7 @@ class PolymarketClient:
 
     def get_markets(self, **filters) -> list[dict]:
         """Fetch available markets with optional query filters."""
-        params = "&".join(f"{k}={v}" for k, v in filters.items())
-        path = "/markets" + (f"?{params}" if params else "")
+        path = "/markets" + (f"?{urlencode(filters)}" if filters else "")
         return self._request("GET", path, auth=False)
 
     def get_market(self, condition_id: str) -> dict:
@@ -201,7 +204,8 @@ class PolymarketClient:
             "orderType": order_type,
             "postOnly": False,
         }
-        logger.info("POST /order payload: %s", _json_compact(body))
+        logger.debug("POST /order side=%s price=%s size=%s",
+                     order_payload["side"], order_payload["makerAmount"], order_payload["takerAmount"])
         return self._request("POST", "/order", body=body)
 
     def cancel_order(self, order_id: str) -> dict:
@@ -214,8 +218,7 @@ class PolymarketClient:
 
     def get_open_orders(self, **filters) -> list[dict]:
         """Fetch all open orders for the authenticated user."""
-        params = "&".join(f"{k}={v}" for k, v in filters.items())
-        path = "/data/orders" + (f"?{params}" if params else "")
+        path = "/data/orders" + (f"?{urlencode(filters)}" if filters else "")
         return self._request("GET", path)
 
     # ------------------------------------------------------------------
@@ -224,9 +227,27 @@ class PolymarketClient:
 
     def get_trades(self, **filters) -> list[dict]:
         """Fetch trade history with optional filters."""
-        params = "&".join(f"{k}={v}" for k, v in filters.items())
-        path = "/data/trades" + (f"?{params}" if params else "")
+        path = "/data/trades" + (f"?{urlencode(filters)}" if filters else "")
         return self._request("GET", path)
+
+    def get_order(self, order_id: str) -> dict:
+        """Fetch a single order by ID to check fill status."""
+        return self._request("GET", f"/data/order/{order_id}")
+
+    def is_order_filled(self, order_id: str) -> bool:
+        """Check whether an order has been fully filled."""
+        try:
+            order = self.get_order(order_id)
+            if order.get("status") == "MATCHED":
+                return True
+            size_matched = order.get("size_matched")
+            original_size = order.get("original_size")
+            if size_matched is not None and original_size is not None:
+                return abs(float(size_matched) - float(original_size)) < 1e-9
+            return False
+        except Exception as exc:
+            logger.warning("Could not verify fill for order %s: %s", order_id, exc)
+            return False
 
     # ------------------------------------------------------------------
     # Lifecycle

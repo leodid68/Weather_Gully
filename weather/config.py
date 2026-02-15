@@ -3,19 +3,19 @@
 import json
 import logging
 import os
-from dataclasses import dataclass, field, fields
+from dataclasses import dataclass, fields
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
 # Supported locations (matching Polymarket resolution sources)
 LOCATIONS = {
-    "NYC": {"lat": 40.7769, "lon": -73.8740, "name": "New York City (LaGuardia)"},
-    "Chicago": {"lat": 41.9742, "lon": -87.9073, "name": "Chicago (O'Hare)"},
-    "Seattle": {"lat": 47.4502, "lon": -122.3088, "name": "Seattle (Sea-Tac)"},
-    "Atlanta": {"lat": 33.6407, "lon": -84.4277, "name": "Atlanta (Hartsfield)"},
-    "Dallas": {"lat": 32.8998, "lon": -97.0403, "name": "Dallas (DFW)"},
-    "Miami": {"lat": 25.7959, "lon": -80.2870, "name": "Miami (MIA)"},
+    "NYC": {"lat": 40.7769, "lon": -73.8740, "name": "New York City (LaGuardia)", "tz": "America/New_York"},
+    "Chicago": {"lat": 41.9742, "lon": -87.9073, "name": "Chicago (O'Hare)", "tz": "America/Chicago"},
+    "Seattle": {"lat": 47.4502, "lon": -122.3088, "name": "Seattle (Sea-Tac)", "tz": "America/Los_Angeles"},
+    "Atlanta": {"lat": 33.6407, "lon": -84.4277, "name": "Atlanta (Hartsfield)", "tz": "America/New_York"},
+    "Dallas": {"lat": 32.8998, "lon": -97.0403, "name": "Dallas (DFW)", "tz": "America/Chicago"},
+    "Miami": {"lat": 25.7959, "lon": -80.2870, "name": "Miami (MIA)", "tz": "America/New_York"},
 }
 
 # Polymarket constraints
@@ -98,6 +98,10 @@ class Config:
     aviation_obs_weight: float = 0.40
     aviation_hours: int = 24
 
+    # Execution: fill verification
+    fill_timeout_seconds: float = 30.0
+    fill_poll_interval: float = 2.0
+
     @property
     def active_locations(self) -> list[str]:
         """Return canonical location keys matching LOCATIONS dict keys.
@@ -168,8 +172,11 @@ class Config:
         """Load API creds from creds_file if it exists."""
         for path in [self.creds_file, str(Path(config_dir) / self.creds_file)]:
             if path and os.path.exists(path):
-                with open(path) as f:
-                    return json.load(f)
+                try:
+                    with open(path) as f:
+                        return json.load(f)
+                except (json.JSONDecodeError, IOError) as exc:
+                    logger.warning("Failed to load API creds from %s: %s", path, exc)
         return None
 
 

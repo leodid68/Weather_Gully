@@ -11,28 +11,3 @@ USDC_ADDRESS = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
 CONDITIONAL_TOKENS = "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045"
 
 CHAIN_ID = 137  # Polygon
-
-# EIP-712 domain
-ORDER_DOMAIN = {
-    "name": "Polymarket CTF Exchange",
-    "version": "1",
-    "chainId": CHAIN_ID,
-}
-
-# EIP-712 Order type (12 fields)
-ORDER_TYPES = {
-    "Order": [
-        {"name": "salt", "type": "uint256"},
-        {"name": "maker", "type": "address"},
-        {"name": "signer", "type": "address"},
-        {"name": "taker", "type": "address"},
-        {"name": "tokenId", "type": "uint256"},
-        {"name": "makerAmount", "type": "uint256"},
-        {"name": "takerAmount", "type": "uint256"},
-        {"name": "expiration", "type": "uint256"},
-        {"name": "nonce", "type": "uint256"},
-        {"name": "feeRateBps", "type": "uint256"},
-        {"name": "side", "type": "uint8"},
-        {"name": "signatureType", "type": "uint8"},
-    ]
-}

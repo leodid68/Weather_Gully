@@ -1,10 +1,10 @@
-"""Tests for extended state features: forecast tracking, calibration, correlation guard."""
+"""Tests for extended state features: forecast tracking, calibration, correlation guard, pending orders."""
 
 import tempfile
 import unittest
 from pathlib import Path
 
-from weather.state import PredictionRecord, TradingState
+from weather.state import PendingOrder, PredictionRecord, TradingState
 
 
 class TestForecastChangeDetection(unittest.TestCase):
@@ -198,6 +198,71 @@ class TestExtendedStateRoundtrip(unittest.TestCase):
         self.assertEqual(len(loaded.previous_forecasts), 0)
         self.assertEqual(len(loaded.predictions), 0)
         self.assertEqual(len(loaded.event_positions), 0)
+        self.assertEqual(len(loaded.pending_orders), 0)
+
+        Path(path).unlink()
+
+
+class TestPendingOrder(unittest.TestCase):
+
+    def test_to_dict_roundtrip(self):
+        po = PendingOrder(
+            order_id="order-123",
+            market_id="cond-1",
+            side="BUY",
+            price=0.35,
+            size=20.0,
+            timestamp="2025-03-15T12:00:00+00:00",
+            token_id="token-yes-1",
+        )
+        d = po.to_dict()
+        loaded = PendingOrder.from_dict(d)
+        self.assertEqual(loaded.order_id, "order-123")
+        self.assertEqual(loaded.market_id, "cond-1")
+        self.assertEqual(loaded.side, "BUY")
+        self.assertAlmostEqual(loaded.price, 0.35)
+        self.assertAlmostEqual(loaded.size, 20.0)
+        self.assertEqual(loaded.token_id, "token-yes-1")
+
+
+class TestPendingOrderStateRoundtrip(unittest.TestCase):
+
+    def test_save_load_pending_orders(self):
+        state = TradingState()
+        state.pending_orders["order-123"] = PendingOrder(
+            order_id="order-123",
+            market_id="cond-1",
+            side="BUY",
+            price=0.35,
+            size=20.0,
+            timestamp="2025-03-15T12:00:00+00:00",
+            token_id="token-yes-1",
+        )
+
+        with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as f:
+            path = f.name
+
+        state.save(path)
+        loaded = TradingState.load(path)
+
+        self.assertIn("order-123", loaded.pending_orders)
+        po = loaded.pending_orders["order-123"]
+        self.assertEqual(po.market_id, "cond-1")
+        self.assertAlmostEqual(po.price, 0.35)
+        self.assertAlmostEqual(po.size, 20.0)
+
+        Path(path).unlink()
+
+    def test_empty_pending_orders_roundtrip(self):
+        state = TradingState()
+        self.assertEqual(len(state.pending_orders), 0)
+
+        with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as f:
+            path = f.name
+
+        state.save(path)
+        loaded = TradingState.load(path)
+        self.assertEqual(len(loaded.pending_orders), 0)
 
         Path(path).unlink()
 

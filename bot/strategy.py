@@ -27,9 +27,9 @@ from datetime import datetime, timezone
 
 from .config import Config
 from .scanner import (
+    _scan_with_clob_fallback,
     compute_book_metrics,
     filter_tradeable,
-    scan_markets,
     scan_markets_gamma,
 )
 from .signals import scan_for_signals
@@ -196,11 +196,19 @@ def run_strategy(
         if current is None:
             continue
 
+        # Skip positions with pending exit orders
+        if pos.memo == "pending_exit":
+            logger.debug("Skipping %s — pending exit order", pos.token_id[:16])
+            continue
+
         # Stop-loss check
         if pos.side == "BUY":
             loss_pct = (pos.price - current) / pos.price if pos.price > 0 else 0
         else:
-            loss_pct = (current - pos.price) / (1.0 - pos.price) if pos.price < 1.0 else 0
+            # SELL loss = price moved up against us; clamp denominator to avoid
+            # extreme loss_pct when pos.price is near 1.0
+            denom = max(0.05, 1.0 - pos.price)
+            loss_pct = (current - pos.price) / denom if current > pos.price else 0
 
         if loss_pct >= config.stop_loss_pct:
             pnl = _compute_pnl(pos, current)
@@ -211,12 +219,35 @@ def run_strategy(
             if not dry_run:
                 try:
                     exit_side = "SELL" if pos.side == "BUY" else "BUY"
-                    client.post_order(
-                        pos.token_id, exit_side, current, pos.size,
+                    # Aggressive pricing: accept 2% slippage to ensure fill
+                    if exit_side == "SELL":
+                        aggressive_price = round(max(0.01, current * 0.98), 4)
+                    else:
+                        aggressive_price = round(min(0.99, current * 1.02), 4)
+                    result = client.post_order(
+                        pos.token_id, exit_side, aggressive_price, pos.size,
                     )
-                    state.record_daily_pnl(pnl)
-                    state.record_closed_trade(pos, current, pnl)
-                    state.remove_trade(pos.market_id)
+                    order_id = result.get("orderID", "")
+                    # Mark as pending exit — only fully close after fill
+                    state.record_trade(
+                        market_id=pos.market_id, token_id=pos.token_id,
+                        side=pos.side, price=pos.price, size=pos.size,
+                        order_id=order_id, memo="pending_exit",
+                        end_date=pos.end_date, condition_id=pos.condition_id,
+                    )
+                    # Best-effort fill check
+                    filled = False
+                    if order_id:
+                        try:
+                            filled = client.is_order_filled(order_id)
+                        except Exception:
+                            pass
+                    if filled:
+                        state.record_daily_pnl(pnl)
+                        state.record_closed_trade(pos, current, pnl)
+                        state.remove_trade(pos.market_id)
+                    else:
+                        logger.warning("Stop-loss order %s pending fill", order_id)
                 except Exception as exc:
                     logger.error("Stop-loss order failed: %s", exc)
             continue
@@ -234,17 +265,35 @@ def run_strategy(
             )
             if not dry_run:
                 try:
-                    client.post_order(
+                    result = client.post_order(
                         pos.token_id, "SELL", current, pos.size,
                     )
-                    state.record_daily_pnl(pnl)
-                    state.record_closed_trade(pos, current, pnl)
-                    state.remove_trade(pos.market_id)
+                    order_id = result.get("orderID", "")
+                    filled = False
+                    if order_id:
+                        try:
+                            filled = client.is_order_filled(order_id)
+                        except Exception:
+                            pass
+                    if filled:
+                        state.record_daily_pnl(pnl)
+                        state.record_closed_trade(pos, current, pnl)
+                        state.remove_trade(pos.market_id)
+                    else:
+                        state.record_trade(
+                            market_id=pos.market_id, token_id=pos.token_id,
+                            side=pos.side, price=pos.price, size=pos.size,
+                            order_id=order_id, memo="pending_exit",
+                            end_date=pos.end_date, condition_id=pos.condition_id,
+                        )
+                        logger.warning("Exit order %s pending fill", order_id)
                 except Exception as exc:
                     logger.error("Exit order failed: %s", exc)
 
-        # Take-profit: SELL exit (price dropped below threshold)
-        elif current <= (1.0 - threshold) and pos.side == "SELL":
+        # Take-profit: SELL exit (price dropped enough to lock in profit)
+        # For SELL, we profit when price drops. Exit when profit is sufficient:
+        # profit_pct = (entry - current) / entry >= (threshold - entry) / entry
+        elif pos.side == "SELL" and current <= 2 * pos.price - threshold:
             pnl = _compute_pnl(pos, current)
             logger.info(
                 "EXIT SELL: %s @ %.4f (entry %.4f, pnl $%.2f)",
@@ -252,12 +301,28 @@ def run_strategy(
             )
             if not dry_run:
                 try:
-                    client.post_order(
+                    result = client.post_order(
                         pos.token_id, "BUY", current, pos.size,
                     )
-                    state.record_daily_pnl(pnl)
-                    state.record_closed_trade(pos, current, pnl)
-                    state.remove_trade(pos.market_id)
+                    order_id = result.get("orderID", "")
+                    filled = False
+                    if order_id:
+                        try:
+                            filled = client.is_order_filled(order_id)
+                        except Exception:
+                            pass
+                    if filled:
+                        state.record_daily_pnl(pnl)
+                        state.record_closed_trade(pos, current, pnl)
+                        state.remove_trade(pos.market_id)
+                    else:
+                        state.record_trade(
+                            market_id=pos.market_id, token_id=pos.token_id,
+                            side=pos.side, price=pos.price, size=pos.size,
+                            order_id=order_id, memo="pending_exit",
+                            end_date=pos.end_date, condition_id=pos.condition_id,
+                        )
+                        logger.warning("Exit order %s pending fill", order_id)
                 except Exception as exc:
                     logger.error("Exit order failed: %s", exc)
 
@@ -273,17 +338,23 @@ def run_strategy(
             )
         except Exception as exc:
             logger.warning("Gamma scan failed (%s), falling back to CLOB", exc)
-            raw_markets = _scan_with_clob(client, config)
+            raw_markets = _scan_with_clob_fallback(client, config)
     else:
-        raw_markets = _scan_with_clob(client, config)
+        raw_markets = _scan_with_clob_fallback(client, config)
 
     # ── 2b. Weather markets (optional) ─────────────────────────────
-    if config.weather_enabled and config.use_gamma:
-        try:
-            from .gamma import GammaClient, group_multi_choice, gamma_to_scanner_format
-            with GammaClient() as gamma:
-                _, weather_markets = gamma.fetch_events_with_markets(tag_slug="weather")
-                weather_mc_groups = group_multi_choice(weather_markets, gamma_client=gamma)
+    # Shared GammaClient for weather scan + prediction resolution
+    _shared_gamma = None
+    if config.use_gamma:
+        from .gamma import GammaClient, group_multi_choice, gamma_to_scanner_format, resolve_pending_predictions
+        _shared_gamma = GammaClient()
+
+    try:  # ensure _shared_gamma is always closed
+
+        if config.weather_enabled and _shared_gamma is not None:
+            try:
+                _, weather_markets = _shared_gamma.fetch_events_with_markets(tag_slug="weather")
+                weather_mc_groups = group_multi_choice(weather_markets, gamma_client=_shared_gamma)
                 weather_tradeable = gamma_to_scanner_format(weather_markets)
                 # Deduplicate: skip markets already in main scan
                 existing_cids = {m.get("condition_id") for m in raw_markets}
@@ -300,138 +371,172 @@ def run_strategy(
                 multi_choice_groups.extend(weather_mc_groups)
                 logger.info("Weather: +%d markets, +%d multi-choice groups (after dedup)",
                             len(weather_tradeable), len(weather_mc_groups))
-        except Exception as exc:
-            logger.warning("Weather scan failed: %s — continuing without", exc)
-
-    # ── 3. Filter by liquidity ───────────────────────────────────────
-    tradeable = filter_tradeable(raw_markets, min_liquidity=config.min_liquidity_grade)
-
-    # For CLOB-discovered markets without Gamma grades, compute book metrics
-    for m in tradeable:
-        if "gamma" not in m:
-            for tok in m.get("tokens", []):
-                if "metrics" not in tok:
-                    try:
-                        book = client.get_orderbook(tok["token_id"])
-                        tok["metrics"] = compute_book_metrics(book)
-                    except Exception:
-                        tok["metrics"] = {"liquidity_grade": "D"}
-
-    # ── 4. Detect signals ────────────────────────────────────────────
-    token_ids = []
-    token_prices: dict[str, float] = {}
-    for m in tradeable:
-        for tok in m.get("tokens", []):
-            token_ids.append(tok["token_id"])
-            # Use Gamma price if available (avoids CLOB /price 400 errors)
-            if tok.get("price"):
-                token_prices[tok["token_id"]] = float(tok["price"])
-
-    # Build token pairs for binary arbitrage
-    token_pairs = _build_token_pairs(tradeable)
-
-    signals = scan_for_signals(
-        client, token_ids, config,
-        multi_choice_groups=multi_choice_groups,
-        token_prices=token_prices,
-        token_pairs=token_pairs,
-    )
-    logger.info("Signals detected: %d", len(signals))
-
-    # ── 5. Execute on signals ────────────────────────────────────────
-    for sig in signals:
-        if trades_this_run >= config.max_trades_per_run:
-            logger.info("Max trades per run reached (%d)", config.max_trades_per_run)
-            break
-
-        size_usd = position_size(
-            probability=sig.fair_value,
-            price=sig.market_price,
-            bankroll=config.max_total_exposure,
-            max_position=config.max_position_usd,
-            kelly_frac=config.kelly_fraction,
-            side=sig.side,
-        )
-        if size_usd <= 0:
-            continue
-
-        allowed, reason = check_risk_limits(
-            state, config, size_usd, current_prices=price_map,
-        )
-        if not allowed:
-            logger.info("Risk limit: %s — skipping %s", reason, sig.token_id[:16])
-            continue
-
-        # Find the condition_id and end_date for this token
-        condition_id = _find_condition_id(tradeable, sig.token_id)
-        end_date = _find_end_date(tradeable, sig.token_id)
-
-        logger.info(
-            "TRADE: %s %s @ %.4f, size=$%.2f, edge=%.4f [%s]",
-            sig.side, sig.token_id[:16], sig.market_price, size_usd,
-            sig.edge, sig.method,
-        )
-
-        if not dry_run:
-            try:
-                shares = size_usd / sig.market_price if sig.market_price > 0 else 0
-                result = client.post_order(
-                    sig.token_id, sig.side, sig.market_price, shares,
-                )
-                state.record_trade(
-                    market_id=condition_id or sig.token_id,
-                    token_id=sig.token_id,
-                    side=sig.side,
-                    price=sig.market_price,
-                    size=shares,
-                    order_id=result.get("orderID", ""),
-                    end_date=end_date,
-                    condition_id=condition_id,
-                )
             except Exception as exc:
-                logger.error("Order failed: %s", exc)
-                continue
-        else:
-            state.record_trade(
-                market_id=condition_id or sig.token_id,
-                token_id=sig.token_id,
-                side=sig.side,
+                logger.warning("Weather scan failed: %s — continuing without", exc)
+
+        # ── 3. Filter by liquidity ───────────────────────────────────
+        tradeable = filter_tradeable(raw_markets, min_liquidity=config.min_liquidity_grade)
+
+        # For CLOB-discovered markets without Gamma grades, compute book metrics
+        for m in tradeable:
+            if "gamma" not in m:
+                for tok in m.get("tokens", []):
+                    if "metrics" not in tok:
+                        try:
+                            book = client.get_orderbook(tok["token_id"])
+                            tok["metrics"] = compute_book_metrics(book)
+                        except Exception:
+                            tok["metrics"] = {"liquidity_grade": "D"}
+
+        # ── 4. Detect signals ────────────────────────────────────────
+        token_ids = []
+        token_prices: dict[str, float] = {}
+        for m in tradeable:
+            for tok in m.get("tokens", []):
+                token_ids.append(tok["token_id"])
+                # Use Gamma price if available (avoids CLOB /price 400 errors)
+                if tok.get("price"):
+                    token_prices[tok["token_id"]] = float(tok["price"])
+
+        # Build token pairs for binary arbitrage
+        token_pairs = _build_token_pairs(tradeable)
+
+        signals = scan_for_signals(
+            client, token_ids, config,
+            multi_choice_groups=multi_choice_groups,
+            token_prices=token_prices,
+            token_pairs=token_pairs,
+        )
+        logger.info("Signals detected: %d", len(signals))
+
+        # ── 5. Execute on signals ────────────────────────────────────
+        for sig in signals:
+            if trades_this_run >= config.max_trades_per_run:
+                logger.info("Max trades per run reached (%d)", config.max_trades_per_run)
+                break
+
+            size_usd = position_size(
+                probability=sig.fair_value,
                 price=sig.market_price,
-                size=size_usd / sig.market_price if sig.market_price > 0 else 0,
-                memo="dry_run",
-                end_date=end_date,
-                condition_id=condition_id,
+                bankroll=config.max_total_exposure,
+                max_position=config.max_position_usd,
+                kelly_frac=config.kelly_fraction,
+                side=sig.side,
+            )
+            if size_usd <= 0:
+                continue
+
+            allowed, reason = check_risk_limits(
+                state, config, size_usd, current_prices=price_map,
+            )
+            if not allowed:
+                logger.info("Risk limit: %s — skipping %s", reason, sig.token_id[:16])
+                continue
+
+            # Find the condition_id and end_date for this token
+            condition_id = _find_condition_id(tradeable, sig.token_id)
+            end_date = _find_end_date(tradeable, sig.token_id)
+
+            logger.info(
+                "TRADE: %s %s @ %.4f, size=$%.2f, edge=%.4f [%s]",
+                sig.side, sig.token_id[:16], sig.market_price, size_usd,
+                sig.edge, sig.method,
             )
 
-        state.record_prediction(
-            condition_id or sig.token_id, sig.fair_value, sig.market_price,
-        )
-        trades_this_run += 1
+            if not dry_run:
+                try:
+                    # Re-fetch fresh price to avoid stale data
+                    try:
+                        fresh_price_info = client.get_price(sig.token_id)
+                        fresh_price = float(fresh_price_info.get("price", sig.market_price))
+                    except Exception:
+                        fresh_price = sig.market_price
 
-    logger.info("Trades this run: %d (max %d)", trades_this_run, config.max_trades_per_run)
+                    if fresh_price <= 0:
+                        logger.warning("Invalid fresh price for %s — skipping", sig.token_id[:16])
+                        continue
+                    # BUY: cost = price * shares → shares = usd / price
+                    # SELL: max_loss = (1-price) * shares → shares = usd / (1-price)
+                    if sig.side == "SELL":
+                        shares = size_usd / (1.0 - fresh_price)
+                    else:
+                        shares = size_usd / fresh_price
+                    if shares <= 0:
+                        logger.warning("Zero shares for %s — skipping", sig.token_id[:16])
+                        continue
+                    result = client.post_order(
+                        sig.token_id, sig.side, fresh_price, shares,
+                    )
+                    order_id = result.get("orderID", "")
 
-    # ── 6. Weather pipeline (NOAA forecast → trading) ─────────────────
-    if config.weather_enabled:
-        try:
-            _run_weather_pipeline(client, config, state, dry_run, state_path)
-        except Exception as exc:
-            logger.warning("Weather pipeline failed: %s — continuing", exc)
+                    # Verify fill status (best-effort)
+                    filled = False
+                    if order_id:
+                        try:
+                            filled = client.is_order_filled(order_id)
+                        except Exception:
+                            logger.debug("Could not verify fill for order %s", order_id)
+                            filled = False
 
-    # ── 7. Resolve pending predictions (via Gamma) ────────────────────
-    try:
-        from .gamma import GammaClient, resolve_pending_predictions
-        with GammaClient() as gamma:
-            resolve_pending_predictions(state, gamma)
-    except Exception as exc:
-        logger.debug("Prediction resolution skipped: %s", exc)
+                    if not filled:
+                        logger.warning(
+                            "Order %s may not be filled — recording as pending", order_id,
+                        )
 
-    # ── 8. Log calibration ───────────────────────────────────────────
-    cal = state.get_calibration()
-    if cal["n"] > 0:
-        logger.info(
-            "Calibration: Brier=%.4f  Log=%.4f  (n=%d)",
-            cal["brier"], cal["log"], cal["n"],
-        )
+                    state.record_trade(
+                        market_id=condition_id or sig.token_id,
+                        token_id=sig.token_id,
+                        side=sig.side,
+                        price=fresh_price,
+                        size=shares,
+                        order_id=order_id,
+                        end_date=end_date,
+                        condition_id=condition_id,
+                        memo="" if filled else "pending_fill",
+                    )
+                except Exception as exc:
+                    logger.error("Order failed: %s", exc)
+                    continue
+            else:
+                dry_shares = size_usd / sig.market_price if sig.market_price > 0 else 0
+                if dry_shares > 0:
+                    logger.info(
+                        "[DRY RUN] Would %s %.2f shares of %s @ %.4f ($%.2f)",
+                        sig.side, dry_shares, sig.token_id[:16], sig.market_price, size_usd,
+                    )
+
+            state.record_prediction(
+                condition_id or sig.token_id, sig.fair_value, sig.market_price,
+            )
+            trades_this_run += 1
+
+        logger.info("Trades this run: %d (max %d)", trades_this_run, config.max_trades_per_run)
+
+        # ── 6. Weather pipeline (NOAA forecast → trading) ─────────────
+        if config.weather_enabled:
+            try:
+                _run_weather_pipeline(client, config, state, dry_run, state_path)
+            except Exception as exc:
+                logger.warning("Weather pipeline failed: %s — continuing", exc)
+
+        # ── 7. Resolve pending predictions (via shared Gamma client) ──
+        if _shared_gamma is not None:
+            try:
+                resolve_pending_predictions(state, _shared_gamma)
+            except Exception as exc:
+                logger.debug("Prediction resolution skipped: %s", exc)
+
+        # ── 8. Log calibration ───────────────────────────────────────
+        cal = state.get_calibration()
+        if cal["n"] > 0:
+            logger.info(
+                "Calibration: Brier=%.4f  Log=%.4f  (n=%d)",
+                cal["brier"], cal["log"], cal["n"],
+            )
+
+    finally:
+        if _shared_gamma is not None:
+            _shared_gamma.close()
 
     # ── 9. Persist state ─────────────────────────────────────────────
     try:
@@ -442,44 +547,3 @@ def run_strategy(
     logger.info("Done.")
 
 
-def _scan_with_clob(client, config: Config) -> list[dict]:
-    """CLOB-based scan with book metrics computation."""
-    try:
-        raw_markets = scan_markets(client, limit=config.scan_limit)
-    except Exception as exc:
-        logger.error("CLOB scan failed: %s", exc)
-        return []
-
-    # Fetch order books in parallel
-    tokens_to_fetch = []
-    for m in raw_markets:
-        for tok in m.get("tokens", []):
-            tokens_to_fetch.append((m, tok))
-
-    def _fetch_book(item):
-        m, tok = item
-        try:
-            book = client.get_orderbook(tok["token_id"])
-            return m, tok, compute_book_metrics(book)
-        except Exception:
-            return m, tok, {"liquidity_grade": "D"}
-
-    with ThreadPoolExecutor(max_workers=config.parallel_workers) as pool:
-        results = list(pool.map(_fetch_book, tokens_to_fetch))
-
-    for m, tok, metrics in results:
-        tok["metrics"] = metrics
-
-    for m in raw_markets:
-        best_grade = "D"
-        for tok in m.get("tokens", []):
-            grade = tok.get("metrics", {}).get("liquidity_grade", "D")
-            if _grade_rank(grade) < _grade_rank(best_grade):
-                best_grade = grade
-        m["liquidity_grade"] = best_grade
-
-    return raw_markets
-
-
-def _grade_rank(grade: str) -> int:
-    return {"A": 0, "B": 1, "C": 2, "D": 3}.get(grade, 3)

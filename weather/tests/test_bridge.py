@@ -157,6 +157,11 @@ class TestExecuteTrade(unittest.TestCase):
         gamma = MagicMock()
         clob = MagicMock()
         clob.post_order.return_value = {"orderID": "order-123"}
+        # Mock orderbook so bridge re-fetches fresh price
+        clob.get_orderbook.return_value = {
+            "asks": [{"price": "0.10", "size": "100"}],
+            "bids": [{"price": "0.09", "size": "100"}],
+        }
 
         bridge = CLOBWeatherBridge(clob_client=clob, gamma_client=gamma)
         gm = _make_gamma_market(best_ask=0.10)
@@ -186,6 +191,10 @@ class TestExecuteTrade(unittest.TestCase):
         gamma = MagicMock()
         clob = MagicMock()
         clob.post_order.side_effect = Exception("Network error")
+        clob.get_orderbook.return_value = {
+            "asks": [{"price": "0.50", "size": "100"}],
+            "bids": [{"price": "0.49", "size": "100"}],
+        }
 
         bridge = CLOBWeatherBridge(clob_client=clob, gamma_client=gamma)
         gm = _make_gamma_market()
@@ -202,6 +211,10 @@ class TestExecuteSell(unittest.TestCase):
         gamma = MagicMock()
         clob = MagicMock()
         clob.post_order.return_value = {"orderID": "sell-456"}
+        clob.get_orderbook.return_value = {
+            "asks": [{"price": "0.42", "size": "100"}],
+            "bids": [{"price": "0.40", "size": "100"}],
+        }
 
         bridge = CLOBWeatherBridge(clob_client=clob, gamma_client=gamma)
         gm = _make_gamma_market(best_bid=0.40)
@@ -223,6 +236,147 @@ class TestExecuteSell(unittest.TestCase):
         )
         result = bridge.execute_sell("unknown", 10.0)
         self.assertFalse(result["success"])
+
+
+class TestVerifyFill(unittest.TestCase):
+
+    def test_filled_immediately(self):
+        clob = MagicMock()
+        clob.get_order.return_value = {
+            "status": "MATCHED",
+            "size_matched": 20.0,
+            "original_size": 20.0,
+        }
+
+        bridge = CLOBWeatherBridge(clob_client=clob, gamma_client=MagicMock())
+        result = bridge.verify_fill("order-1", timeout_seconds=5, poll_interval=0.1)
+
+        self.assertTrue(result["filled"])
+        self.assertFalse(result["partial"])
+        self.assertAlmostEqual(result["size_matched"], 20.0)
+        self.assertEqual(result["status"], "MATCHED")
+
+    def test_partial_fill(self):
+        clob = MagicMock()
+        clob.get_order.return_value = {
+            "status": "CANCELLED",
+            "size_matched": 10.0,
+            "original_size": 20.0,
+        }
+
+        bridge = CLOBWeatherBridge(clob_client=clob, gamma_client=MagicMock())
+        result = bridge.verify_fill("order-1", timeout_seconds=5, poll_interval=0.1)
+
+        self.assertTrue(result["filled"])
+        self.assertTrue(result["partial"])
+        self.assertAlmostEqual(result["size_matched"], 10.0)
+        self.assertAlmostEqual(result["original_size"], 20.0)
+
+    def test_timeout_unfilled(self):
+        clob = MagicMock()
+        clob.get_order.return_value = {
+            "status": "LIVE",
+            "size_matched": 0,
+            "original_size": 20.0,
+        }
+
+        bridge = CLOBWeatherBridge(clob_client=clob, gamma_client=MagicMock())
+        result = bridge.verify_fill("order-1", timeout_seconds=0.3, poll_interval=0.1)
+
+        self.assertFalse(result["filled"])
+        self.assertFalse(result["partial"])
+        self.assertIn("TIMEOUT", result["status"])
+
+    def test_api_error_during_poll(self):
+        clob = MagicMock()
+        clob.get_order.side_effect = Exception("API error")
+
+        bridge = CLOBWeatherBridge(clob_client=clob, gamma_client=MagicMock())
+        result = bridge.verify_fill("order-1", timeout_seconds=0.3, poll_interval=0.1)
+
+        # Should timeout gracefully
+        self.assertFalse(result["filled"])
+
+
+class TestCancelOrder(unittest.TestCase):
+
+    def test_cancel_success(self):
+        clob = MagicMock()
+        bridge = CLOBWeatherBridge(clob_client=clob, gamma_client=MagicMock())
+
+        result = bridge.cancel_order("order-1")
+        self.assertTrue(result)
+        clob.cancel_order.assert_called_once_with("order-1")
+
+    def test_cancel_failure(self):
+        clob = MagicMock()
+        clob.cancel_order.side_effect = Exception("Network error")
+
+        bridge = CLOBWeatherBridge(clob_client=clob, gamma_client=MagicMock())
+        result = bridge.cancel_order("order-1")
+        self.assertFalse(result)
+
+
+class TestExecuteTradeWithFillVerification(unittest.TestCase):
+
+    def test_trade_with_fill_timeout_zero_skips_verification(self):
+        """fill_timeout=0 should behave like the old code."""
+        gamma = MagicMock()
+        clob = MagicMock()
+        clob.post_order.return_value = {"orderID": "order-123"}
+        clob.get_orderbook.return_value = {
+            "asks": [{"price": "0.10", "size": "100"}],
+            "bids": [{"price": "0.09", "size": "100"}],
+        }
+
+        bridge = CLOBWeatherBridge(clob_client=clob, gamma_client=gamma)
+        gm = _make_gamma_market(best_ask=0.10)
+        bridge._market_cache["cond-1"] = gm
+
+        result = bridge.execute_trade("cond-1", "yes", 2.00, fill_timeout=0)
+        self.assertTrue(result["success"])
+        # get_order should NOT have been called
+        clob.get_order.assert_not_called()
+
+    def test_trade_unfilled_gets_cancelled(self):
+        gamma = MagicMock()
+        clob = MagicMock()
+        clob.post_order.return_value = {"orderID": "order-123"}
+        clob.get_orderbook.return_value = {
+            "asks": [{"price": "0.10", "size": "100"}],
+        }
+        clob.get_order.return_value = {
+            "status": "LIVE",
+            "size_matched": 0,
+            "original_size": 20.0,
+        }
+
+        bridge = CLOBWeatherBridge(clob_client=clob, gamma_client=gamma)
+        gm = _make_gamma_market(best_ask=0.10)
+        bridge._market_cache["cond-1"] = gm
+
+        result = bridge.execute_trade("cond-1", "yes", 2.00,
+                                       fill_timeout=0.3, fill_poll_interval=0.1)
+        self.assertFalse(result["success"])
+        # Should have tried to cancel
+        clob.cancel_order.assert_called_once_with("order-123")
+
+
+class TestBestAskInStrategy(unittest.TestCase):
+    """Verify that best_ask from bridge is used in scoring."""
+
+    def test_best_ask_field_in_market(self):
+        """Bridge fetch_weather_markets should include best_ask."""
+        gamma = MagicMock()
+        gm = _make_gamma_market(best_ask=0.37)
+        gamma.fetch_events_with_markets.return_value = ([], [gm])
+
+        clob = MagicMock()
+        bridge = CLOBWeatherBridge(clob_client=clob, gamma_client=gamma)
+        markets = bridge.fetch_weather_markets()
+
+        self.assertEqual(len(markets), 1)
+        self.assertAlmostEqual(markets[0]["best_ask"], 0.37)
 
 
 if __name__ == "__main__":

@@ -11,6 +11,8 @@ import time
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
+from ._ssl import SSL_CTX as _SSL_CTX
+
 logger = logging.getLogger(__name__)
 
 AVIATION_API_BASE = "https://aviationweather.gov/api/data/metar"
@@ -41,7 +43,7 @@ def _fetch_json(
                 "Accept": "application/json",
                 "User-Agent": _USER_AGENT,
             })
-            with urlopen(req, timeout=30) as resp:
+            with urlopen(req, timeout=30, context=_SSL_CTX) as resp:
                 return json.loads(resp.read().decode())
         except HTTPError as exc:
             if exc.code in _RETRYABLE_CODES and attempt < max_retries:

@@ -1,7 +1,6 @@
 """CLI entry point — ``python -m weather`` (CLOB direct)."""
 
 import argparse
-import json
 import logging
 import os
 import sys
@@ -50,8 +49,8 @@ def _build_bridge(config: Config, live: bool):
         clob = PolymarketClient(private_key=key, api_creds=api_creds)
     else:
         # Public read-only client (can't post orders)
-        from bot.__main__ import _PublicClient
-        clob = _PublicClient()
+        from polymarket.public import PublicClient
+        clob = PublicClient()
 
     return CLOBWeatherBridge(
         clob_client=clob,

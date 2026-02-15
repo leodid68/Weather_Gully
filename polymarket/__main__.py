@@ -24,12 +24,12 @@ def _get_public_http():
 
 
 def _get_client(args):
-    """Full authenticated client — requires private key."""
+    """Full authenticated client — requires private key via env var."""
     from .client import PolymarketClient
 
-    key = args.private_key or os.environ.get("POLY_PRIVATE_KEY")
+    key = os.environ.get("POLY_PRIVATE_KEY")
     if not key:
-        print("Error: set POLY_PRIVATE_KEY env var or pass --private-key")
+        print("Error: set POLY_PRIVATE_KEY env var")
         sys.exit(1)
 
     creds = None
@@ -162,9 +162,9 @@ def cmd_derive(args):
     """Derive API credentials from private key (L1 auth)."""
     from .auth import derive_api_key
 
-    key = args.private_key or os.environ.get("POLY_PRIVATE_KEY")
+    key = os.environ.get("POLY_PRIVATE_KEY")
     if not key:
-        print("Error: set POLY_PRIVATE_KEY env var or pass --private-key")
+        print("Error: set POLY_PRIVATE_KEY env var")
         sys.exit(1)
 
     creds = derive_api_key(key)
@@ -180,9 +180,9 @@ def cmd_approve(args):
     """Approve USDC.e spending for Polymarket exchange contracts."""
     from .approve import approve_exchanges
 
-    key = args.private_key or os.environ.get("POLY_PRIVATE_KEY")
+    key = os.environ.get("POLY_PRIVATE_KEY")
     if not key:
-        print("Error: set POLY_PRIVATE_KEY env var or pass --private-key")
+        print("Error: set POLY_PRIVATE_KEY env var")
         sys.exit(1)
 
     approve_exchanges(key)
@@ -195,7 +195,6 @@ def main():
         prog="python3 -m polymarket",
         description="Polymarket CLOB direct client",
     )
-    parser.add_argument("--private-key", help="Ethereum private key (or set POLY_PRIVATE_KEY)")
     sub = parser.add_subparsers(dest="command", required=True)
 
     # markets

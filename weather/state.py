@@ -1,5 +1,7 @@
 """Persistent trading state between runs."""
 
+import contextlib
+import fcntl
 import json
 import logging
 import os
@@ -9,6 +11,41 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class PendingOrder:
+    """Tracks an order that has been submitted but not yet filled."""
+    order_id: str
+    market_id: str
+    side: str  # "BUY" or "SELL"
+    price: float
+    size: float
+    timestamp: str
+    token_id: str = ""
+
+    def to_dict(self) -> dict:
+        return {
+            "order_id": self.order_id,
+            "market_id": self.market_id,
+            "side": self.side,
+            "price": self.price,
+            "size": self.size,
+            "timestamp": self.timestamp,
+            "token_id": self.token_id,
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "PendingOrder":
+        return cls(
+            order_id=d["order_id"],
+            market_id=d.get("market_id", ""),
+            side=d.get("side", "BUY"),
+            price=d.get("price", 0.0),
+            size=d.get("size", 0.0),
+            timestamp=d.get("timestamp", ""),
+            token_id=d.get("token_id", ""),
+        )
 
 
 @dataclass
@@ -104,6 +141,8 @@ class TradingState:
     event_positions: dict[str, str] = field(default_factory=dict)
     # Daily METAR observations: "location|date" → obs_data dict
     daily_observations: dict[str, dict] = field(default_factory=dict)
+    # Pending orders: order_id → PendingOrder
+    pending_orders: dict[str, PendingOrder] = field(default_factory=dict)
 
     def record_trade(
         self,
@@ -200,8 +239,45 @@ class TradingState:
         key = f"{location}|{date}"
         return self.daily_observations.get(key)
 
+    def prune(
+        self,
+        max_predictions: int = 500,
+        max_analyzed: int = 1000,
+        max_observations_days: int = 30,
+        max_forecasts: int = 500,
+    ) -> None:
+        """Remove old entries to prevent unbounded state growth."""
+        # Cap analyzed_markets (keep newest by sorting, since IDs contain timestamps)
+        if len(self.analyzed_markets) > max_analyzed:
+            sorted_ids = sorted(self.analyzed_markets)
+            excess = len(sorted_ids) - max_analyzed
+            self.analyzed_markets -= set(sorted_ids[:excess])
+
+        # Prune resolved predictions beyond cap
+        resolved = [(k, v) for k, v in self.predictions.items() if v.resolved]
+        if len(resolved) > max_predictions:
+            resolved.sort(key=lambda kv: kv[1].timestamp, reverse=True)
+            to_remove = {k for k, _ in resolved[max_predictions:]}
+            for k in to_remove:
+                del self.predictions[k]
+
+        # Prune old daily_observations
+        if len(self.daily_observations) > max_observations_days * 10:
+            sorted_keys = sorted(self.daily_observations.keys())
+            excess = len(sorted_keys) - max_observations_days * 10
+            for k in sorted_keys[:excess]:
+                del self.daily_observations[k]
+
+        # Prune old previous_forecasts
+        if len(self.previous_forecasts) > max_forecasts:
+            sorted_keys = sorted(self.previous_forecasts.keys())
+            excess = len(sorted_keys) - max_forecasts
+            for k in sorted_keys[:excess]:
+                del self.previous_forecasts[k]
+
     def save(self, path: str) -> None:
         """Atomic save: write to temp file then rename (prevents corruption on crash)."""
+        self.prune()
         data = {
             "trades": {mid: rec.to_dict() for mid, rec in self.trades.items()},
             "analyzed_markets": sorted(self.analyzed_markets),
@@ -210,6 +286,7 @@ class TradingState:
             "predictions": {mid: rec.to_dict() for mid, rec in self.predictions.items()},
             "event_positions": self.event_positions,
             "daily_observations": self.daily_observations,
+            "pending_orders": {oid: po.to_dict() for oid, po in self.pending_orders.items()},
         }
         dir_name = os.path.dirname(path) or "."
         fd, tmp_path = tempfile.mkstemp(suffix=".tmp", dir=dir_name)
@@ -247,6 +324,10 @@ class TradingState:
             }
             event_positions = data.get("event_positions", {})
             daily_observations = data.get("daily_observations", {})
+            pending_orders = {
+                oid: PendingOrder.from_dict(po)
+                for oid, po in data.get("pending_orders", {}).items()
+            }
             return cls(
                 trades=trades,
                 analyzed_markets=analyzed,
@@ -255,7 +336,28 @@ class TradingState:
                 predictions=predictions,
                 event_positions=event_positions,
                 daily_observations=daily_observations,
+                pending_orders=pending_orders,
             )
         except (json.JSONDecodeError, IOError, KeyError) as exc:
             logger.warning("Failed to load state from %s: %s — starting fresh", path, exc)
             return cls()
+
+
+@contextlib.contextmanager
+def state_lock(state_path: str):
+    """Exclusive file lock around state access (fcntl.flock, LOCK_EX | LOCK_NB).
+
+    Prevents concurrent bot runs from corrupting state.
+    """
+    lock_path = state_path + ".lock"
+    fd = open(lock_path, "w")
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        logger.debug("Acquired state lock: %s", lock_path)
+        yield
+    except OSError:
+        logger.error("Failed to acquire state lock — another instance running?")
+        raise
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        fd.close()

@@ -70,6 +70,8 @@ def parse_weather_event(event_name: str) -> dict | None:
         # If the date is more than 30 days in the past, assume next year
         if target_date < now - timedelta(days=30):
             year += 1
+            # Validate the date is valid in the new year (e.g. Feb 29 → non-leap year)
+            datetime(year, month, day, tzinfo=timezone.utc)
         date_str = f"{year}-{month:02d}-{day:02d}"
     except ValueError:
         return None

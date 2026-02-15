@@ -42,15 +42,13 @@ def run_daemon(client_factory, config: Config, state_path: str, dry_run: bool = 
         try:
             state = TradingState.load(state_path)
             try:
-                lock_ctx = state_lock(state_path)
-                lock_ctx.__enter__()
+                with state_lock(state_path):
+                    run_strategy(client, config, state, dry_run, state_path)
             except OSError:
                 logger.warning("State lock held — skipping this run")
+                # Sleep before retrying to avoid spin loop
+                _interruptible_sleep(config.run_interval_seconds, lambda: running)
                 continue
-            try:
-                run_strategy(client, config, state, dry_run, state_path)
-            finally:
-                lock_ctx.__exit__(None, None, None)
             consecutive_failures = 0
             _write_heartbeat(state_path)
 
@@ -61,12 +59,13 @@ def run_daemon(client_factory, config: Config, state_path: str, dry_run: bool = 
                 "Run failed (attempt %d): %s — backing off %.0fs",
                 consecutive_failures, exc, delay,
             )
+            _write_heartbeat(state_path)  # prevent false stale alerts
             if consecutive_failures >= config.retry_max_attempts:
                 logger.error("Max retries reached — recreating client")
                 client.close()
                 client = client_factory()
                 consecutive_failures = 0
-            time.sleep(delay)
+            _interruptible_sleep(delay, lambda: running)
             continue
 
         except Exception as exc:

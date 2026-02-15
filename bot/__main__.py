@@ -5,10 +5,8 @@ import json
 import logging
 import sys
 from pathlib import Path
-from typing import Protocol, runtime_checkable
 
-import httpx
-from polymarket.constants import CLOB_BASE_URL
+from polymarket.public import PublicClient
 
 from .config import Config
 from .scanner import run_scan_pipeline
@@ -16,68 +14,13 @@ from .state import TradingState, state_lock
 from .strategy import run_strategy
 
 
-@runtime_checkable
-class TradingClient(Protocol):
-    """Protocol for trading client implementations."""
-
-    def get_markets(self, **filters) -> list[dict]: ...
-    def get_orderbook(self, token_id: str) -> dict: ...
-    def get_price(self, token_id: str) -> dict: ...
-    def post_order(self, *a, **kw) -> dict: ...
-    def close(self) -> None: ...
-
-
-class _PublicClient:
-    """Lightweight read-only client for public CLOB endpoints (no private key)."""
-
-    def __init__(self):
-        self._http = httpx.Client(base_url=CLOB_BASE_URL, timeout=15)
-
-    def get_markets(self, **filters) -> list[dict]:
-        limit = filters.pop("limit", None)
-        params = "&".join(f"{k}={v}" for k, v in filters.items())
-        path = "/sampling-markets" + (f"?{params}" if params else "")
-        resp = self._http.get(path)
-        resp.raise_for_status()
-        data = resp.json()
-        if isinstance(data, dict):
-            items = data.get("data", data.get("markets", []))
-        else:
-            items = data
-        if limit is not None:
-            items = items[:int(limit)]
-        return items
-
-    def get_orderbook(self, token_id: str) -> dict:
-        resp = self._http.get(f"/book?token_id={token_id}")
-        resp.raise_for_status()
-        return resp.json()
-
-    def get_price(self, token_id: str) -> dict:
-        resp = self._http.get(f"/midpoint?token_id={token_id}")
-        resp.raise_for_status()
-        data = resp.json()
-        # Normalize: /midpoint returns {"mid": "0.xx"}, callers expect {"price": ...}
-        if "mid" in data and "price" not in data:
-            data["price"] = data["mid"]
-        return data
-
-    def post_order(self, *args, **kwargs):
-        raise RuntimeError("Cannot post orders without private key (use --live with POLY_PRIVATE_KEY)")
-
-    def close(self):
-        self._http.close()
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *args):
-        self.close()
-
-
 def _setup_logging(level: str = "INFO", json_log: bool = False) -> None:
     root = logging.getLogger()
     root.setLevel(getattr(logging, level.upper(), logging.INFO))
+
+    # Prevent duplicate handlers on repeated calls
+    if root.handlers:
+        return
 
     handler = logging.StreamHandler(sys.stdout)
     if json_log:
@@ -204,7 +147,7 @@ def main() -> None:
                     private_key=config.private_key,
                     api_creds=api_creds,
                 )
-            return _PublicClient()
+            return PublicClient()
 
         run_daemon(_make_client, config, state_path, dry_run=not args.live)
         return
@@ -224,7 +167,7 @@ def main() -> None:
             api_creds=api_creds,
         )
     else:
-        client = _PublicClient()
+        client = PublicClient()
 
     # --weather
     if args.weather:

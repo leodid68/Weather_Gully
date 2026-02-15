@@ -11,8 +11,9 @@ prices across the group should equal ~$1.00.
 
 from __future__ import annotations
 
+import json
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 import httpx
 
@@ -215,7 +216,6 @@ class GammaClient:
             # A resolved market has one outcome at ~1.0 and others at ~0.0
             outcome_prices_raw = m.get("outcomePrices") or "[]"
             if isinstance(outcome_prices_raw, str):
-                import json
                 try:
                     prices = [float(p) for p in json.loads(outcome_prices_raw)]
                 except (json.JSONDecodeError, ValueError):
@@ -250,7 +250,6 @@ def _parse_market(m: dict) -> GammaMarket:
 
     outcome_prices_raw = m.get("outcomePrices") or "[]"
     if isinstance(outcome_prices_raw, str):
-        import json
         try:
             outcome_prices = [float(p) for p in json.loads(outcome_prices_raw)]
         except (json.JSONDecodeError, ValueError):
@@ -262,7 +261,6 @@ def _parse_market(m: dict) -> GammaMarket:
 
     clob_ids_raw = m.get("clobTokenIds") or "[]"
     if isinstance(clob_ids_raw, str):
-        import json
         try:
             clob_ids = json.loads(clob_ids_raw)
         except json.JSONDecodeError:
@@ -274,7 +272,6 @@ def _parse_market(m: dict) -> GammaMarket:
 
     outcomes_raw = m.get("outcomes") or "[]"
     if isinstance(outcomes_raw, str):
-        import json
         try:
             outcomes = json.loads(outcomes_raw)
         except json.JSONDecodeError:
@@ -453,8 +450,6 @@ def resolve_pending_predictions(state, gamma_client: GammaClient) -> int:
 
     Returns the number of newly resolved predictions.
     """
-    from .state import TradingState
-
     resolved_count = 0
     for market_id, pred in list(state.predictions.items()):
         if pred.get("resolved"):

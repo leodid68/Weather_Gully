@@ -1,10 +1,17 @@
 """Tests for the NOAA probability model."""
 
+import json
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 from datetime import datetime, timezone, timedelta
 
 from weather.probability import (
+    _get_seasonal_factor,
+    _get_stddev,
+    _load_calibration,
+    _weather_sigma_multiplier,
     estimate_bucket_probability,
     get_horizon_days,
     get_noaa_probability,
@@ -76,6 +83,16 @@ class TestGetNoaaProbability(unittest.TestCase):
 
 class TestEstimateBucketProbability(unittest.TestCase):
 
+    def setUp(self):
+        """Force hardcoded fallback by clearing calibration cache."""
+        import weather.probability as prob_module
+        self._saved_cache = prob_module._calibration_cache
+        prob_module._calibration_cache = {}  # Empty = no calibration data
+
+    def tearDown(self):
+        import weather.probability as prob_module
+        prob_module._calibration_cache = self._saved_cache
+
     def test_forecast_in_bucket_high_probability(self):
         """Forecast inside bucket → high probability."""
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -126,6 +143,144 @@ class TestEstimateBucketProbability(unittest.TestCase):
         p_near = estimate_bucket_probability(52, 50, 54, near, apply_seasonal=False)
         p_far = estimate_bucket_probability(52, 50, 54, far, apply_seasonal=False)
         self.assertGreater(p_near, p_far)
+
+
+class TestCalibrationFallback(unittest.TestCase):
+    """When no calibration.json exists, hardcoded defaults should be used."""
+
+    def test_no_calibration_file_uses_defaults(self):
+        """Without calibration.json, _get_stddev returns hardcoded values."""
+        import weather.probability as prob_module
+        # Reset cache to force reload
+        prob_module._calibration_cache = None
+
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        sigma = _get_stddev(today)
+        # Should be the hardcoded value for horizon 0 (~1.5)
+        self.assertGreater(sigma, 0)
+        self.assertLess(sigma, 20)
+
+    def test_location_param_backward_compatible(self):
+        """estimate_bucket_probability with location param works like before."""
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        p_no_loc = estimate_bucket_probability(52, 50, 54, today, apply_seasonal=False)
+        p_with_loc = estimate_bucket_probability(52, 50, 54, today, apply_seasonal=False, location="UNKNOWN")
+        # Both should produce same result when no calibration data exists for the location
+        self.assertAlmostEqual(p_no_loc, p_with_loc, places=3)
+
+    def test_weather_data_param_backward_compatible(self):
+        """estimate_bucket_probability with weather_data=None works like before."""
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        p_without = estimate_bucket_probability(52, 50, 54, today, apply_seasonal=False)
+        p_with_none = estimate_bucket_probability(52, 50, 54, today, apply_seasonal=False, weather_data=None)
+        self.assertAlmostEqual(p_without, p_with_none, places=4)
+
+
+class TestWeatherSigmaMultiplier(unittest.TestCase):
+    """Test _weather_sigma_multiplier for various weather conditions."""
+
+    def test_default_no_data(self):
+        """Empty weather data should return 1.0 (no adjustment)."""
+        self.assertAlmostEqual(_weather_sigma_multiplier({}), 1.0)
+
+    def test_high_cloud_cover(self):
+        """Cloud cover > 80% on high should increase sigma."""
+        data = {"cloud_cover_max": 85.0}
+        mult = _weather_sigma_multiplier(data, metric="high")
+        self.assertGreater(mult, 1.0)
+        # For low metric, cloud cover shouldn't increase
+        mult_low = _weather_sigma_multiplier(data, metric="low")
+        self.assertAlmostEqual(mult_low, 1.0)
+
+    def test_high_wind(self):
+        """Wind > 40 km/h should increase sigma."""
+        data = {"wind_speed_max": 50.0}
+        mult = _weather_sigma_multiplier(data, metric="high")
+        self.assertGreater(mult, 1.0)
+
+    def test_high_wind_gusts(self):
+        """Wind gusts > 40 km/h should also increase sigma."""
+        data = {"wind_gusts_max": 55.0}
+        mult = _weather_sigma_multiplier(data, metric="high")
+        self.assertGreater(mult, 1.0)
+
+    def test_precipitation(self):
+        """Precipitation > 10mm on high should increase sigma."""
+        data = {"precip_sum": 15.0}
+        mult = _weather_sigma_multiplier(data, metric="high")
+        self.assertGreater(mult, 1.0)
+
+    def test_all_conditions_stack(self):
+        """Multiple bad conditions should all contribute."""
+        data = {
+            "cloud_cover_max": 90.0,
+            "wind_speed_max": 50.0,
+            "precip_sum": 20.0,
+        }
+        mult = _weather_sigma_multiplier(data, metric="high")
+        # Should be > 1.0 + 0.10 + 0.08 + 0.12 = 1.30
+        self.assertGreaterEqual(mult, 1.30)
+
+    def test_low_values_no_adjustment(self):
+        """Low cloud/wind/precip should not trigger adjustments."""
+        data = {
+            "cloud_cover_max": 50.0,
+            "wind_speed_max": 20.0,
+            "precip_sum": 2.0,
+        }
+        mult = _weather_sigma_multiplier(data, metric="high")
+        self.assertAlmostEqual(mult, 1.0)
+
+
+class TestCalibrationWithMockData(unittest.TestCase):
+    """Test calibration loading with a mock calibration.json."""
+
+    def setUp(self):
+        import weather.probability as prob_module
+        self._original_cache = prob_module._calibration_cache
+        self._original_path = prob_module._CALIBRATION_PATH
+
+    def tearDown(self):
+        import weather.probability as prob_module
+        prob_module._calibration_cache = self._original_cache
+        prob_module._CALIBRATION_PATH = self._original_path
+
+    def test_load_calibration_data(self):
+        import weather.probability as prob_module
+        fixture_path = Path(__file__).parent / "fixtures" / "calibration.json"
+        prob_module._CALIBRATION_PATH = fixture_path
+        prob_module._calibration_cache = None
+
+        cal = _load_calibration()
+        self.assertIn("global_sigma", cal)
+        self.assertIn("location_sigma", cal)
+        self.assertEqual(cal["global_sigma"]["0"], 1.8)
+
+    def test_location_sigma_used_when_available(self):
+        import weather.probability as prob_module
+        fixture_path = Path(__file__).parent / "fixtures" / "calibration.json"
+        prob_module._CALIBRATION_PATH = fixture_path
+        prob_module._calibration_cache = None
+
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        sigma_nyc = _get_stddev(today, location="NYC")
+        sigma_miami = _get_stddev(today, location="Miami")
+        # NYC and Miami should have different sigmas
+        self.assertNotAlmostEqual(sigma_nyc, sigma_miami, places=1)
+
+    def test_seasonal_factor_per_location(self):
+        import weather.probability as prob_module
+        fixture_path = Path(__file__).parent / "fixtures" / "calibration.json"
+        prob_module._CALIBRATION_PATH = fixture_path
+        prob_module._calibration_cache = None
+
+        factor_nyc = _get_seasonal_factor(1, location="NYC")
+        factor_miami = _get_seasonal_factor(1, location="Miami")
+        # Both should be less than 1.0 (winter)
+        self.assertLess(factor_nyc, 1.0)
+        self.assertLess(factor_miami, 1.0)
+        # NYC should have different factor from Miami
+        self.assertNotAlmostEqual(factor_nyc, factor_miami, places=2)
 
 
 if __name__ == "__main__":

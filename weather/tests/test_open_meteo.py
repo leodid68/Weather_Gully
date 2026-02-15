@@ -1,8 +1,11 @@
 """Tests for Open-Meteo multi-source forecasting."""
 
+import json
 import unittest
+from pathlib import Path
+from unittest.mock import patch
 
-from weather.open_meteo import compute_ensemble_forecast
+from weather.open_meteo import compute_ensemble_forecast, _get_model_weights
 
 
 class TestComputeEnsembleForecast(unittest.TestCase):
@@ -59,6 +62,132 @@ class TestComputeEnsembleForecast(unittest.TestCase):
         self.assertIsNotNone(temp)
         # Should NOT use the high values
         self.assertLess(temp, 40)
+
+
+class TestLocationWeights(unittest.TestCase):
+    """Test location-based model weight loading (Phase 2)."""
+
+    def test_default_weights_when_no_calibration(self):
+        from weather.open_meteo import MODEL_WEIGHTS
+        weights = _get_model_weights("")
+        self.assertEqual(weights, MODEL_WEIGHTS)
+
+    def test_default_weights_for_unknown_location(self):
+        from weather.open_meteo import MODEL_WEIGHTS
+        weights = _get_model_weights("UNKNOWN_LOCATION")
+        self.assertEqual(weights, MODEL_WEIGHTS)
+
+    @patch("weather.open_meteo._CALIBRATION_PATH")
+    def test_calibrated_weights_used(self, mock_path):
+        fixture_path = Path(__file__).parent / "fixtures" / "calibration.json"
+        mock_path.exists.return_value = True
+
+        # Patch open to use fixture
+        import builtins
+        original_open = builtins.open
+
+        def patched_open(path, *args, **kwargs):
+            if str(path) == str(mock_path):
+                return original_open(fixture_path, *args, **kwargs)
+            return original_open(path, *args, **kwargs)
+
+        with patch("builtins.open", side_effect=patched_open):
+            import weather.open_meteo as om_module
+            old_path = om_module._CALIBRATION_PATH
+            om_module._CALIBRATION_PATH = fixture_path
+            try:
+                weights = _get_model_weights("NYC")
+                # Should use calibrated weights from fixture
+                self.assertAlmostEqual(weights["ecmwf_ifs025"], 0.55, places=2)
+                self.assertAlmostEqual(weights["noaa"], 0.20, places=2)
+            finally:
+                om_module._CALIBRATION_PATH = old_path
+
+
+class TestEnsembleWithLocation(unittest.TestCase):
+    """Test that location parameter is accepted and doesn't break ensemble."""
+
+    def test_location_param_accepted(self):
+        om_data = {"gfs_high": 50, "ecmwf_high": 54}
+        temp, spread = compute_ensemble_forecast(52.0, om_data, "high", location="NYC")
+        self.assertIsNotNone(temp)
+        self.assertGreater(spread, 0)
+
+    def test_location_empty_string_uses_defaults(self):
+        om_data = {"gfs_high": 50, "ecmwf_high": 54}
+        temp_no_loc, _ = compute_ensemble_forecast(52.0, om_data, "high")
+        temp_empty_loc, _ = compute_ensemble_forecast(52.0, om_data, "high", location="")
+        self.assertAlmostEqual(temp_no_loc, temp_empty_loc, places=1)
+
+
+class TestAuxiliaryWeatherVariables(unittest.TestCase):
+    """Test that auxiliary variables are extracted from Open-Meteo response."""
+
+    @patch("weather.open_meteo._fetch_json")
+    def test_extracts_auxiliary_variables(self, mock_fetch):
+        from weather.open_meteo import get_open_meteo_forecast
+
+        mock_fetch.return_value = {
+            "daily": {
+                "time": ["2025-06-15"],
+                "temperature_2m_max_gfs_seamless": [85.0],
+                "temperature_2m_min_gfs_seamless": [68.0],
+                "temperature_2m_max_ecmwf_ifs025": [87.0],
+                "temperature_2m_min_ecmwf_ifs025": [69.0],
+                "cloud_cover_max_gfs_seamless": [60.0],
+                "cloud_cover_max_ecmwf_ifs025": [70.0],
+                "wind_speed_10m_max_gfs_seamless": [25.0],
+                "wind_speed_10m_max_ecmwf_ifs025": [30.0],
+                "wind_gusts_10m_max_gfs_seamless": [40.0],
+                "wind_gusts_10m_max_ecmwf_ifs025": [45.0],
+                "precipitation_sum_gfs_seamless": [5.0],
+                "precipitation_sum_ecmwf_ifs025": [3.0],
+                "precipitation_probability_max_gfs_seamless": [60.0],
+                "precipitation_probability_max_ecmwf_ifs025": [50.0],
+            }
+        }
+
+        result = get_open_meteo_forecast(40.77, -73.87)
+        self.assertIn("2025-06-15", result)
+        day = result["2025-06-15"]
+
+        # Temperature keys should still be present
+        self.assertIn("gfs_high", day)
+        self.assertIn("ecmwf_high", day)
+
+        # Auxiliary variables should be present (averaged across models)
+        self.assertIn("cloud_cover_max", day)
+        self.assertAlmostEqual(day["cloud_cover_max"], 65.0, places=1)  # avg(60, 70)
+
+        self.assertIn("wind_speed_max", day)
+        self.assertAlmostEqual(day["wind_speed_max"], 27.5, places=1)  # avg(25, 30)
+
+        self.assertIn("wind_gusts_max", day)
+        self.assertIn("precip_sum", day)
+        self.assertIn("precip_prob_max", day)
+
+    @patch("weather.open_meteo._fetch_json")
+    def test_handles_missing_aux_variables(self, mock_fetch):
+        """When auxiliary variables are absent, entry should still have temps."""
+        from weather.open_meteo import get_open_meteo_forecast
+
+        mock_fetch.return_value = {
+            "daily": {
+                "time": ["2025-06-15"],
+                "temperature_2m_max_gfs_seamless": [85.0],
+                "temperature_2m_min_gfs_seamless": [68.0],
+                "temperature_2m_max_ecmwf_ifs025": [87.0],
+                "temperature_2m_min_ecmwf_ifs025": [69.0],
+                # No auxiliary variables
+            }
+        }
+
+        result = get_open_meteo_forecast(40.77, -73.87)
+        self.assertIn("2025-06-15", result)
+        day = result["2025-06-15"]
+        self.assertIn("gfs_high", day)
+        # Auxiliary keys should just be absent
+        self.assertNotIn("cloud_cover_max", day)
 
 
 if __name__ == "__main__":

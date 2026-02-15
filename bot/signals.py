@@ -50,12 +50,13 @@ class Signal:
 # ── Method 1: Longshot bias ─────────────────────────────────────────────
 
 def detect_longshot_bias(
-    token_id: str, market_price: float, min_edge: float = 0.03,
+    token_id: str, market_price: float, min_edge: float = 0.004,
 ) -> Signal | None:
     """Detect mispricing from longshot/favourite bias.
 
     Applies empirical correction from Becker 2024.  Returns a Signal when
     the bias-adjusted fair value diverges from market price by >= *min_edge*.
+    Default min_edge=0.004 is below the max bias (0.008) to allow detection.
     """
     bias = 0.0
     for lo, hi, b in _BIAS_TABLE:
@@ -392,6 +393,16 @@ def scan_for_signals(
         for group in multi_choice_groups:
             mc_signals = detect_multi_choice_arbitrage(group, fee_rate=fee_rate)
             signals.extend(mc_signals)
+
+    # Deduplicate: keep highest edge*confidence per token_id
+    best_by_token: dict[str, Signal] = {}
+    for sig in signals:
+        key = sig.token_id
+        score = sig.edge * sig.confidence
+        prev = best_by_token.get(key)
+        if prev is None or score > prev.edge * prev.confidence:
+            best_by_token[key] = sig
+    signals = list(best_by_token.values())
 
     # Sort by edge * confidence descending
     signals.sort(key=lambda s: s.edge * s.confidence, reverse=True)

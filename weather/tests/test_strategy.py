@@ -196,6 +196,73 @@ class TestStrategyIntegration(unittest.TestCase):
         bridge.execute_trade.assert_not_called()
 
 
+class TestScoreBucketsWithNewParams(unittest.TestCase):
+    """Test that score_buckets passes location and weather_data correctly."""
+
+    def test_location_param_accepted(self):
+        """score_buckets should accept location without error."""
+        markets_data = _load_fixture("weather_markets.json")
+        event_markets = [m for m in markets_data["markets"] if m["event_id"] == "evt-nyc-high-mar15"]
+        config = Config(adjacent_buckets=True, seasonal_adjustments=False)
+
+        scored = score_buckets(event_markets, 52, "2025-03-15", config,
+                               location="NYC")
+        self.assertGreater(len(scored), 0)
+
+    def test_weather_data_param_accepted(self):
+        """score_buckets should accept weather_data without error."""
+        markets_data = _load_fixture("weather_markets.json")
+        event_markets = [m for m in markets_data["markets"] if m["event_id"] == "evt-nyc-high-mar15"]
+        config = Config(adjacent_buckets=True, seasonal_adjustments=False)
+
+        weather_data = {
+            "cloud_cover_max": 90.0,
+            "wind_speed_max": 50.0,
+            "precip_sum": 15.0,
+        }
+        scored = score_buckets(event_markets, 52, "2025-03-15", config,
+                               weather_data=weather_data)
+        self.assertGreater(len(scored), 0)
+
+    def test_best_ask_used_when_available(self):
+        """When best_ask is available, it should be used for pricing."""
+        markets_data = _load_fixture("weather_markets.json")
+        event_markets = [m for m in markets_data["markets"] if m["event_id"] == "evt-nyc-high-mar15"]
+
+        # Add best_ask to one market
+        for m in event_markets:
+            if m["outcome_name"] == "50-54°F":
+                m["best_ask"] = 0.40  # Different from external_price_yes (0.35)
+                break
+
+        config = Config(adjacent_buckets=True, seasonal_adjustments=False)
+        scored = score_buckets(event_markets, 52, "2025-03-15", config)
+
+        # Find the 50-54°F bucket
+        center = [s for s in scored if s["bucket"] == (50, 54)]
+        self.assertEqual(len(center), 1)
+        # Price should be the best_ask (0.40), not external_price_yes (0.35)
+        self.assertAlmostEqual(center[0]["price"], 0.40, places=2)
+
+    def test_best_ask_zero_falls_back_to_external(self):
+        """When best_ask is 0, should fall back to external_price_yes."""
+        markets_data = _load_fixture("weather_markets.json")
+        event_markets = [m for m in markets_data["markets"] if m["event_id"] == "evt-nyc-high-mar15"]
+
+        for m in event_markets:
+            if m["outcome_name"] == "50-54°F":
+                m["best_ask"] = 0  # Zero = not available
+                break
+
+        config = Config(adjacent_buckets=True, seasonal_adjustments=False)
+        scored = score_buckets(event_markets, 52, "2025-03-15", config)
+
+        center = [s for s in scored if s["bucket"] == (50, 54)]
+        self.assertEqual(len(center), 1)
+        # Should use external_price_yes (0.35)
+        self.assertAlmostEqual(center[0]["price"], 0.35, places=2)
+
+
 class TestActiveLocations(unittest.TestCase):
     """Regression: active_locations must map to canonical LOCATIONS keys."""
 
