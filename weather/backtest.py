@@ -9,6 +9,7 @@ import argparse
 import json
 import logging
 import math
+import random
 import sys
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -68,6 +69,50 @@ class BacktestResult:
         return "\n".join(lines)
 
 
+def _load_price_snapshots(path: str) -> dict[str, dict]:
+    """Load price snapshots from JSON and index by bucket key.
+
+    Returns a dict keyed by ``"{date}|{location}|{metric}|{lo},{hi}"``
+    with values ``{"best_ask": float, "best_bid": float}``.
+    """
+    snapshots: dict[str, dict] = {}
+    try:
+        with open(path) as f:
+            raw = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError, IOError):
+        return snapshots
+
+    for snap in raw:
+        date = snap.get("date", "")
+        location = snap.get("location", "")
+        metric = snap.get("metric", "")
+        lo = snap.get("bucket_lo")
+        hi = snap.get("bucket_hi")
+        if not (date and location and metric and lo is not None and hi is not None):
+            continue
+        key = f"{date}|{location}|{metric}|{lo},{hi}"
+        # Keep the latest snapshot for each key
+        snapshots[key] = {
+            "best_ask": snap.get("best_ask", 0.0),
+            "best_bid": snap.get("best_bid", 0.0),
+        }
+    return snapshots
+
+
+def _simulate_market_price(our_prob: float, n_buckets: int, seed_val: int) -> float:
+    """Simulate a realistic market price from probability + noise.
+
+    Models a semi-efficient market: prices are correlated with true
+    probabilities but with ~5% Gaussian noise (model/market disagreement).
+    Deterministic for a given seed (reproducible backtests).
+
+    Returns a price clamped to [0.02, 0.98].
+    """
+    rng = random.Random(seed_val)
+    noise = rng.gauss(0, 0.05)
+    return max(0.02, min(0.98, our_prob + noise))
+
+
 def run_backtest(
     locations: list[str],
     start_date: str,
@@ -75,6 +120,7 @@ def run_backtest(
     horizon: int = 3,
     entry_threshold: float = 0.03,
     bucket_width: int = 5,
+    snapshot_path: str | None = None,
 ) -> BacktestResult:
     """Run backtest simulation over historical data.
 
@@ -91,8 +137,17 @@ def run_backtest(
         horizon: Forecast horizon in days (default 3).
         entry_threshold: Minimum EV to take a trade (default 0.03).
         bucket_width: Width of simulated buckets in °F (default 5).
+        snapshot_path: Path to price_snapshots.json from paper trading.
+            When provided, real recorded prices are used where available.
     """
     trades: list[BacktestTrade] = []
+
+    # Load price snapshots if available
+    price_snapshots: dict[str, dict] = {}
+    if snapshot_path:
+        price_snapshots = _load_price_snapshots(snapshot_path)
+        if price_snapshots:
+            logger.info("Loaded %d price snapshots from %s", len(price_snapshots), snapshot_path)
 
     for loc in locations:
         loc_data = LOCATIONS.get(loc)
@@ -157,9 +212,16 @@ def run_backtest(
                         location=loc,
                     )
 
-                    # Simulate market price (slightly biased toward 1/N)
+                    # Simulate market price: use real snapshot if available,
+                    # otherwise model a semi-efficient market (prob + noise)
                     n_buckets = len(buckets)
-                    simulated_price = round(1.0 / n_buckets, 2)
+                    snap_key = f"{target_date_str}|{loc}|{metric}|{bucket_lo},{bucket_hi}"
+                    snapshot = price_snapshots.get(snap_key)
+                    if snapshot and snapshot["best_ask"] > 0:
+                        simulated_price = snapshot["best_ask"]
+                    else:
+                        seed = hash(f"{target_date_str}{loc}{metric}{bucket_lo}")
+                        simulated_price = _simulate_market_price(prob, n_buckets, seed)
 
                     ev = prob - simulated_price
                     if ev < entry_threshold:
@@ -345,6 +407,10 @@ def main() -> None:
         "--output", type=str, default="backtest_report.json",
         help="Output path for report (default: backtest_report.json)",
     )
+    parser.add_argument(
+        "--snapshot-path", type=str, default=None,
+        help="Path to price_snapshots.json from paper trading (uses real prices where available)",
+    )
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
@@ -356,6 +422,7 @@ def main() -> None:
         start_date=args.start_date,
         end_date=args.end_date,
         horizon=args.horizon,
+        snapshot_path=args.snapshot_path,
     )
 
     print(result.summary())

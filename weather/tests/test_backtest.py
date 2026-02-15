@@ -1,5 +1,8 @@
 """Tests for weather.backtest — backtesting engine."""
 
+import json
+import os
+import tempfile
 import unittest
 from unittest.mock import patch
 
@@ -10,6 +13,8 @@ from weather.backtest import (
     run_backtest,
     _compute_max_drawdown,
     _compute_sharpe,
+    _load_price_snapshots,
+    _simulate_market_price,
 )
 
 
@@ -215,6 +220,160 @@ class TestRunBacktest(unittest.TestCase):
             end_date="2025-06-30",
         )
         self.assertEqual(len(result.trades), 0)
+
+
+class TestSimulateMarketPrice(unittest.TestCase):
+
+    def test_range_clamped(self):
+        """Price should always be in [0.02, 0.98]."""
+        for prob in [0.0, 0.01, 0.5, 0.99, 1.0]:
+            for seed in range(100):
+                price = _simulate_market_price(prob, 7, seed)
+                self.assertGreaterEqual(price, 0.02)
+                self.assertLessEqual(price, 0.98)
+
+    def test_deterministic(self):
+        """Same seed should produce same price."""
+        p1 = _simulate_market_price(0.5, 7, 42)
+        p2 = _simulate_market_price(0.5, 7, 42)
+        self.assertEqual(p1, p2)
+
+    def test_different_seeds_differ(self):
+        """Different seeds should generally produce different prices."""
+        p1 = _simulate_market_price(0.5, 7, 1)
+        p2 = _simulate_market_price(0.5, 7, 2)
+        # They could theoretically be equal but extremely unlikely
+        self.assertNotAlmostEqual(p1, p2, places=6)
+
+    def test_center_probability_price_near_prob(self):
+        """For the center bucket (high prob), price should be roughly near prob."""
+        prices = [_simulate_market_price(0.60, 7, seed) for seed in range(200)]
+        avg = sum(prices) / len(prices)
+        # Average should be close to 0.60 (within noise stddev)
+        self.assertAlmostEqual(avg, 0.60, delta=0.03)
+
+
+class TestLoadPriceSnapshots(unittest.TestCase):
+
+    def test_loads_and_indexes(self):
+        snapshots = [
+            {
+                "date": "2026-02-15",
+                "location": "NYC",
+                "metric": "high",
+                "bucket_lo": 50,
+                "bucket_hi": 54,
+                "best_ask": 0.45,
+                "best_bid": 0.42,
+            },
+        ]
+        with tempfile.NamedTemporaryFile(suffix=".json", delete=False, mode="w") as f:
+            json.dump(snapshots, f)
+            tmp_path = f.name
+        try:
+            result = _load_price_snapshots(tmp_path)
+            key = "2026-02-15|NYC|high|50,54"
+            self.assertIn(key, result)
+            self.assertAlmostEqual(result[key]["best_ask"], 0.45)
+        finally:
+            os.unlink(tmp_path)
+
+    def test_missing_file_returns_empty(self):
+        result = _load_price_snapshots("/nonexistent/path.json")
+        self.assertEqual(result, {})
+
+    def test_invalid_json_returns_empty(self):
+        with tempfile.NamedTemporaryFile(suffix=".json", delete=False, mode="w") as f:
+            f.write("not valid json")
+            tmp_path = f.name
+        try:
+            result = _load_price_snapshots(tmp_path)
+            self.assertEqual(result, {})
+        finally:
+            os.unlink(tmp_path)
+
+
+class TestBacktestWithSnapshots(unittest.TestCase):
+
+    @patch("weather.backtest.get_historical_actuals")
+    @patch("weather.backtest.get_historical_forecasts")
+    def test_backtest_uses_snapshot_price(self, mock_forecasts, mock_actuals):
+        """When snapshots are available, their prices should be used."""
+        mock_forecasts.return_value = {
+            "2025-06-04": {
+                "2025-06-04": {
+                    "gfs_high": 82.0, "gfs_low": 65.0,
+                    "ecmwf_high": 84.0, "ecmwf_low": 66.0,
+                },
+            },
+        }
+        mock_actuals.return_value = {
+            "2025-06-04": {"high": 83.0, "low": 64.5},
+        }
+
+        # Create a snapshot file with a known price for the center bucket
+        snapshots = [{
+            "date": "2025-06-04",
+            "location": "NYC",
+            "metric": "high",
+            "bucket_lo": 80,
+            "bucket_hi": 84,
+            "best_ask": 0.55,
+            "best_bid": 0.52,
+        }]
+        with tempfile.NamedTemporaryFile(suffix=".json", delete=False, mode="w") as f:
+            json.dump(snapshots, f)
+            tmp_path = f.name
+
+        try:
+            result = run_backtest(
+                locations=["NYC"],
+                start_date="2025-06-04",
+                end_date="2025-06-04",
+                horizon=3,
+                entry_threshold=0.0,
+                snapshot_path=tmp_path,
+            )
+
+            # Find the trade for bucket (80, 84)
+            matching = [t for t in result.trades if t.bucket == (80, 84)]
+            if matching:
+                self.assertAlmostEqual(matching[0].simulated_price, 0.55)
+        finally:
+            os.unlink(tmp_path)
+
+    @patch("weather.backtest.get_historical_actuals")
+    @patch("weather.backtest.get_historical_forecasts")
+    def test_fallback_when_no_snapshots(self, mock_forecasts, mock_actuals):
+        """Without snapshots, prices should use probabilistic model (not 1/N)."""
+        mock_forecasts.return_value = {
+            "2025-06-04": {
+                "2025-06-04": {
+                    "gfs_high": 82.0, "gfs_low": 65.0,
+                    "ecmwf_high": 84.0, "ecmwf_low": 66.0,
+                },
+            },
+        }
+        mock_actuals.return_value = {
+            "2025-06-04": {"high": 83.0, "low": 64.5},
+        }
+
+        result = run_backtest(
+            locations=["NYC"],
+            start_date="2025-06-04",
+            end_date="2025-06-04",
+            horizon=3,
+            entry_threshold=0.0,
+        )
+
+        # With 7 buckets, old 1/N would give ~0.14. The new model should
+        # produce prices correlated with probability (center bucket higher,
+        # tail buckets lower)
+        if result.trades:
+            prices = [t.simulated_price for t in result.trades]
+            # At least one price should be significantly different from 0.14
+            self.assertTrue(any(abs(p - 0.14) > 0.05 for p in prices),
+                            f"All prices too close to 0.14: {prices}")
 
 
 if __name__ == "__main__":

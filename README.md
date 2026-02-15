@@ -13,6 +13,7 @@ Polymarket lists daily temperature markets for 6 US cities: *"Will the highest t
 - [Weather Data Sources](#weather-data-sources)
 - [Probability Model](#probability-model)
 - [Calibration System](#calibration-system)
+- [Paper Trading](#paper-trading)
 - [Backtesting](#backtesting)
 - [Trading Strategy](#trading-strategy)
 - [Execution & Fill Verification](#execution--fill-verification)
@@ -101,7 +102,9 @@ The core intelligence layer. Combines multiple weather data sources into a proba
 | `state.py` | Persistent state (predictions, daily observations, trade history, pending orders) |
 | `historical.py` | Open-Meteo historical forecast and ERA5 reanalysis client (for calibration) |
 | `calibrate.py` | Calibration script — computes empirical sigma and model weights from historical data |
-| `backtest.py` | Backtesting engine — simulates strategy on historical data with Brier scoring |
+| `backtest.py` | Backtesting engine — simulates strategy on historical data with Brier scoring, supports real price snapshots |
+| `paper_bridge.py` | `PaperBridge` — simulated execution wrapper (real prices, no orders submitted) |
+| `paper_trade.py` | Paper trading CLI — runs the real strategy with simulated execution, records price snapshots |
 | `calibration.json` | Generated calibration tables (sigma by horizon/location, seasonal factors, model weights) |
 
 ---
@@ -379,19 +382,93 @@ The solution is a **hybrid approach**:
 
 ---
 
+## Paper Trading
+
+Paper trading runs the **exact same strategy code** as live trading, but intercepts all order execution — no real orders are submitted. It uses real Polymarket prices via the Gamma and CLOB APIs (read-only) and records price snapshots for later use in backtesting.
+
+### How It Works
+
+```
+GammaClient → real markets       PublicClient → real orderbooks
+                ↓                                    ↓
+        PaperBridge (wraps CLOBWeatherBridge)
+          ├─ fetch_weather_markets()  → delegates to real bridge
+          ├─ execute_trade()          → simulated (no CLOB call)
+          ├─ execute_sell()           → simulated (no CLOB call)
+          └─ save_snapshots()         → price_snapshots.json
+                ↓
+        run_weather_strategy()  (identical code path)
+                ↓
+        paper_state.json (trades, predictions, forecasts)
+```
+
+**Safety:** `PublicClient` has no `post_order()` method — even if the PaperBridge fails to intercept, no real order can be placed.
+
+### Running Paper Trading
+
+```bash
+# Basic paper trading (all default locations)
+python3 -m weather.paper_trade
+
+# Verbose mode (DEBUG logging)
+python3 -m weather.paper_trade --verbose
+
+# Specific locations
+python3 -m weather.paper_trade --set locations=NYC,Chicago
+
+# Disable safeguards (for testing)
+python3 -m weather.paper_trade --no-safeguards
+```
+
+### What It Does
+
+1. Loads config (no private key needed)
+2. Builds a read-only bridge wrapped in `PaperBridge`
+3. Loads `paper_state.json` (separate from real trading state)
+4. **Resolves past predictions** via `GammaClient.check_resolution()` and prints P&L summary
+5. Runs `run_weather_strategy()` with `dry_run=False` — trades go through `PaperBridge`
+6. Saves price snapshots to `price_snapshots.json` (append-only)
+7. Saves paper state
+
+### Generated Files
+
+| File | Description |
+|------|-------------|
+| `weather/paper_state.json` | Paper trading state (trades, predictions, forecasts) — separate from real `weather_state.json` |
+| `weather/price_snapshots.json` | Append-only history of real Polymarket prices, used by the backtest engine |
+
+---
+
 ## Backtesting
 
 The backtesting engine simulates the strategy on historical data to validate parameters and measure prediction quality.
 
+### Pricing Model
+
+The backtest supports two pricing modes:
+
+1. **Real price snapshots** (from paper trading) — when `--snapshot-path` is provided, uses actual recorded Polymarket prices for matching buckets
+2. **Probabilistic model** (default fallback) — simulates a semi-efficient market where prices are correlated with true probabilities plus Gaussian noise (~5% model/market disagreement): `price = clamp(prob + N(0, 0.05), 0.02, 0.98)`. Deterministic for reproducibility (seeded RNG).
+
+This replaces the previous uniform `1/N` pricing (~$0.14 for all buckets) which was unrealistic and inflated ROI.
+
 ### Running a Backtest
 
 ```bash
+# Standard backtest (probabilistic pricing model)
 python3 -m weather.backtest \
   --locations NYC,Chicago \
   --start-date 2025-06-01 \
   --end-date 2025-12-31 \
   --horizon 3 \
   --output backtest_report.json
+
+# Backtest with real price snapshots (after accumulating paper trading data)
+python3 -m weather.backtest \
+  --locations NYC \
+  --start-date 2026-02-01 \
+  --end-date 2026-02-15 \
+  --snapshot-path weather/price_snapshots.json
 ```
 
 ### What It Does
@@ -401,8 +478,9 @@ For each day in the range:
 2. Compute ensemble forecast using `compute_ensemble_forecast()`
 3. Generate temperature buckets around the forecast
 4. Estimate probability for each bucket via `estimate_bucket_probability()`
-5. Simulate a trade if EV > entry_threshold
-6. Resolve against ERA5 actual temperatures
+5. Price the bucket: use real snapshot if available, otherwise probabilistic model
+6. Simulate a trade if EV > entry_threshold
+7. Resolve against ERA5 actual temperatures
 
 ### Output Metrics
 
@@ -721,13 +799,32 @@ python3 -m weather.calibrate --locations NYC \
   --start-date 2025-06-01 --end-date 2025-12-31
 ```
 
+### Paper Trading
+
+```bash
+# Paper trade with real Polymarket prices (no orders submitted)
+python3 -m weather.paper_trade --verbose
+
+# Specific locations
+python3 -m weather.paper_trade --set locations=NYC,Chicago
+
+# Accumulate price snapshots over time for realistic backtests
+# (run daily via cron or manually)
+python3 -m weather.paper_trade
+```
+
 ### Backtesting
 
 ```bash
-# Backtest NYC over 6 months
+# Backtest NYC over 6 months (probabilistic pricing)
 python3 -m weather.backtest --locations NYC \
   --start-date 2025-06-01 --end-date 2025-12-31 \
   --output report.json
+
+# Backtest with real price snapshots from paper trading
+python3 -m weather.backtest --locations NYC \
+  --start-date 2026-02-01 --end-date 2026-02-15 \
+  --snapshot-path weather/price_snapshots.json
 
 # Backtest with custom horizon
 python3 -m weather.backtest --locations NYC,Chicago \
@@ -758,9 +855,11 @@ python3 -m polymarket price <token_id>
 
 2. **Calibrate before trading** — Run `python3 -m weather.calibrate` to generate `calibration.json`. Without it, the bot uses hardcoded defaults that are reasonable but not optimized for current conditions.
 
-3. **Backtest first** — Use `python3 -m weather.backtest` to validate on historical data. Aim for a Brier score < 0.25 and a positive total P&L before going live.
+3. **Paper trade first** — Run `python3 -m weather.paper_trade` daily to simulate trading with real Polymarket prices. This accumulates price snapshots and tracks predictions for resolution. Review the P&L summary after a few days.
 
-4. **Start with 1 location** — Begin with `--set locations=NYC` (highest liquidity) before adding more cities. Each location adds API calls and potential positions.
+4. **Backtest** — Use `python3 -m weather.backtest` to validate on historical data. After accumulating paper trading data, use `--snapshot-path weather/price_snapshots.json` for realistic pricing. Aim for a Brier score < 0.25 and a positive total P&L before going live.
+
+5. **Start with 1 location** — Begin with `--set locations=NYC` (highest liquidity) before adding more cities. Each location adds API calls and potential positions.
 
 ### Optimal Timing
 
@@ -823,7 +922,7 @@ python3 -m polymarket price <token_id>
 ## Testing
 
 ```bash
-# Run all 356 tests
+# Run all 380 tests
 python3 -m pytest -q
 
 # Weather tests only
@@ -844,7 +943,7 @@ python3 -m pytest weather/tests/test_strategy.py -v
 
 | Package | Tests | Key coverage |
 |---------|-------|-------------|
-| `weather/` | ~230 tests | Strategy, bridge, NOAA, Open-Meteo, aviation/METAR, probability, calibration, backtesting, sizing, state, parsing |
+| `weather/` | ~254 tests | Strategy, bridge, paper bridge, NOAA, Open-Meteo, aviation/METAR, probability, calibration, backtesting, sizing, state, parsing |
 | `bot/` | ~80 tests | Scanner, signals, scoring, sizing, daemon, Gamma API |
 | `polymarket/` | ~46 tests | Order signing, HMAC auth, client REST, fill detection |
 
@@ -897,12 +996,15 @@ Weather_Gully/
 │   ├── state.py             # Persistent state (predictions, obs, pending orders)
 │   ├── historical.py        # Open-Meteo historical + ERA5 client (calibration)
 │   ├── calibrate.py         # Calibration script (empirical sigma, model weights)
-│   ├── backtest.py          # Backtesting engine (Brier score, drawdown, Sharpe)
+│   ├── backtest.py          # Backtesting engine (Brier score, drawdown, Sharpe, snapshot pricing)
+│   ├── paper_bridge.py      # PaperBridge — simulated execution wrapper
+│   ├── paper_trade.py       # Paper trading CLI (python -m weather.paper_trade)
 │   ├── calibration.json     # Generated calibration tables
 │   ├── _ssl.py              # SSL context (certifi → system → unverified fallback)
 │   └── tests/
 │       ├── test_strategy.py
 │       ├── test_bridge.py
+│       ├── test_paper_bridge.py
 │       ├── test_aviation.py
 │       ├── test_probability.py
 │       ├── test_open_meteo.py
