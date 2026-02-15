@@ -396,5 +396,18 @@ class TestStateSaveLoad(unittest.TestCase):
         Path(path).unlink()
 
 
+class TestAdaptiveSigmaConfig(unittest.TestCase):
+
+    def test_config_default_true(self):
+        from weather.config import Config
+        config = Config()
+        self.assertTrue(config.adaptive_sigma)
+
+    def test_config_can_disable(self):
+        from weather.config import Config
+        config = Config(adaptive_sigma=False)
+        self.assertFalse(config.adaptive_sigma)
+
+
 if __name__ == "__main__":
     unittest.main()

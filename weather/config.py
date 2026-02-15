@@ -100,6 +100,9 @@ class Config:
     aviation_obs_weight: float = 0.40
     aviation_hours: int = 24
 
+    # Adaptive sigma (ensemble-based)
+    adaptive_sigma: bool = True
+
     # Execution: fill verification
     fill_timeout_seconds: float = 30.0
     fill_poll_interval: float = 2.0

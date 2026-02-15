@@ -9,10 +9,12 @@ from datetime import datetime, timezone
 
 from .aviation import get_aviation_daily_data
 from .config import Config, LOCATIONS, MIN_SHARES_PER_ORDER, MIN_TICK_SIZE
+from .ensemble import fetch_ensemble_spread
 from .noaa import get_noaa_forecast
 from .open_meteo import compute_ensemble_forecast, get_open_meteo_forecast, get_open_meteo_forecast_multi
 from .parsing import parse_weather_event, parse_temperature_bucket
 from .probability import (
+    compute_adaptive_sigma,
     estimate_bucket_probability,
     estimate_bucket_probability_with_obs,
     get_horizon_days,
@@ -735,6 +737,20 @@ def run_weather_strategy(
             logger.warning("No forecast available for %s %s", location, date_str)
             continue
 
+        # Adaptive sigma: compute from ensemble spread + model spread + feedback EMA
+        adaptive_sigma_value = None
+        if config.adaptive_sigma:
+            loc_data = LOCATIONS.get(location, {})
+            ensemble_result = fetch_ensemble_spread(
+                loc_data.get("lat", 0), loc_data.get("lon", 0),
+                date_str, metric,
+            )
+            ema_error = feedback.get_abs_error_ema(location, datetime.now(timezone.utc).month)
+            adaptive_sigma_value = compute_adaptive_sigma(
+                ensemble_result, model_spread if config.multi_source else 0.0,
+                ema_error, date_str, location,
+            )
+
         # Feedback bias correction (before delta detection so both use corrected temp)
         feedback_bias = feedback.get_bias(location, datetime.now(timezone.utc).month)
         if feedback_bias is not None:
@@ -771,7 +787,8 @@ def run_weather_strategy(
         if config.adjacent_buckets:
             scored = score_buckets(event_markets, forecast_temp, date_str, config,
                                    obs_data=scoring_obs, metric=metric,
-                                   location=location, weather_data=om_data)
+                                   location=location, weather_data=om_data,
+                                   sigma_override=adaptive_sigma_value)
             tradeable = [s for s in scored if s["ev"] >= config.min_ev_threshold]
         else:
             # Legacy: single-match
@@ -789,6 +806,7 @@ def run_weather_strategy(
                             location=location,
                             weather_data=om_data,
                             metric=metric,
+                            sigma_override=adaptive_sigma_value,
                         )
                         if prob >= config.min_probability:
                             tradeable.append({
