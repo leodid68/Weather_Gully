@@ -6,7 +6,7 @@ from unittest.mock import MagicMock, patch
 import httpx
 import pytest
 
-from polymarket.client import PolymarketClient
+from polymarket.client import CircuitOpenError, PolymarketClient, _CircuitBreaker
 
 _FAKE_CREDS = {
     "apiKey": "test-api-key",
@@ -212,6 +212,58 @@ class TestRetry:
         client = _make_client(base_delay=0.01)
         result = client._request("GET", "/test", auth=False)
         assert result == {"ok": True}
+        client.close()
+
+
+class TestCircuitBreaker:
+    def test_opens_after_threshold(self):
+        """Circuit should open after failure_threshold consecutive failures."""
+        cb = _CircuitBreaker(failure_threshold=3, recovery_timeout=60.0)
+        assert cb.state == _CircuitBreaker.CLOSED
+        assert cb.allow_request()
+
+        for _ in range(3):
+            cb.record_failure()
+
+        assert cb.state == _CircuitBreaker.OPEN
+        assert not cb.allow_request()
+
+    def test_closes_on_success(self):
+        """Success should reset failure count and close the circuit."""
+        cb = _CircuitBreaker(failure_threshold=3, recovery_timeout=60.0)
+        cb.record_failure()
+        cb.record_failure()
+        cb.record_success()
+
+        assert cb.state == _CircuitBreaker.CLOSED
+        assert cb._failure_count == 0
+
+    def test_half_open_after_timeout(self):
+        """After recovery timeout, circuit should move to HALF_OPEN and allow one probe."""
+        cb = _CircuitBreaker(failure_threshold=2, recovery_timeout=0.0)
+        cb.record_failure()
+        cb.record_failure()
+        assert cb.state == _CircuitBreaker.OPEN
+
+        # With recovery_timeout=0, next allow_request() should transition to HALF_OPEN
+        assert cb.allow_request()
+        assert cb.state == _CircuitBreaker.HALF_OPEN
+
+        # Success should close it
+        cb.record_success()
+        assert cb.state == _CircuitBreaker.CLOSED
+
+    def test_client_raises_circuit_open(self):
+        """Client should raise CircuitOpenError when breaker is open."""
+        client = _make_client(base_delay=0.01)
+        # Force breaker open
+        client._breaker = _CircuitBreaker(failure_threshold=1, recovery_timeout=999)
+        client._breaker.record_failure()
+        assert client._breaker.state == _CircuitBreaker.OPEN
+
+        with pytest.raises(CircuitOpenError):
+            client._request("GET", "/test", auth=False)
+
         client.close()
 
 

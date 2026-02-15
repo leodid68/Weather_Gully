@@ -5,6 +5,7 @@ Fetches GFS and ECMWF forecasts and returns a combined/ensemble view.
 
 import json
 import logging
+import random
 import time
 from pathlib import Path
 from urllib.error import HTTPError, URLError
@@ -60,7 +61,7 @@ def _fetch_json(url: str, max_retries: int = 3, base_delay: float = 1.0) -> dict
                 return json.loads(resp.read().decode())
         except (HTTPError, URLError, TimeoutError) as exc:
             if attempt < max_retries:
-                delay = base_delay * (2 ** attempt)
+                delay = base_delay * (2 ** attempt) * (0.5 + random.random())
                 logger.warning("Open-Meteo error — retry %d/%d in %.1fs: %s",
                                attempt + 1, max_retries, delay, exc)
                 time.sleep(delay)

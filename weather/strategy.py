@@ -19,6 +19,7 @@ from .probability import (
     get_noaa_probability,
 )
 from .bridge import CLOBWeatherBridge
+from .feedback import FeedbackState
 from .sizing import compute_exit_threshold, compute_position_size
 from .state import PredictionRecord, TradingState
 
@@ -195,9 +196,14 @@ def score_buckets(
                 apply_seasonal=config.seasonal_adjustments,
                 location=location,
                 weather_data=weather_data,
+                metric=metric,
             )
 
         ev = prob - price  # Expected value above break-even
+
+        # Skip low-probability buckets (value traps at $0.01-0.03)
+        if prob < config.min_probability:
+            continue
 
         scored.append({
             "market": market,
@@ -460,6 +466,8 @@ def run_weather_strategy(
     state_path: str | None = None,
 ) -> None:
     """Run the weather trading strategy."""
+    feedback = FeedbackState.load()
+
     logger.info("Weather Trading Bot (CLOB direct)")
     logger.info("=" * 50)
 
@@ -613,6 +621,18 @@ def run_weather_strategy(
     logger.info("Forecasts ready: NOAA=%d, Open-Meteo=%d, METAR=%d",
                 len(noaa_cache), len(open_meteo_cache), len(aviation_cache))
 
+    # Health check: at least one weather source must have data
+    noaa_ok = sum(1 for v in noaa_cache.values() if v)
+    om_ok = sum(1 for v in open_meteo_cache.values() if v)
+    if noaa_ok == 0 and om_ok == 0:
+        logger.error("HEALTH CHECK FAILED: no weather source returned data — skipping trading")
+        save_path = state_path or config.state_file
+        state.save(save_path)
+        return
+    if noaa_ok == 0 or (config.multi_source and om_ok == 0):
+        missing = "NOAA" if noaa_ok == 0 else "Open-Meteo"
+        logger.warning("HEALTH CHECK: %s returned no data — trading with reduced sources", missing)
+
     for event_id, event_markets in events.items():
         event_name = event_markets[0].get("event_name", "") if event_markets else ""
         event_info = parse_weather_event(event_name)
@@ -705,7 +725,14 @@ def run_weather_strategy(
             logger.warning("No forecast available for %s %s", location, date_str)
             continue
 
-        # Forecast change detection
+        # Feedback bias correction (before delta detection so both use corrected temp)
+        feedback_bias = feedback.get_bias(location, datetime.now(timezone.utc).month)
+        if feedback_bias is not None:
+            forecast_temp -= feedback_bias
+            logger.info("Feedback bias correction: %+.1f°F → adjusted forecast %.0f°F",
+                         -feedback_bias, forecast_temp)
+
+        # Forecast change detection (operates on bias-corrected forecast)
         delta = state.get_forecast_delta(location, date_str, metric, forecast_temp)
         state.store_forecast(location, date_str, metric, forecast_temp)
         if delta is not None:
@@ -751,15 +778,17 @@ def run_weather_strategy(
                             apply_seasonal=config.seasonal_adjustments,
                             location=location,
                             weather_data=om_data,
+                            metric=metric,
                         )
-                        tradeable.append({
-                            "market": market,
-                            "bucket": bucket,
-                            "outcome_name": outcome_name,
-                            "prob": prob,
-                            "price": price,
-                            "ev": prob - price,
-                        })
+                        if prob >= config.min_probability:
+                            tradeable.append({
+                                "market": market,
+                                "bucket": bucket,
+                                "outcome_name": outcome_name,
+                                "prob": prob,
+                                "price": price,
+                                "ev": prob - price,
+                            })
                     break
 
         if not tradeable:

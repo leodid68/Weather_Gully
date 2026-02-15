@@ -276,11 +276,35 @@ class TestCalibrationWithMockData(unittest.TestCase):
 
         factor_nyc = _get_seasonal_factor(1, location="NYC")
         factor_miami = _get_seasonal_factor(1, location="Miami")
-        # Both should be less than 1.0 (winter)
-        self.assertLess(factor_nyc, 1.0)
-        self.assertLess(factor_miami, 1.0)
+        # Both should be > 1.0 (winter = harder = more sigma)
+        self.assertGreater(factor_nyc, 1.0)
+        self.assertGreater(factor_miami, 1.0)
         # NYC should have different factor from Miami
         self.assertNotAlmostEqual(factor_nyc, factor_miami, places=2)
+
+
+class TestHardcodedSigmaNotStale(unittest.TestCase):
+    """Verify hardcoded fallbacks are aligned with calibration data."""
+
+    def test_horizon_0_sigma_not_too_low(self):
+        """_HORIZON_STDDEV[0] should be >= 1.9 (calibrated ~1.96)."""
+        from weather.probability import _HORIZON_STDDEV
+        self.assertGreaterEqual(_HORIZON_STDDEV[0], 1.9)
+
+    def test_horizon_10_sigma_not_too_low(self):
+        """_HORIZON_STDDEV[10] should be >= 11.0 (calibrated ~11.77)."""
+        from weather.probability import _HORIZON_STDDEV
+        self.assertGreaterEqual(_HORIZON_STDDEV[10], 11.0)
+
+    def test_seasonal_february_hardest(self):
+        """February should be the hardest month (highest factor = more sigma)."""
+        from weather.probability import _SEASONAL_FACTORS
+        self.assertGreater(_SEASONAL_FACTORS[2], 1.10)
+
+    def test_seasonal_november_easiest(self):
+        """November should be the easiest month (lowest factor = less sigma)."""
+        from weather.probability import _SEASONAL_FACTORS
+        self.assertLess(_SEASONAL_FACTORS[11], 0.80)
 
 
 if __name__ == "__main__":

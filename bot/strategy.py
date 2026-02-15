@@ -205,10 +205,11 @@ def run_strategy(
         if pos.side == "BUY":
             loss_pct = (pos.price - current) / pos.price if pos.price > 0 else 0
         else:
-            # SELL loss = price moved up against us; clamp denominator to avoid
-            # extreme loss_pct when pos.price is near 1.0
+            # SELL: we profit when price drops, lose when price rises.
+            # Loss = (current - entry) * size; max loss = (1 - entry) * size.
+            # loss_pct = (current - entry) / (1 - entry), clamped for safety.
             denom = max(0.05, 1.0 - pos.price)
-            loss_pct = (current - pos.price) / denom if current > pos.price else 0
+            loss_pct = (current - pos.price) / denom if current > pos.price else 0.0
 
         if loss_pct >= config.stop_loss_pct:
             pnl = _compute_pnl(pos, current)
@@ -458,7 +459,12 @@ def run_strategy(
                     # BUY: cost = price * shares → shares = usd / price
                     # SELL: max_loss = (1-price) * shares → shares = usd / (1-price)
                     if sig.side == "SELL":
-                        shares = size_usd / (1.0 - fresh_price)
+                        denom = 1.0 - fresh_price
+                        if denom < 0.01:
+                            logger.warning("SELL price too high (%.4f) — skipping %s",
+                                           fresh_price, sig.token_id[:16])
+                            continue
+                        shares = size_usd / denom
                     else:
                         shares = size_usd / fresh_price
                     if shares <= 0:

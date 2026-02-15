@@ -210,6 +210,7 @@ def run_backtest(
                         ensemble_temp, bucket_lo, bucket_hi,
                         target_date_str, apply_seasonal=True,
                         location=loc,
+                        metric=metric,
                     )
 
                     # Simulate market price: use real snapshot if available,

@@ -120,6 +120,34 @@ class TestScoreBuckets(unittest.TestCase):
             self.assertGreater(center[0]["prob"], max(o["prob"] for o in others))
 
 
+class TestMinProbabilityFilter(unittest.TestCase):
+    """Test that min_probability filters low-probability buckets."""
+
+    def test_min_probability_filters_low_prob(self):
+        """Buckets with prob < min_probability should be excluded."""
+        markets_data = _load_fixture("weather_markets.json")
+        event_markets = [m for m in markets_data["markets"] if m["event_id"] == "evt-nyc-high-mar15"]
+        # Set high min_probability to filter most buckets
+        config = Config(adjacent_buckets=True, seasonal_adjustments=False, min_probability=0.90)
+
+        scored = score_buckets(event_markets, 52, "2025-03-15", config)
+        # With 0.90 threshold, few or no buckets should pass
+        for s in scored:
+            self.assertGreaterEqual(s["prob"], 0.90)
+
+    def test_min_probability_zero_passes_all(self):
+        """With min_probability=0, all valid buckets should pass."""
+        markets_data = _load_fixture("weather_markets.json")
+        event_markets = [m for m in markets_data["markets"] if m["event_id"] == "evt-nyc-high-mar15"]
+        config_zero = Config(adjacent_buckets=True, seasonal_adjustments=False, min_probability=0.0)
+        config_default = Config(adjacent_buckets=True, seasonal_adjustments=False, min_probability=0.15)
+
+        scored_zero = score_buckets(event_markets, 52, "2025-03-15", config_zero)
+        scored_default = score_buckets(event_markets, 52, "2025-03-15", config_default)
+        # Zero threshold should return at least as many as default
+        self.assertGreaterEqual(len(scored_zero), len(scored_default))
+
+
 class TestStrategyIntegration(unittest.TestCase):
     """Full dry-run with mocked bridge."""
 
@@ -193,6 +221,35 @@ class TestStrategyIntegration(unittest.TestCase):
         )
 
         # No trades should have been executed
+        bridge.execute_trade.assert_not_called()
+
+
+class TestHealthCheck(unittest.TestCase):
+    """Test that strategy aborts when no weather sources return data."""
+
+    @patch("weather.strategy.get_open_meteo_forecast")
+    @patch("weather.strategy.get_noaa_forecast")
+    def test_no_sources_returns_early(self, mock_noaa, mock_om):
+        """If both NOAA and Open-Meteo return empty, strategy should abort."""
+        mock_noaa.return_value = {}
+        mock_om.return_value = {}
+
+        bridge = MagicMock(spec=CLOBWeatherBridge)
+        bridge.get_portfolio.return_value = {"balance_usdc": 50.0, "total_exposure": 0, "positions_count": 0}
+        bridge.fetch_weather_markets.return_value = _load_fixture("weather_markets.json")["markets"]
+        bridge.get_positions.return_value = []
+        bridge.get_position.return_value = None
+
+        config = Config(locations="NYC", multi_source=True, max_days_ahead=365,
+                        seasonal_adjustments=False, aviation_obs=False)
+        state = TradingState()
+
+        run_weather_strategy(
+            client=bridge, config=config, state=state,
+            dry_run=True, use_safeguards=False, use_trends=False,
+        )
+
+        # No trades should have been attempted (early return)
         bridge.execute_trade.assert_not_called()
 
 

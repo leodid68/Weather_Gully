@@ -106,6 +106,7 @@ class PredictionRecord:
     timestamp: str = ""
     resolved: bool = False
     actual_outcome: bool | None = None  # True if our bucket won
+    fed_to_feedback: bool = False
 
     def to_dict(self) -> dict:
         return {k: v for k, v in self.__dict__.items()}
@@ -125,6 +126,7 @@ class PredictionRecord:
             timestamp=d.get("timestamp", ""),
             resolved=d.get("resolved", False),
             actual_outcome=d.get("actual_outcome"),
+            fed_to_feedback=d.get("fed_to_feedback", False),
         )
 
 

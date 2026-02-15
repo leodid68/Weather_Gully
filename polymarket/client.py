@@ -2,6 +2,7 @@
 
 import json
 import logging
+import random
 import time
 from urllib.parse import urlencode
 
@@ -17,6 +18,58 @@ _RETRYABLE_CODES = {429, 500, 502, 503, 504}
 
 # Compact JSON matching the official client (critical for HMAC validation)
 _json_compact = lambda obj: json.dumps(obj, separators=(",", ":"), ensure_ascii=False)
+
+
+class CircuitOpenError(Exception):
+    """Raised when the circuit breaker is open and requests are blocked."""
+
+
+class _CircuitBreaker:
+    """Simple circuit breaker: CLOSED → OPEN (after failures) → HALF_OPEN → CLOSED.
+
+    Args:
+        failure_threshold: Number of consecutive failures before opening.
+        recovery_timeout: Seconds to wait before attempting a probe request.
+    """
+
+    CLOSED = "closed"
+    OPEN = "open"
+    HALF_OPEN = "half_open"
+
+    def __init__(self, failure_threshold: int = 5, recovery_timeout: float = 60.0):
+        self.failure_threshold = failure_threshold
+        self.recovery_timeout = recovery_timeout
+        self.state = self.CLOSED
+        self._failure_count = 0
+        self._last_failure_time: float = 0.0
+
+    def allow_request(self) -> bool:
+        if self.state == self.CLOSED:
+            return True
+        if self.state == self.OPEN:
+            if time.monotonic() - self._last_failure_time >= self.recovery_timeout:
+                self.state = self.HALF_OPEN
+                logger.info("Circuit breaker → HALF_OPEN (probe allowed)")
+                return True
+            return False
+        # HALF_OPEN: allow one probe
+        return True
+
+    def record_success(self) -> None:
+        if self.state == self.HALF_OPEN:
+            logger.info("Circuit breaker → CLOSED (probe succeeded)")
+        self._failure_count = 0
+        self.state = self.CLOSED
+
+    def record_failure(self) -> None:
+        self._failure_count += 1
+        self._last_failure_time = time.monotonic()
+        if self._failure_count >= self.failure_threshold:
+            self.state = self.OPEN
+            logger.warning(
+                "Circuit breaker → OPEN after %d consecutive failures (cooldown %.0fs)",
+                self._failure_count, self.recovery_timeout,
+            )
 
 
 class PolymarketClient:
@@ -54,6 +107,7 @@ class PolymarketClient:
         self.passphrase = api_creds["passphrase"]
 
         self._http = httpx.Client(base_url=base_url, timeout=15)
+        self._breaker = _CircuitBreaker()
 
     # ------------------------------------------------------------------
     # Low-level request
@@ -62,6 +116,12 @@ class PolymarketClient:
     def _request(
         self, method: str, path: str, body: dict | list | None = None, auth: bool = True
     ) -> dict | list:
+        if not self._breaker.allow_request():
+            raise CircuitOpenError(
+                f"Circuit breaker OPEN — blocking {method} {path}. "
+                f"Will retry after {self._breaker.recovery_timeout:.0f}s cooldown."
+            )
+
         body_str = _json_compact(body) if body is not None else ""
         resp = None
 
@@ -89,7 +149,7 @@ class PolymarketClient:
                     headers=headers,
                 )
                 if resp.status_code in _RETRYABLE_CODES and attempt < self.max_retries:
-                    delay = self.base_delay * (2**attempt)
+                    delay = self.base_delay * (2**attempt) * (0.5 + random.random())
                     logger.warning(
                         "CLOB %d on %s %s — retry %d/%d in %.1fs",
                         resp.status_code, method, path, attempt + 1, self.max_retries, delay,
@@ -99,18 +159,21 @@ class PolymarketClient:
                 if resp.status_code >= 400:
                     logger.error("CLOB %d %s %s: %s", resp.status_code, method, path, resp.text)
                 resp.raise_for_status()
+                self._breaker.record_success()
                 return resp.json()
             except httpx.TimeoutException:
                 if attempt < self.max_retries:
-                    delay = self.base_delay * (2**attempt)
+                    delay = self.base_delay * (2**attempt) * (0.5 + random.random())
                     logger.warning(
                         "CLOB timeout on %s %s — retry %d/%d in %.1fs",
                         method, path, attempt + 1, self.max_retries, delay,
                     )
                     time.sleep(delay)
                     continue
+                self._breaker.record_failure()
                 raise
 
+        self._breaker.record_failure()
         raise httpx.HTTPStatusError(
             f"Max retries exceeded for {method} {path}",
             request=httpx.Request(method, path),

@@ -138,11 +138,17 @@ class PaperBridge:
 
         shares = amount / price
 
-        # Track paper position
+        # Track paper position (weighted average cost basis)
         existing = self._paper_positions.get(market_id, {"shares": 0.0, "cost_basis": 0.0})
+        old_shares = existing["shares"]
+        new_total_shares = old_shares + shares
+        if new_total_shares > 0:
+            avg_cost = (old_shares * existing["cost_basis"] + shares * price) / new_total_shares
+        else:
+            avg_cost = price
         self._paper_positions[market_id] = {
-            "shares": existing["shares"] + shares,
-            "cost_basis": price,
+            "shares": new_total_shares,
+            "cost_basis": avg_cost,
         }
         self._total_exposure += price * shares
         self._position_count += 1

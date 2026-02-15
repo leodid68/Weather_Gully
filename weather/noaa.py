@@ -2,6 +2,7 @@
 
 import json
 import logging
+import random
 import time
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
@@ -34,7 +35,7 @@ def _fetch_json(
                 return json.loads(resp.read().decode())
         except HTTPError as exc:
             if exc.code in _RETRYABLE_CODES and attempt < max_retries:
-                delay = base_delay * (2 ** attempt)
+                delay = base_delay * (2 ** attempt) * (0.5 + random.random())
                 logger.warning(
                     "NOAA HTTP %d on %s — retry %d/%d in %.1fs",
                     exc.code, url, attempt + 1, max_retries, delay,
@@ -45,7 +46,7 @@ def _fetch_json(
             return None
         except URLError as exc:
             if attempt < max_retries:
-                delay = base_delay * (2 ** attempt)
+                delay = base_delay * (2 ** attempt) * (0.5 + random.random())
                 logger.warning(
                     "NOAA URL error %s — retry %d/%d in %.1fs",
                     exc.reason, attempt + 1, max_retries, delay,
@@ -56,7 +57,7 @@ def _fetch_json(
             return None
         except TimeoutError:
             if attempt < max_retries:
-                delay = base_delay * (2 ** attempt)
+                delay = base_delay * (2 ** attempt) * (0.5 + random.random())
                 logger.warning(
                     "NOAA timeout on %s — retry %d/%d in %.1fs",
                     url, attempt + 1, max_retries, delay,

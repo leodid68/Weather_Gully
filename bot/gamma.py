@@ -212,6 +212,11 @@ class GammaClient:
             m = raw[0]
             if not m.get("closed", False):
                 return None
+            # Verify market is actually resolved (not just closed early)
+            resolved_flag = m.get("resolved", False)
+            if not resolved_flag:
+                # Market is closed but not resolved — could be paused or cancelled
+                return None
             # Determine winning outcome from outcome prices
             # A resolved market has one outcome at ~1.0 and others at ~0.0
             outcome_prices_raw = m.get("outcomePrices") or "[]"

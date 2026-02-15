@@ -59,26 +59,28 @@ _HORIZON_ACCURACY = {
 # Standard deviation of NOAA forecast error (°F) by horizon
 # Used for bucket probability estimation via normal CDF
 _HORIZON_STDDEV = {
-    0: 1.5,
-    1: 2.0,
-    2: 2.5,
-    3: 3.0,
-    4: 3.5,
-    5: 4.0,
-    6: 5.0,
-    7: 6.0,
-    8: 7.0,
-    9: 8.0,
-    10: 9.0,
+    0: 2.0,
+    1: 2.6,
+    2: 3.3,
+    3: 3.9,
+    4: 4.6,
+    5: 5.2,
+    6: 6.5,
+    7: 7.9,
+    8: 9.2,
+    9: 10.5,
+    10: 11.8,
 }
 
-# Seasonal adjustment multipliers (month → factor)
-# Winter forecasts are harder (storms, cold fronts), summer is more stable
+# Seasonal sigma multiplier (month → factor)
+# factor > 1.0 = month is MORE uncertain (multiply sigma up)
+# factor < 1.0 = month is LESS uncertain (multiply sigma down)
+# Winter forecasts are harder (storms, cold fronts), summer/fall more stable
 _SEASONAL_FACTORS = {
-    1: 0.90, 2: 0.90, 3: 0.95,  # Winter / early spring
-    4: 0.95, 5: 1.00, 6: 1.00,  # Spring / early summer
-    7: 1.00, 8: 1.00, 9: 1.00,  # Summer / early fall
-    10: 0.95, 11: 0.95, 12: 0.90,  # Fall / winter
+    1: 1.02, 2: 1.20, 3: 1.08,   # Winter / early spring (hardest)
+    4: 1.09, 5: 1.14, 6: 1.09,   # Spring / early summer
+    7: 1.08, 8: 1.01, 9: 0.97,   # Summer / early fall
+    10: 0.79, 11: 0.74, 12: 0.80,  # Fall / winter (easiest)
 }
 
 
@@ -114,9 +116,10 @@ def get_noaa_probability(forecast_date: str, apply_seasonal: bool = True) -> flo
     if apply_seasonal:
         month = datetime.now(timezone.utc).month
         factor = _SEASONAL_FACTORS.get(month, 1.0)
-        base_prob *= factor
+        # factor > 1.0 = harder month = lower accuracy
+        base_prob /= factor
 
-    return round(min(base_prob, 0.99), 4)
+    return round(max(0.01, min(base_prob, 0.99)), 4)
 
 
 def _get_stddev(forecast_date: str, location: str = "") -> float:
@@ -142,8 +145,8 @@ def _get_stddev(forecast_date: str, location: str = "") -> float:
 
     # 3. Hardcoded fallback
     if days_ahead <= 10:
-        return _HORIZON_STDDEV.get(days_ahead, 9.0)
-    return min(12.0, 9.0 + 0.5 * (days_ahead - 10))
+        return _HORIZON_STDDEV.get(days_ahead, 11.8)
+    return min(18.0, 11.8 + 0.7 * (days_ahead - 10))
 
 
 def _get_seasonal_factor(month: int, location: str = "") -> float:
@@ -217,6 +220,7 @@ def estimate_bucket_probability(
     apply_seasonal: bool = True,
     location: str = "",
     weather_data: dict | None = None,
+    metric: str = "high",
 ) -> float:
     """Estimate P(actual temperature ∈ [bucket_low, bucket_high]).
 
@@ -233,18 +237,18 @@ def estimate_bucket_probability(
         apply_seasonal: Whether to apply seasonal adjustments.
         location: Canonical location key for calibrated sigma lookup.
         weather_data: Optional auxiliary weather data for sigma adjustment.
+        metric: ``"high"`` or ``"low"`` — which extreme this event tracks.
     """
     sigma = _get_stddev(forecast_date, location=location)
     if apply_seasonal:
         month = datetime.now(timezone.utc).month
         factor = _get_seasonal_factor(month, location=location)
-        # Wider uncertainty in harder seasons (inverse of accuracy boost)
-        if factor < 1.0:
-            sigma /= factor
+        # factor > 1.0 → harder month → widen sigma; < 1.0 → easier → narrow
+        sigma *= factor
 
     # Weather-based sigma adjustment
     if weather_data:
-        sigma *= _weather_sigma_multiplier(weather_data, "high")
+        sigma *= _weather_sigma_multiplier(weather_data, metric)
 
     # Guard against zero sigma
     if sigma <= 0:
@@ -407,8 +411,7 @@ def estimate_bucket_probability_with_obs(
     if apply_seasonal:
         month = datetime.now(timezone.utc).month
         factor = _get_seasonal_factor(month, location=location)
-        if factor < 1.0:
-            sigma /= factor
+        sigma *= factor
 
     # Weather-based sigma adjustment
     if weather_data:

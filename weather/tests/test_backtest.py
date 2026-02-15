@@ -162,7 +162,7 @@ class TestRunBacktest(unittest.TestCase):
             locations=["NYC"],
             start_date="2025-06-04",
             end_date="2025-06-04",
-            horizon=3,
+            horizon=1,
         )
 
         self.assertIsInstance(result, BacktestResult)

@@ -49,6 +49,7 @@ class Config:
     # Kelly
     kelly_fraction: float = 0.25
     min_ev_threshold: float = 0.03
+    min_probability: float = 0.15
 
     # Rate limiting
     max_trades_per_run: int = 5

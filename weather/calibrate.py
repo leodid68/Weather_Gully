@@ -189,8 +189,9 @@ def compute_empirical_sigma(
     for key, errs in sorted(groups.items()):
         if len(errs) < 3:
             continue
-        mean = sum(errs) / len(errs)
-        variance = sum((e - mean) ** 2 for e in errs) / len(errs)
+        n = len(errs)
+        mean = sum(errs) / n
+        variance = sum((e - mean) ** 2 for e in errs) / (n - 1)  # Bessel's correction
         result[key] = round(math.sqrt(variance), 2)
 
     return result
@@ -271,8 +272,9 @@ def _compute_base_sigma(errors: list[dict]) -> float:
     vals = [e["error"] for e in errors]
     if len(vals) < 3:
         return 1.5  # Fallback
-    mean = sum(vals) / len(vals)
-    variance = sum((v - mean) ** 2 for v in vals) / len(vals)
+    n = len(vals)
+    mean = sum(vals) / n
+    variance = sum((v - mean) ** 2 for v in vals) / (n - 1)  # Bessel's correction
     return math.sqrt(variance)
 
 
@@ -317,11 +319,14 @@ def build_calibration_tables(
     global_sigma = _expand_sigma_by_horizon(global_base)
 
     # Seasonal factors (relative sigma by month)
+    # Factor > 1.0 means this month is MORE uncertain than average (multiply sigma up).
+    # Factor < 1.0 means LESS uncertain (multiply sigma down).
+    # Therefore: factor = monthly_sigma / mean_sigma (not inverted).
     monthly_sigma = compute_empirical_sigma(all_errors, group_by="month")
     if monthly_sigma:
         mean_sigma = sum(monthly_sigma.values()) / len(monthly_sigma)
         seasonal_factors = {
-            m: round(mean_sigma / s, 3) if s > 0 else 1.0
+            m: round(s / mean_sigma, 3) if mean_sigma > 0 else 1.0
             for m, s in monthly_sigma.items()
         }
     else:
@@ -343,7 +348,7 @@ def build_calibration_tables(
         if loc_monthly_sigma:
             loc_mean = sum(loc_monthly_sigma.values()) / len(loc_monthly_sigma)
             location_seasonal[loc] = {
-                m: round(loc_mean / s, 3) if s > 0 else 1.0
+                m: round(s / loc_mean, 3) if loc_mean > 0 else 1.0
                 for m, s in loc_monthly_sigma.items()
             }
 

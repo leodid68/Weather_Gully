@@ -15,6 +15,7 @@ import sys
 from pathlib import Path
 
 from .config import Config
+from .feedback import FeedbackState
 from .paper_bridge import PaperBridge
 from .state import TradingState
 from .strategy import run_weather_strategy
@@ -57,6 +58,36 @@ def _resolve_predictions(state: TradingState, gamma) -> int:
     if resolved_count:
         logger.info("Resolved %d pending predictions", resolved_count)
     return resolved_count
+
+
+def _feed_feedback(state: TradingState, feedback: FeedbackState) -> int:
+    """Feed resolved predictions into the feedback loop using daily observations.
+
+    Returns the number of entries fed.
+    """
+    fed = 0
+    for pred in state.predictions.values():
+        if not pred.resolved or pred.forecast_temp is None or pred.fed_to_feedback:
+            continue
+        # Get actual temperature from daily observations
+        obs = state.get_daily_obs(pred.location, pred.forecast_date)
+        if not obs:
+            continue
+        actual_key = f"obs_{pred.metric}"
+        actual_temp = obs.get(actual_key)
+        if actual_temp is None:
+            continue
+        # Parse month from forecast_date
+        try:
+            month = int(pred.forecast_date.split("-")[1])
+        except (IndexError, ValueError):
+            continue
+        feedback.record(pred.location, month, pred.forecast_temp, actual_temp)
+        pred.fed_to_feedback = True
+        fed += 1
+    if fed:
+        logger.info("Fed %d resolved predictions to feedback loop", fed)
+    return fed
 
 
 def _print_pnl_summary(state: TradingState) -> None:
@@ -141,8 +172,11 @@ def main() -> None:
     logger.info("Loaded paper state: %d trades, %d predictions",
                 len(state.trades), len(state.predictions))
 
-    # Resolve past predictions
+    # Resolve past predictions and feed feedback
     _resolve_predictions(state, gamma)
+    feedback = FeedbackState.load()
+    _feed_feedback(state, feedback)
+    feedback.save()
     _print_pnl_summary(state)
 
     # Run strategy with PaperBridge — dry_run=False so trades go through

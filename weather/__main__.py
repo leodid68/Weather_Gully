@@ -7,7 +7,7 @@ import sys
 from pathlib import Path
 
 from .config import Config
-from .state import TradingState
+from .state import TradingState, state_lock
 from .strategy import run_weather_strategy
 
 
@@ -129,20 +129,22 @@ def main() -> None:
     dry_run = not args.live
     bridge = _build_bridge(config, live=args.live)
 
-    # Load persistent state
-    state = TradingState.load(state_path)
+    # Acquire exclusive lock to prevent concurrent runs from corrupting state
+    with state_lock(state_path):
+        # Load persistent state
+        state = TradingState.load(state_path)
 
-    run_weather_strategy(
-        client=bridge,
-        config=config,
-        state=state,
-        dry_run=dry_run,
-        positions_only=args.positions,
-        show_config=False,
-        use_safeguards=not args.no_safeguards,
-        use_trends=not args.no_trends,
-        state_path=state_path,
-    )
+        run_weather_strategy(
+            client=bridge,
+            config=config,
+            state=state,
+            dry_run=dry_run,
+            positions_only=args.positions,
+            show_config=False,
+            use_safeguards=not args.no_safeguards,
+            use_trends=not args.no_trends,
+            state_path=state_path,
+        )
 
 
 if __name__ == "__main__":
