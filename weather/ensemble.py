@@ -202,12 +202,11 @@ def fetch_ensemble_spread(
         on failure.
     """
     # --- disk cache check ---------------------------------------------------
-    if cache_dir is not None:
-        cache_dir = Path(cache_dir)
-        cached = _read_cache(cache_dir, lat, lon, target_date, metric, ttl_seconds=cache_ttl)
-        if cached is not None:
-            logger.debug("Ensemble cache hit for %s %s %s %s", lat, lon, target_date, metric)
-            return cached
+    effective_cache_dir = Path(cache_dir) if cache_dir is not None else _CACHE_DIR
+    cached = _read_cache(effective_cache_dir, lat, lon, target_date, metric, ttl_seconds=cache_ttl)
+    if cached is not None:
+        logger.debug("Ensemble cache hit for %s %s %s %s", lat, lon, target_date, metric)
+        return cached
 
     # --- build API URL -------------------------------------------------------
     daily_var = "temperature_2m_max" if metric == "high" else "temperature_2m_min"
@@ -278,11 +277,10 @@ def fetch_ensemble_spread(
     )
 
     # --- write to cache (best-effort) ----------------------------------------
-    if cache_dir is not None:
-        try:
-            _write_cache(cache_dir, lat, lon, target_date, metric, result)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("Ensemble cache write failed: %s", exc)
+    try:
+        _write_cache(effective_cache_dir, lat, lon, target_date, metric, result)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Ensemble cache write failed: %s", exc)
 
     logger.info(
         "Ensemble spread: mean=%.1f stddev=%.2f ecmwf_std=%.2f gfs_std=%.2f n=%d",

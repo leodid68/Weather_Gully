@@ -233,8 +233,8 @@ def compute_adaptive_sigma(
     """
     factors = _load_adaptive_factors()
     underdispersion_factor = factors.get("underdispersion_factor", _UNDERDISPERSION_FACTOR)
-    spread_to_sigma_factor = factors.get("spread_to_sigma", _SPREAD_TO_SIGMA)
-    ema_to_sigma_factor = factors.get("ema_to_sigma", _EMA_TO_SIGMA)
+    spread_to_sigma_factor = factors.get("spread_to_sigma_factor", _SPREAD_TO_SIGMA)
+    ema_to_sigma_factor = factors.get("ema_to_sigma_factor", _EMA_TO_SIGMA)
 
     # Signal 1: ensemble spread (underdispersion-corrected)
     sigma_ensemble = 0.0
@@ -504,12 +504,15 @@ def estimate_bucket_probability_with_obs(
     # Constrain forecast by observed extreme
     effective_temp = constrained_forecast(obs_extreme, forecast_temp, metric)
 
+    # Use intraday sigma (tighter than horizon-based sigma on resolution day)
+    tz_name = station_tz or _tz_from_lon(station_lon)
+    intraday = _intraday_sigma(latest_obs_time, metric, tz_name=tz_name)
+
     if sigma_override is not None:
-        sigma = sigma_override
+        # On resolution day with observations, use the tighter of the two
+        sigma = min(sigma_override, intraday)
     else:
-        # Use intraday sigma (tighter than horizon-based sigma on resolution day)
-        tz_name = station_tz or _tz_from_lon(station_lon)
-        sigma = _intraday_sigma(latest_obs_time, metric, tz_name=tz_name)
+        sigma = intraday
 
         if apply_seasonal:
             try:

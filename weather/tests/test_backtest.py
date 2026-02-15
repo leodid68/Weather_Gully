@@ -147,7 +147,7 @@ class TestRunBacktest(unittest.TestCase):
         import weather.probability as _prob
         self._saved_cache = _prob._calibration_cache
         self._saved_mtime = _prob._calibration_mtime
-        _prob._calibration_cache = None
+        _prob._calibration_cache = {}  # Empty = use hardcoded defaults
         _prob._calibration_mtime = 0.0
 
     def tearDown(self):
