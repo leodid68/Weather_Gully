@@ -7,11 +7,13 @@ from pathlib import Path
 from unittest.mock import patch
 from datetime import datetime, timezone, timedelta
 
+from weather.ensemble import EnsembleResult
 from weather.probability import (
     _get_seasonal_factor,
     _get_stddev,
     _load_calibration,
     _weather_sigma_multiplier,
+    compute_adaptive_sigma,
     estimate_bucket_probability,
     get_horizon_days,
     get_noaa_probability,
@@ -305,6 +307,53 @@ class TestHardcodedSigmaNotStale(unittest.TestCase):
         """November should be the easiest month (lowest factor = less sigma)."""
         from weather.probability import _SEASONAL_FACTORS
         self.assertLess(_SEASONAL_FACTORS[11], 0.80)
+
+
+class TestComputeAdaptiveSigma(unittest.TestCase):
+
+    def _make_ensemble(self, stddev):
+        return EnsembleResult(
+            member_temps=[50.0], ensemble_mean=50.0,
+            ensemble_stddev=stddev, ecmwf_stddev=stddev,
+            gfs_stddev=stddev, n_members=51,
+        )
+
+    def test_ensemble_signal_wins(self):
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        result = compute_adaptive_sigma(self._make_ensemble(5.0), 1.0, 1.0, today, "NYC")
+        self.assertGreaterEqual(result, 6.0)  # 5.0 * 1.3 = 6.5
+
+    def test_model_spread_wins(self):
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        result = compute_adaptive_sigma(self._make_ensemble(0.5), 10.0, 0.5, today, "NYC")
+        self.assertGreaterEqual(result, 5.0)  # 10.0 * 0.7 = 7.0
+
+    def test_ema_signal_wins(self):
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        result = compute_adaptive_sigma(self._make_ensemble(0.5), 0.5, 8.0, today, "NYC")
+        self.assertGreaterEqual(result, 8.0)  # 8.0 * 1.25 = 10.0
+
+    def test_floor_prevents_too_low(self):
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        result = compute_adaptive_sigma(self._make_ensemble(0.1), 0.1, 0.1, today, "NYC")
+        floor = _get_stddev(today, "NYC") * _get_seasonal_factor(datetime.now(timezone.utc).month, "NYC")
+        self.assertGreaterEqual(result, floor)
+
+    def test_none_ensemble_uses_other_signals(self):
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        result = compute_adaptive_sigma(None, 4.0, 3.0, today, "NYC")
+        self.assertGreater(result, 0)
+
+    def test_all_none_returns_floor(self):
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        result = compute_adaptive_sigma(None, 0.0, None, today, "NYC")
+        floor = _get_stddev(today, "NYC") * _get_seasonal_factor(datetime.now(timezone.utc).month, "NYC")
+        self.assertAlmostEqual(result, floor, places=1)
+
+    def test_result_always_positive(self):
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        result = compute_adaptive_sigma(self._make_ensemble(0.0), 0.0, None, today, "")
+        self.assertGreater(result, 0)
 
 
 if __name__ == "__main__":

@@ -7,6 +7,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+from .ensemble import EnsembleResult
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -182,6 +184,86 @@ def _get_seasonal_factor(month: int, location: str = "") -> float:
 
     # 3. Hardcoded fallback
     return _SEASONAL_FACTORS.get(month, 1.0)
+
+
+# ---------------------------------------------------------------------------
+# Adaptive sigma (ensemble + model spread + EMA error)
+# ---------------------------------------------------------------------------
+
+# Adaptive sigma conversion factors (NWP literature defaults)
+_UNDERDISPERSION_FACTOR = 1.3   # Ensemble spread is typically underdispersed
+_SPREAD_TO_SIGMA = 0.7          # |GFS - ECMWF| to sigma conversion
+_EMA_TO_SIGMA = 1.25            # MAE -> sigma for Gaussian (MAE ~ 0.8 sigma)
+
+
+def _load_adaptive_factors() -> dict:
+    """Load calibrated adaptive sigma factors from calibration.json.
+
+    Looks for the ``"adaptive_sigma"`` key in the calibration data.
+    Returns an empty dict if the key is not present or calibration
+    data is unavailable.
+    """
+    cal = _load_calibration()
+    return cal.get("adaptive_sigma", {})
+
+
+def compute_adaptive_sigma(
+    ensemble_result: EnsembleResult | None,
+    model_spread: float,
+    ema_error: float | None,
+    forecast_date: str,
+    location: str = "",
+) -> float:
+    """Compute adaptive sigma from three independent uncertainty signals.
+
+    Takes the maximum of ensemble stddev (underdispersion-corrected),
+    model spread (GFS-vs-ECMWF), EMA of recent forecast errors, and
+    a calibrated floor to avoid overconfidence.
+
+    Args:
+        ensemble_result: Ensemble statistics (may be ``None``).
+        model_spread: Absolute difference between GFS and ECMWF forecasts.
+        ema_error: Exponential moving average of recent forecast errors
+            (``None`` or ``0`` to skip).
+        forecast_date: ISO date string ``"YYYY-MM-DD"``.
+        location: Canonical location key for calibrated lookups.
+
+    Returns:
+        Adaptive sigma (always > 0).
+    """
+    factors = _load_adaptive_factors()
+    underdispersion_factor = factors.get("underdispersion_factor", _UNDERDISPERSION_FACTOR)
+    spread_to_sigma_factor = factors.get("spread_to_sigma", _SPREAD_TO_SIGMA)
+    ema_to_sigma_factor = factors.get("ema_to_sigma", _EMA_TO_SIGMA)
+
+    # Signal 1: ensemble spread (underdispersion-corrected)
+    sigma_ensemble = 0.0
+    if ensemble_result is not None and ensemble_result.n_members >= 2:
+        sigma_ensemble = ensemble_result.ensemble_stddev * underdispersion_factor
+
+    # Signal 2: model spread (|GFS - ECMWF|)
+    sigma_spread = model_spread * spread_to_sigma_factor
+
+    # Signal 3: EMA of recent forecast errors
+    sigma_ema = 0.0
+    if ema_error is not None and ema_error > 0:
+        sigma_ema = ema_error * ema_to_sigma_factor
+
+    # Floor: calibrated horizon sigma * seasonal factor
+    try:
+        month = int(forecast_date.split("-")[1])
+    except (IndexError, ValueError):
+        month = datetime.now(timezone.utc).month
+    sigma_floor = _get_stddev(forecast_date, location) * _get_seasonal_factor(month, location)
+
+    result = max(sigma_ensemble, sigma_spread, sigma_ema, sigma_floor)
+
+    logger.debug(
+        "adaptive_sigma: ensemble=%.2f spread=%.2f ema=%.2f floor=%.2f -> %.2f",
+        sigma_ensemble, sigma_spread, sigma_ema, sigma_floor, result,
+    )
+
+    return result
 
 
 # ---------------------------------------------------------------------------
