@@ -139,5 +139,28 @@ class TestFeedbackState(unittest.TestCase):
         Path(path).unlink()
 
 
+class TestGetAbsErrorEma(unittest.TestCase):
+
+    def test_returns_ema_when_enough_data(self):
+        state = FeedbackState()
+        for i in range(10):
+            state.record("NYC", 1, 50.0, 50.0 + (i % 3))
+        ema = state.get_abs_error_ema("NYC", 1)
+        self.assertIsNotNone(ema)
+        self.assertGreater(ema, 0)
+
+    def test_returns_none_when_no_data(self):
+        state = FeedbackState()
+        ema = state.get_abs_error_ema("NYC", 1)
+        self.assertIsNone(ema)
+
+    def test_returns_none_when_too_few_samples(self):
+        state = FeedbackState()
+        state.record("NYC", 1, 50.0, 52.0)
+        state.record("NYC", 1, 50.0, 48.0)
+        ema = state.get_abs_error_ema("NYC", 1)
+        self.assertIsNone(ema)
+
+
 if __name__ == "__main__":
     unittest.main()

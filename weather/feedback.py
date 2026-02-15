@@ -87,6 +87,18 @@ class FeedbackState:
             return entry.bias_ema
         return None
 
+    def get_abs_error_ema(self, location: str, month: int) -> float | None:
+        """Get the absolute error EMA for a location+season.
+
+        Returns the abs-error EMA if enough samples exist, else None.
+        Useful for adaptive sigma scaling.
+        """
+        key = _season_key(location, month)
+        entry = self.entries.get(key)
+        if entry and entry.has_enough_data:
+            return entry.abs_error_ema
+        return None
+
     def save(self, path: str | None = None) -> None:
         """Persist feedback state to JSON (atomic write)."""
         save_path = Path(path) if path else _FEEDBACK_STATE_PATH
