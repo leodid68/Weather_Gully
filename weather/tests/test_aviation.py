@@ -25,13 +25,17 @@ def _load_fixture(name: str):
 class TestStationMap(unittest.TestCase):
 
     def test_all_polymarket_locations_mapped(self):
-        expected = {"NYC", "Chicago", "Seattle", "Atlanta", "Dallas", "Miami"}
+        expected = {
+            "NYC", "Chicago", "Seattle", "Atlanta", "Dallas", "Miami",
+            "London", "Paris", "Seoul", "Toronto",
+            "BuenosAires", "SaoPaulo", "Ankara", "Wellington",
+        }
         self.assertEqual(set(STATION_MAP.keys()), expected)
 
     def test_station_codes_are_icao(self):
         for loc, code in STATION_MAP.items():
-            self.assertTrue(code.startswith("K"), f"{loc} station {code} should start with K")
             self.assertEqual(len(code), 4, f"{loc} station {code} should be 4 chars")
+            self.assertTrue(code.isalpha(), f"{loc} station {code} should be alphabetic")
 
 
 class TestCelsiusToFahrenheit(unittest.TestCase):

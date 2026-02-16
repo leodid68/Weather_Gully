@@ -23,12 +23,22 @@ _USER_AGENT = "WeatherGully/1.0"
 
 # Map Polymarket location names to ICAO station identifiers
 STATION_MAP: dict[str, str] = {
-    "NYC": "KLGA",       # LaGuardia Airport
-    "Chicago": "KORD",   # O'Hare International
-    "Seattle": "KSEA",   # Seattle-Tacoma International
-    "Atlanta": "KATL",   # Hartsfield-Jackson
-    "Dallas": "KDFW",    # Dallas/Fort Worth International
-    "Miami": "KMIA",     # Miami International
+    # US cities
+    "NYC": "KLGA",           # LaGuardia Airport
+    "Chicago": "KORD",       # O'Hare International
+    "Seattle": "KSEA",       # Seattle-Tacoma International
+    "Atlanta": "KATL",       # Hartsfield-Jackson
+    "Dallas": "KDFW",        # Dallas/Fort Worth International
+    "Miami": "KMIA",         # Miami International
+    # International cities
+    "London": "EGLC",        # London City Airport
+    "Paris": "LFPG",         # Charles de Gaulle
+    "Seoul": "RKSI",         # Incheon International
+    "Toronto": "CYYZ",       # Toronto Pearson
+    "BuenosAires": "SAEZ",   # Ezeiza International
+    "SaoPaulo": "SBGR",      # Guarulhos International
+    "Ankara": "LTAC",        # Esenboğa International
+    "Wellington": "NZWN",    # Wellington International
 }
 
 _RETRYABLE_CODES = {429, 500, 502, 503, 504}
