@@ -181,6 +181,10 @@ class TestAuxiliaryWeatherVariables(unittest.TestCase):
 class TestGetOpenMeteoForecastMulti(unittest.TestCase):
     """Tests for multi-location batch forecast fetching."""
 
+    def setUp(self):
+        import weather.open_meteo as om
+        om._forecast_cache.clear()
+
     def _make_daily(self, dates, gfs_highs, gfs_lows, ecmwf_highs, ecmwf_lows):
         """Helper to build a daily response dict."""
         return {
@@ -291,6 +295,75 @@ class TestGetOpenMeteoForecastMulti(unittest.TestCase):
 
         self.assertEqual(result, {})
         mock_fetch.assert_not_called()
+
+
+class TestForecastCache(unittest.TestCase):
+    """Tests for TTL cache in get_open_meteo_forecast_multi."""
+
+    def setUp(self):
+        import weather.open_meteo as om
+        om._forecast_cache.clear()
+
+    def test_cache_key_deterministic(self):
+        from weather.open_meteo import _cache_key
+        k1 = _cache_key("40.7,-73.8", "America/New_York")
+        k2 = _cache_key("40.7,-73.8", "America/New_York")
+        self.assertEqual(k1, k2)
+
+    def test_cache_key_different_coords(self):
+        from weather.open_meteo import _cache_key
+        k1 = _cache_key("40.7,-73.8", "America/New_York")
+        k2 = _cache_key("41.9,-87.9", "America/Chicago")
+        self.assertNotEqual(k1, k2)
+
+    @patch("weather.open_meteo._fetch_json")
+    def test_cache_hit_skips_fetch(self, mock_fetch):
+        from weather.open_meteo import get_open_meteo_forecast_multi
+        import weather.open_meteo as om
+
+        mock_data = {"daily": {
+            "time": ["2026-02-16"],
+            "temperature_2m_max_gfs_seamless": [50.0],
+            "temperature_2m_min_gfs_seamless": [30.0],
+            "temperature_2m_max_ecmwf_ifs025": [52.0],
+            "temperature_2m_min_ecmwf_ifs025": [28.0],
+        }}
+        mock_fetch.return_value = mock_data
+
+        locs = {"NYC": {"lat": 40.7, "lon": -73.8, "tz": "America/New_York"}}
+        result1 = get_open_meteo_forecast_multi(locs)
+        result2 = get_open_meteo_forecast_multi(locs)
+
+        self.assertEqual(mock_fetch.call_count, 1)
+        self.assertEqual(result1, result2)
+
+    @patch("weather.open_meteo._fetch_json")
+    def test_cache_expires(self, mock_fetch):
+        from weather.open_meteo import get_open_meteo_forecast_multi, _CACHE_TTL
+        import weather.open_meteo as om
+
+        mock_data = {"daily": {
+            "time": ["2026-02-16"],
+            "temperature_2m_max_gfs_seamless": [50.0],
+            "temperature_2m_min_gfs_seamless": [30.0],
+            "temperature_2m_max_ecmwf_ifs025": [52.0],
+            "temperature_2m_min_ecmwf_ifs025": [28.0],
+        }}
+        mock_fetch.return_value = mock_data
+
+        locs = {"NYC": {"lat": 40.7, "lon": -73.8, "tz": "America/New_York"}}
+
+        # First call populates cache
+        get_open_meteo_forecast_multi(locs)
+
+        # Manually expire cache by setting timestamp in the past
+        for k in list(om._forecast_cache.keys()):
+            data, ts = om._forecast_cache[k]
+            om._forecast_cache[k] = (data, ts - _CACHE_TTL - 1)
+
+        # Second call should refetch
+        get_open_meteo_forecast_multi(locs)
+        self.assertEqual(mock_fetch.call_count, 2)
 
 
 if __name__ == "__main__":

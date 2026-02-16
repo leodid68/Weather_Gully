@@ -15,6 +15,15 @@ from ._ssl import SSL_CTX as _SSL_CTX
 
 logger = logging.getLogger(__name__)
 
+_forecast_cache: dict[str, tuple[dict, float]] = {}  # key → (result_data, timestamp)
+_CACHE_TTL = 900  # 15 minutes in seconds
+
+
+def _cache_key(coords: str, tz: str) -> str:
+    """Deterministic cache key from coordinates and timezone."""
+    return f"{coords}|{tz}"
+
+
 OPEN_METEO_BASE = "https://api.open-meteo.com/v1/forecast"
 
 # Model weights for ensemble averaging (ECMWF generally more accurate)
@@ -206,6 +215,17 @@ def get_open_meteo_forecast_multi(
         lats = ",".join(str(loc["lat"]) for _, loc in group)
         lons = ",".join(str(loc["lon"]) for _, loc in group)
 
+        # --- TTL cache check ---
+        cache_k = _cache_key(f"{lats},{lons}", tz)
+        cached = _forecast_cache.get(cache_k)
+        if cached is not None:
+            cached_data, cached_at = cached
+            if time.time() - cached_at < _CACHE_TTL:
+                logger.info("Open-Meteo cache hit for tz=%s (%d locations)",
+                            tz, len(group))
+                result.update(cached_data)
+                continue
+
         url = (
             f"{OPEN_METEO_BASE}"
             f"?latitude={lats}&longitude={lons}"
@@ -232,9 +252,11 @@ def get_open_meteo_forecast_multi(
                 result[name] = {}
             continue
 
+        group_results: dict[str, dict[str, dict]] = {}
+
         for idx, (name, _) in enumerate(group):
             if idx >= len(entries):
-                result[name] = {}
+                group_results[name] = {}
                 continue
             entry_data = entries[idx]
             daily = entry_data.get("daily", {})
@@ -281,7 +303,11 @@ def get_open_meteo_forecast_multi(
                 if entry:
                     forecasts[date_str] = entry
 
-            result[name] = forecasts
+            group_results[name] = forecasts
+
+        # Store in cache and merge into result
+        _forecast_cache[cache_k] = (group_results, time.time())
+        result.update(group_results)
 
     total_days = sum(len(v) for v in result.values())
     logger.info("Open-Meteo: %d locations in %d request(s), %d total forecast-days",
