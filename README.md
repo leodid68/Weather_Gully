@@ -32,9 +32,9 @@ Polymarket lists daily temperature markets for 6 US cities: *"Will the highest t
 
 ## Code Quality
 
-This codebase has been through **3 rounds of comprehensive code audit**, covering all 3 modules (`weather/`, `bot/`, `polymarket/`). ~50 bugs were identified and fixed across the audit rounds.
+This codebase has been through **4 rounds of comprehensive code audit**, covering all 3 modules (`weather/`, `bot/`, `polymarket/`). ~50 bugs were identified and fixed across the audit rounds, including 2 critical probability distribution bugs found in the latest audit.
 
-**Current status:** 0 critical issues, 0 important issues remaining. 449 tests, all green.
+**Current status:** 0 critical issues, 0 important issues remaining. 548 tests, all green.
 
 | Category | Examples of fixes applied |
 |----------|-------------------------|
@@ -43,6 +43,7 @@ This codebase has been through **3 rounds of comprehensive code audit**, coverin
 | **Robustness** | Atomic file writes (tempfile + `os.replace`), file locking (`fcntl.flock`), circuit breaker (5xx only), retry with exponential backoff |
 | **Trading logic** | Kelly/exposure formulas correct for BUY and SELL, stop-loss uses state (not API), seasonal month parsed from forecast date, pending orders verified before removal |
 | **Data pipeline** | Historical actuals chunked for >90 day ranges, Open-Meteo multi-location batching (6 cities in 3 API calls), Bessel's correction on model spread |
+| **Probability math** | Regularized incomplete beta `* a` bug (flattened all Student's t distributions), horizon override for backtest/calibration (was using horizon=0 for all past dates) |
 
 ---
 
@@ -112,13 +113,17 @@ The core intelligence layer. Combines multiple weather data sources into a proba
 | `noaa.py` | NOAA Weather API client (api.weather.gov) — official US forecast |
 | `open_meteo.py` | Open-Meteo client — GFS + ECMWF multi-model forecasts with auxiliary weather variables |
 | `aviation.py` | Aviation Weather API client — METAR real-time observations from airport stations |
-| `probability.py` | Normal CDF bucket probability, calibrated sigma, observation-adjusted estimates, weather-based sigma adjustments |
+| `probability.py` | Student's t-CDF bucket probability, calibrated sigma, Platt scaling, observation-adjusted estimates, weather-based sigma adjustments |
 | `parsing.py` | Event name parser — extracts location, date, metric (high/low) from market titles |
 | `sizing.py` | Kelly criterion sizing with weather-specific position caps |
 | `config.py` | Weather-specific configuration (thresholds, locations, toggles) |
 | `state.py` | Persistent state (predictions, daily observations, trade history, pending orders) |
 | `historical.py` | Open-Meteo historical forecast and ERA5 reanalysis client (for calibration) |
-| `calibrate.py` | Calibration script — computes empirical sigma and model weights from historical data |
+| `previous_runs.py` | Open-Meteo Previous Runs API client — horizon-specific historical forecasts for real RMSE computation |
+| `metar_actuals.py` | Historical METAR ground-truth actuals (airport obs, more accurate than ERA5 reanalysis) |
+| `calibrate.py` | Calibration script — computes empirical sigma, model weights, Platt scaling, adaptive sigma factors from historical data |
+| `recalibrate.py` | Auto-recalibration orchestrator — rolling 90-day window, error cache, guard rails, delta logging |
+| `error_cache.py` | Persistent error cache for incremental recalibration (append-only, prunable) |
 | `backtest.py` | Backtesting engine — simulates strategy on historical data with Brier scoring, supports real price snapshots |
 | `paper_bridge.py` | `PaperBridge` — simulated execution wrapper (real prices, no orders submitted) |
 | `paper_trade.py` | Paper trading CLI — runs the real strategy with simulated execution, records price snapshots |
@@ -258,33 +263,29 @@ ECMWF: 50%  |  GFS: 30%  |  NOAA: 20%  |  METAR: 80% (2 x 0.40 base weight)
 
 ## Probability Model
 
-The probability that the actual temperature falls within a given bucket `[low, high]` is estimated using a **normal distribution** centered on the ensemble forecast temperature:
+The probability that the actual temperature falls within a given bucket `[low, high]` is estimated using a **Student's t-distribution** (df=10) centered on the ensemble forecast temperature, with **Platt scaling** for market calibration:
 
 ```
-P(temp in [low, high]) = phi((high + 0.5 - forecast) / sigma) - phi((low - 0.5 - forecast) / sigma)
+P_raw(temp in [low, high]) = T_df((high + 0.5 - forecast) / sigma) - T_df((low - 0.5 - forecast) / sigma)
+P_calibrated = sigmoid(a * logit(P_raw) + b)     # Platt scaling
 ```
 
-Where `phi` is the standard normal CDF and `sigma` (standard deviation) depends on multiple factors:
+Where `T_df` is the Student's t-CDF (df=10, heavier tails than Gaussian — better fits real forecast error distribution which has kurtosis=4.4), and `sigma` depends on multiple factors:
 
 ### 1. Calibrated Horizon Sigma
 
-Sigma grows with forecast horizon using a **hybrid approach**: an empirically calibrated base sigma multiplied by NWP (Numerical Weather Prediction) growth factors.
+Sigma grows with forecast horizon using **real RMSE** computed from the Open-Meteo Previous Runs API — actual forecast errors measured at each horizon, not a theoretical growth model.
 
-```
-sigma(horizon) = base_sigma x growth_factor(horizon)
-```
+| Horizon (days) | Global sigma | NYC    | Miami  | Seattle |
+|----------------|-------------|--------|--------|---------|
+| 0 (today)      | 2.34°F      | 3.64°F | 1.82°F | 1.81°F  |
+| 1              | 4.00°F      | 6.25°F | 3.07°F | 2.65°F  |
+| 3              | 4.60°F      | 5.92°F | 3.47°F | 2.71°F  |
+| 5              | 5.30°F      | 6.31°F | 4.12°F | 3.12°F  |
+| 7              | 7.54°F      | 8.44°F | 5.12°F | 4.32°F  |
+| 10             | 10.89°F     | 11.63°F| 6.61°F | 6.12°F  |
 
-| Horizon (days) | Growth Factor | Example sigma (base=1.96) |
-|----------------|---------------|---------------------------|
-| 0 (today)      | 1.00          | 1.96°F                    |
-| 1              | 1.33          | 2.61°F                    |
-| 2              | 1.67          | 3.27°F                    |
-| 3              | 2.00          | 3.92°F                    |
-| 5              | 2.67          | 5.23°F                    |
-| 7              | 4.00          | 7.84°F                    |
-| 10             | 6.00          | 11.76°F                   |
-
-The base sigma is empirically computed from ~8,760 forecast-vs-actual comparison samples across 6 locations and a full year of data (2025). Per-location sigmas are available (e.g., NYC: 2.15°F, Seattle: 1.73°F).
+Calibrated from ~2,100 weighted samples (exponential half-life 30 days) across 6 locations with METAR ground-truth actuals. Per-location sigma tables capture climate-specific error profiles (e.g., Miami is much more predictable than NYC/Chicago).
 
 ### 2. Seasonal Adjustment
 
@@ -331,21 +332,61 @@ The system uses a three-level fallback for sigma values:
 
 This ensures the bot works out-of-the-box (hardcoded fallback) while benefiting from calibration data when available.
 
+### 7. Platt Scaling (Market Calibration)
+
+Raw probability estimates are post-processed through **Platt scaling** to align with observed market frequencies:
+
+```
+P_calibrated = sigmoid(a * logit(P_raw) + b)
+```
+
+Current calibrated parameters: `a=0.6205`, `b=0.6942` (fitted from ~2,100 weighted forecast error samples). This corrects systematic biases in the probability model — e.g., if raw probabilities of 30% historically win 35% of the time, Platt scaling adjusts upward.
+
+### 8. Adaptive Sigma (Live Adjustment)
+
+In addition to the static calibration, sigma can be adjusted in real-time using three signals:
+
+| Signal | Factor | Description |
+|--------|--------|-------------|
+| **Ensemble underdispersion** | 1.30 | NWP ensembles systematically underestimate spread |
+| **Model spread** | `spread × 0.648` | When GFS and ECMWF disagree, widen sigma proportionally |
+| **Recent error EMA** | `ema × 1.053` | Exponential moving average of recent absolute errors |
+
+These factors are empirically calibrated from historical data (not literature defaults).
+
 ---
 
 ## Calibration System
 
-The calibration pipeline replaces hardcoded sigma/seasonal tables with values empirically derived from real forecast error data.
+The calibration pipeline replaces hardcoded sigma/seasonal tables with values empirically derived from real forecast error data. Two modes: **full calibration** (from scratch) and **auto-recalibration** (incremental rolling window).
 
 ### How It Works
 
-1. **Fetch historical data** — `weather/historical.py` retrieves archived model forecasts (Open-Meteo) and ERA5 reanalysis actuals for a given date range, using chunked 90-day API requests
-2. **Compute forecast errors** — `weather/calibrate.py` computes `forecast - actual` for each (target_date, model, metric) tuple, deduplicated to avoid counting the same error multiple times
-3. **Derive base sigma** — Standard deviation of all forecast errors = empirical base sigma
-4. **Apply horizon growth model** — `sigma(h) = base_sigma x growth_factor(h)` using NWP-derived growth factors
+1. **Fetch historical data** — `weather/historical.py` retrieves archived model forecasts (Open-Meteo) and ERA5/METAR actuals for a given date range
+2. **Compute forecast errors** — `weather/calibrate.py` computes `forecast - actual` for each (target_date, model, metric) tuple, deduplicated
+3. **Derive base sigma** — Weighted standard deviation of errors (exponential half-life 30 days = more weight on recent data)
+4. **Real RMSE by horizon** — `weather/previous_runs.py` fetches horizon-specific forecasts from the Previous Runs API; RMSE computed per horizon using METAR ground-truth actuals
 5. **Compute per-location and seasonal factors** — Separate sigma and seasonal adjustments for each city
 6. **Compute model weights** — Inverse-RMSE weighting per location (lower RMSE = higher weight)
-7. **Generate `calibration.json`** — Output file consumed by `probability.py` at runtime
+7. **Fit Platt scaling** — Logistic regression on (predicted probability, actual outcome) pairs
+8. **Fit adaptive sigma factors** — `spread_to_sigma_factor` and `ema_to_sigma_factor` from historical model spread and error EMA
+9. **Distribution selection** — Jarque-Bera test determines Normal vs Student's t (currently t with df=10)
+10. **Generate `calibration.json`** — Output file consumed by `probability.py` at runtime
+
+### Auto-Recalibration
+
+The `weather/recalibrate.py` module provides incremental recalibration on a rolling 90-day window:
+
+```bash
+# Run recalibration (fetches new errors, updates calibration.json)
+python3 -m weather.recalibrate --locations NYC,Chicago,Miami,Seattle,Atlanta,Dallas
+```
+
+Features:
+- **Error cache** (`error_cache.py`) — persistent, append-only, with incremental fetching (only fetches new days)
+- **Guard rails** — minimum 50 effective samples required, delta clamping on sigma/Platt params
+- **Delta logging** — each recalibration logs the change vs previous calibration to `recalibration_log/`
+- **Horizon errors** — fetches Previous Runs data + METAR actuals for real RMSE computation
 
 ### Running Calibration
 
@@ -367,35 +408,53 @@ python3 -m weather.calibrate --locations NYC --start-date 2025-06-01 --end-date 
 
 ```json
 {
-  "global_sigma": {"0": 1.96, "1": 2.61, "2": 3.27, ...},
+  "global_sigma": {"0": 2.34, "1": 4.00, "3": 4.60, "5": 5.30, "7": 7.54, "10": 10.89},
   "location_sigma": {
-    "NYC": {"0": 2.15, "1": 2.86, ...},
-    "Miami": {"0": 1.94, "1": 2.58, ...}
+    "NYC": {"0": 3.64, "1": 6.25, "3": 5.92, ...},
+    "Miami": {"0": 1.82, "1": 3.07, "3": 3.47, ...}
   },
-  "seasonal_factors": {"1": 0.88, "6": 1.05, ...},
+  "seasonal_factors": {"1": 0.944, "2": 1.258, "11": 0.907, "12": 0.891},
   "location_seasonal": {
-    "NYC": {"1": 0.85, "7": 1.08, ...}
+    "NYC": {"1": 0.918, "2": 1.498, ...}
   },
   "model_weights": {
-    "NYC": {"noaa": 0.20, "gfs_seamless": 0.25, "ecmwf_ifs025": 0.55}
+    "NYC": {"noaa": 0.20, "gfs_seamless": 0.486, "ecmwf_ifs025": 0.314}
+  },
+  "adaptive_sigma": {
+    "underdispersion_factor": 1.3,
+    "spread_to_sigma_factor": 0.648,
+    "ema_to_sigma_factor": 1.053,
+    "samples": 176
+  },
+  "platt_scaling": {"a": 0.6205, "b": 0.6942},
+  "distribution": "student_t",
+  "student_t_df": 10.0,
+  "normality_test": {
+    "normal": false,
+    "jb_statistic": 2154.21,
+    "skewness": -1.098,
+    "kurtosis": 4.434
   },
   "metadata": {
-    "generated": "2026-01-15T12:00:00+00:00",
-    "samples": 8760,
-    "base_sigma_global": 1.96,
-    "mean_model_spread": 2.3,
-    "horizon_growth_model": "NWP linear: sigma(h) = base * growth(h)"
+    "generated": "2026-02-16T11:23:57+00:00",
+    "samples": 2112,
+    "samples_effective": 852.1,
+    "weighting": "exponential half-life 30.0d",
+    "base_sigma_global": 2.51,
+    "horizon_growth_model": "real RMSE from Previous Runs data"
   }
 }
 ```
 
-### Key Design Decision: Hybrid Approach
+### Key Design Decision: Real RMSE from Previous Runs API
 
-Open-Meteo's free API does **not** store historical model runs — querying for the forecast from 5 days ago returns the same forecast as today. This means we cannot directly measure how error grows with horizon from the API alone.
+Open-Meteo's standard forecast API does **not** store historical model runs. However, the **Previous Runs API** (`previous-runs-api.open-meteo.com`) archives forecasts from past model runs, enabling direct measurement of forecast error at each horizon.
 
-The solution is a **hybrid approach**:
-- **Empirical base sigma** from real forecast-vs-actual comparisons (what the API does provide)
-- **NWP horizon growth model** derived from NOAA/NWS model verification statistics (how error grows with lead time is well-established in meteorological literature)
+The solution uses **real RMSE by horizon**:
+- For each horizon (0, 1, 2, 3, 5, 7 days), fetch the actual forecast that was made at that lead time
+- Compare against **METAR ground-truth observations** (airport stations matching Polymarket's resolution source)
+- Compute weighted RMSE per horizon per location (exponential half-life 30 days)
+- Fallback: if Previous Runs data is unavailable, uses NWP growth model as backup
 
 ---
 
@@ -511,11 +570,31 @@ For each day in the range:
 | **Sharpe ratio** | Risk-adjusted return (sample variance) |
 | **Calibration curve** | Reliability diagram (predicted vs actual frequency per bin) |
 
+### Backtest Results (2024-2025, 6 cities, horizon=3)
+
+```
+Total trades:      9,677
+Brier score:       0.1277
+Accuracy:          19.8%
+Total P&L:         +$268
+ROI:               16.2%
+Max drawdown:      $16.23
+Sharpe ratio:      0.08
+```
+
+**Overfitting validation** (split backtests):
+- 2024 (100% out-of-sample): 16.3% ROI
+- 2025 (partial in-sample): 16.1% ROI
+- Summer 2024 (max out-of-sample): 19.4% ROI
+- Winter 2025 (in-sample): 12.2% ROI
+
+OOS performance equals or exceeds in-sample — no overfitting detected.
+
 ### Interpreting Results
 
-- **Brier score < 0.20**: Excellent calibration — your probability estimates closely match reality
-- **Brier score 0.20-0.25**: Good — profitable if combined with proper sizing
-- **Brier score > 0.25**: Overconfident predictions — consider widening sigma or adjusting thresholds
+- **Brier score < 0.15**: Excellent calibration (current model achieves 0.128)
+- **Brier score 0.15-0.25**: Good — profitable if combined with proper sizing
+- **Brier score > 0.25**: Overconfident predictions — consider widening sigma or re-calibrating
 - **Calibration curve**: Each point should lie close to the diagonal. Points above the diagonal mean you are underconfident (opportunity), below means overconfident (danger)
 
 ---
@@ -875,7 +954,7 @@ Follow these steps **in order** — each one builds on the previous.
 ```bash
 git clone <repo-url> && cd Weather_Gully
 pip install httpx eth-account eth-abi eth-utils websockets certifi
-python3 -m pytest -q  # 449 tests should pass
+python3 -m pytest -q  # 548 tests should pass
 ```
 
 #### Step 2: First dry-run
@@ -1134,8 +1213,12 @@ Could not verify fill for order              # Exchange API timeout — check po
 
 #### Quarterly Maintenance
 
-1. **Re-calibrate:**
+1. **Re-calibrate** (auto-recalibration uses rolling 90-day window):
    ```bash
+   # Incremental recalibration (recommended — fast, uses error cache)
+   python3 -m weather.recalibrate --locations NYC,Chicago,Seattle,Atlanta,Dallas,Miami
+
+   # Full recalibration from scratch (slower — re-fetches all historical data)
    python3 -m weather.calibrate \
      --locations NYC,Chicago,Seattle,Atlanta,Dallas,Miami \
      --start-date <12-months-ago> --end-date <today>
@@ -1255,7 +1338,7 @@ Choose the calibration window based on what you're trading:
 ## Testing
 
 ```bash
-# Run all 449 tests
+# Run all 548 tests
 python3 -m pytest -q
 
 # Weather tests only
@@ -1276,7 +1359,7 @@ python3 -m pytest weather/tests/test_strategy.py -v
 
 | Package | Tests | Key coverage |
 |---------|-------|-------------|
-| `weather/` | ~266 tests | Strategy, bridge, paper bridge, NOAA, Open-Meteo (single + multi-location), aviation/METAR, probability, calibration, backtesting, sizing, state, parsing |
+| `weather/` | ~365 tests | Strategy, bridge, paper bridge, NOAA, Open-Meteo (single + multi-location), aviation/METAR, probability (Student's t, Platt scaling), calibration, recalibration, previous runs, METAR actuals, error cache, backtesting, sizing, state, parsing |
 | `bot/` | ~137 tests | Scanner, signals, scoring, sizing, daemon, Gamma API, strategy, state |
 | `polymarket/` | ~46 tests | Order signing, HMAC auth, client REST, circuit breaker, fill detection |
 
@@ -1328,7 +1411,11 @@ Weather_Gully/
 │   ├── config.py            # Weather config (dataclass, JSON, env vars)
 │   ├── state.py             # Persistent state (predictions, obs, pending orders)
 │   ├── historical.py        # Open-Meteo historical + ERA5 client (calibration)
-│   ├── calibrate.py         # Calibration script (empirical sigma, model weights)
+│   ├── previous_runs.py     # Open-Meteo Previous Runs API (horizon-specific forecasts)
+│   ├── metar_actuals.py     # Historical METAR ground-truth actuals
+│   ├── calibrate.py         # Calibration script (sigma, Platt, adaptive factors, model weights)
+│   ├── recalibrate.py       # Auto-recalibration orchestrator (rolling window, guard rails)
+│   ├── error_cache.py       # Persistent error cache for incremental recalibration
 │   ├── backtest.py          # Backtesting engine (Brier score, drawdown, Sharpe, snapshot pricing)
 │   ├── paper_bridge.py      # PaperBridge — simulated execution wrapper
 │   ├── paper_trade.py       # Paper trading CLI (python -m weather.paper_trade)
@@ -1345,7 +1432,11 @@ Weather_Gully/
 │       ├── test_sizing.py
 │       ├── test_state_extended.py
 │       ├── test_historical.py
+│       ├── test_previous_runs.py
+│       ├── test_metar_actuals.py
 │       ├── test_calibrate.py
+│       ├── test_recalibrate.py
+│       ├── test_error_cache.py
 │       ├── test_backtest.py
 │       └── fixtures/
 │
@@ -1387,8 +1478,13 @@ if precip > 10mm:     sigma *= 1.12
 # Guard against degenerate sigma
 sigma = max(sigma, 0.01)
 
-# Normal CDF probability
-P = phi((high + 0.5 - forecast) / sigma) - phi((low - 0.5 - forecast) / sigma)
+# Student's t-CDF probability (df=10, heavier tails than Gaussian)
+z_lo = (low - 0.5 - forecast) / sigma
+z_hi = (high + 0.5 - forecast) / sigma
+P_raw = student_t_cdf(z_hi, df=10) - student_t_cdf(z_lo, df=10)
+
+# Platt scaling (market calibration)
+P = sigmoid(0.6205 * logit(P_raw) + 0.6942)
 ```
 
 ### 3. Kelly Criterion Sizing
@@ -1415,18 +1511,26 @@ elif metric == "low":
     # "The daily low can't be higher than what we already saw"
 ```
 
-### 5. Hybrid Calibration
+### 5. Real RMSE Calibration
 
 ```python
-# 1. Compute base sigma from real forecast errors
-errors = [forecast - actual for each (target_date, model, metric)]
-base_sigma = stddev(errors)  # e.g., 1.96°F
+# 1. Fetch horizon-specific forecasts from Previous Runs API
+for horizon in [0, 1, 2, 3, 5, 7]:
+    forecasts = fetch_previous_runs(lat, lon, start, end, horizons=[horizon])
+    actuals = get_historical_metar_actuals(station, start, end)
 
-# 2. Expand to all horizons using NWP growth model
-growth = {0: 1.00, 1: 1.33, 2: 1.67, 3: 2.00, ..., 10: 6.00}
-sigma[h] = base_sigma * growth[h]
+# 2. Compute weighted RMSE per horizon (half-life 30 days)
+for horizon, errors in horizon_errors.items():
+    weights = exp(-age / half_life)  # recent errors count more
+    sigma[horizon] = sqrt(weighted_mean(error², weights))
 
-# 3. Per-location and seasonal adjustments are computed similarly
+# 3. Distribution selection via Jarque-Bera test
+if jb_statistic > 5.99:  # p < 0.05
+    distribution = "student_t"
+    df = fit_student_t_df(errors)  # currently df=10
+
+# 4. Platt scaling from probability-outcome pairs
+a, b = logistic_regression(predicted_probs, actual_outcomes)
 ```
 
 ### 6. Dynamic Exit Threshold
