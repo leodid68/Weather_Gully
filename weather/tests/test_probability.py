@@ -362,7 +362,8 @@ class TestComputeAdaptiveSigma(unittest.TestCase):
     def test_floor_prevents_too_low(self):
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         result = compute_adaptive_sigma(self._make_ensemble(0.1), 0.1, 0.1, today, "NYC")
-        floor = _get_stddev(today, "NYC") * _get_seasonal_factor(datetime.now(timezone.utc).month, "NYC")
+        # Floor is now _get_stddev without seasonal factor
+        floor = _get_stddev(today, "NYC")
         self.assertGreaterEqual(result, floor)
 
     def test_none_ensemble_uses_other_signals(self):
@@ -373,7 +374,8 @@ class TestComputeAdaptiveSigma(unittest.TestCase):
     def test_all_none_returns_floor(self):
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         result = compute_adaptive_sigma(None, 0.0, None, today, "NYC")
-        floor = _get_stddev(today, "NYC") * _get_seasonal_factor(datetime.now(timezone.utc).month, "NYC")
+        # Floor is now _get_stddev without seasonal factor
+        floor = _get_stddev(today, "NYC")
         self.assertAlmostEqual(result, floor, places=1)
 
     def test_result_always_positive(self):
@@ -863,6 +865,105 @@ class TestStudentTSmallDF(unittest.TestCase):
         result = _student_t_cdf(1.0, 0.5)
         normal = _normal_cdf(1.0)
         self.assertAlmostEqual(result, normal, places=4)
+
+
+class TestProbabilityCoherence(unittest.TestCase):
+    """Bucket probabilities for exhaustive/exclusive buckets must sum to ~1.0.
+
+    This is the fundamental mathematical invariant: if the buckets partition
+    the temperature axis, the probabilities MUST sum to 1.0 (within rounding).
+    Platt scaling, Student-t, or any post-processing must preserve this.
+    """
+
+    def _sum_buckets(self, forecast, buckets, sigma, date="2026-02-20"):
+        """Sum bucket probabilities with given sigma."""
+        total = 0.0
+        for lo, hi in buckets:
+            p = estimate_bucket_probability(
+                forecast, lo, hi, date,
+                apply_seasonal=False,
+                sigma_override=sigma,
+            )
+            # Also pass through platt_calibrate (as score_buckets does)
+            total += platt_calibrate(p)
+        return total
+
+    def _sum_buckets_raw(self, forecast, buckets, sigma, date="2026-02-20"):
+        """Sum raw bucket probabilities (no Platt)."""
+        total = 0.0
+        for lo, hi in buckets:
+            p = estimate_bucket_probability(
+                forecast, lo, hi, date,
+                apply_seasonal=False,
+                sigma_override=sigma,
+            )
+            total += p
+        return total
+
+    def test_exhaustive_buckets_sum_to_one_raw(self):
+        """Raw CDF probabilities must sum to ~1.0."""
+        buckets = [(-999, 41), (42, 46), (47, 51), (52, 56), (57, 61), (62, 999)]
+        for sigma in [2.0, 3.0, 5.0, 9.36, 15.0]:
+            total = self._sum_buckets_raw(46.3, buckets, sigma)
+            self.assertAlmostEqual(total, 1.0, delta=0.02,
+                                    msg=f"Raw sum should be ~1.0 for sigma={sigma}, got {total}")
+
+    def test_exhaustive_buckets_sum_to_one_with_platt(self):
+        """After Platt calibration, bucket probs must still sum to ~1.0.
+
+        With default Platt (a=1, b=0) this is trivially true.
+        This test catches any regression that re-introduces non-identity Platt.
+        """
+        buckets = [(-999, 41), (42, 46), (47, 51), (52, 56), (57, 61), (62, 999)]
+        for sigma in [2.0, 3.0, 5.0, 9.36]:
+            total = self._sum_buckets(46.3, buckets, sigma)
+            self.assertAlmostEqual(total, 1.0, delta=0.05,
+                                    msg=f"Platt sum should be ~1.0 for sigma={sigma}, got {total}")
+
+    def test_wider_bucket_sets_still_sum_to_one(self):
+        """Test with different bucket configurations."""
+        buckets_5deg = [(-999, 39), (40, 44), (45, 49), (50, 54), (55, 59), (60, 999)]
+        total = self._sum_buckets_raw(50.0, buckets_5deg, 4.0)
+        self.assertAlmostEqual(total, 1.0, delta=0.02)
+
+    def test_narrow_buckets_sum_to_one(self):
+        buckets_2deg = [(-999, 43), (44, 45), (46, 47), (48, 49), (50, 51), (52, 999)]
+        total = self._sum_buckets_raw(48.0, buckets_2deg, 3.0)
+        self.assertAlmostEqual(total, 1.0, delta=0.02)
+
+    def test_tail_bucket_not_overinflated(self):
+        """A bucket 5°F from the forecast with sigma=3 should be < 15% (not 55%)."""
+        # This is the exact NYC anomaly that was flagged
+        prob = estimate_bucket_probability(
+            46.3, -999, 41, "2026-02-20",
+            apply_seasonal=False, sigma_override=3.0,
+        )
+        calibrated = platt_calibrate(prob)
+        self.assertLess(calibrated, 0.15,
+                         f"Tail bucket 5.3°F from forecast with sigma=3.0 should be <15%, got {calibrated:.1%}")
+
+
+class TestPlattLargeBGuard(unittest.TestCase):
+    """Platt scaling with |b| > 0.5 should fall back to identity."""
+
+    @patch("weather.probability._load_platt_params", return_value={"a": 0.62, "b": 0.70})
+    def test_large_positive_b_falls_back(self, _mock):
+        """b=0.70 should trigger the guard and return raw probability."""
+        result = platt_calibrate(0.3)
+        self.assertAlmostEqual(result, 0.3, places=2)
+
+    @patch("weather.probability._load_platt_params", return_value={"a": 0.62, "b": -0.70})
+    def test_large_negative_b_falls_back(self, _mock):
+        """b=-0.70 should also trigger the guard."""
+        result = platt_calibrate(0.3)
+        self.assertAlmostEqual(result, 0.3, places=2)
+
+    @patch("weather.probability._load_platt_params", return_value={"a": 1.2, "b": 0.3})
+    def test_moderate_b_still_applies(self, _mock):
+        """b=0.3 is within acceptable range — should apply transform."""
+        result = platt_calibrate(0.5)
+        # sigmoid(1.2*0 + 0.3) = sigmoid(0.3) ≈ 0.574
+        self.assertNotAlmostEqual(result, 0.5, places=2)
 
 
 if __name__ == "__main__":

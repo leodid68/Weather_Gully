@@ -175,8 +175,9 @@
     "samples": 176
   },
   "platt_scaling": {
-    "a": 0.6205,
-    "b": 0.6942
+    "a": 1.0,
+    "b": 0.0,
+    "_note": "Platt disabled: applying sigmoid transform independently to mutually-exclusive buckets breaks probability coherence (sum >> 1.0). Raw CDF probabilities already form a valid distribution."
   },
   "distribution": "student_t",
   "normality_test": {

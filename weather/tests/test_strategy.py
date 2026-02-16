@@ -91,15 +91,16 @@ class TestScoreBuckets(unittest.TestCase):
         self.assertEqual(evs, sorted(evs, reverse=True))
 
     def test_center_bucket_highest_probability(self):
-        """Bucket containing the forecast should have highest probability."""
+        """Bucket containing the forecast should have highest YES probability."""
         markets_data = _load_fixture("weather_markets.json")
         event_markets = [m for m in markets_data["markets"] if m["event_id"] == "evt-nyc-high-mar15"]
         config = Config(adjacent_buckets=True, seasonal_adjustments=False)
 
         scored = score_buckets(event_markets, 52, "2025-03-15", config)
-        # Find the bucket that contains 52°F (50-54)
-        center = [s for s in scored if s["bucket"] == (50, 54)]
-        others = [s for s in scored if s["bucket"] != (50, 54)]
+        # Filter to YES side only (NO side has complementary probs)
+        yes_scored = [s for s in scored if s["side"] == "yes"]
+        center = [s for s in yes_scored if s["bucket"] == (50, 54)]
+        others = [s for s in yes_scored if s["bucket"] != (50, 54)]
 
         self.assertEqual(len(center), 1)
         if others:
@@ -343,8 +344,11 @@ class TestScoreBucketsSigmaOverride(unittest.TestCase):
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         scored_wide = score_buckets(markets, 52.0, today, config, metric="high", sigma_override=20.0)
         scored_narrow = score_buckets(markets, 52.0, today, config, metric="high", sigma_override=2.0)
-        if scored_wide and scored_narrow:
-            self.assertGreater(scored_narrow[0]["prob"], scored_wide[0]["prob"])
+        # Compare YES side probabilities: narrow sigma → higher center bucket prob
+        yes_wide = [s for s in scored_wide if s["side"] == "yes"]
+        yes_narrow = [s for s in scored_narrow if s["side"] == "yes"]
+        if yes_wide and yes_narrow:
+            self.assertGreater(yes_narrow[0]["prob"], yes_wide[0]["prob"])
 
 
 class TestActiveLocations(unittest.TestCase):

@@ -380,9 +380,15 @@ def _load_platt_params() -> dict:
 
 def platt_calibrate(prob: float) -> float:
     """Apply Platt scaling to a raw probability.
+
     Transforms: calibrated = sigmoid(a * logit(prob) + b)
     Falls back to identity if no calibration params available.
     Output bounded to [0.01, 0.99].
+
+    WARNING: Platt scaling should NOT be applied independently to
+    mutually-exclusive bucket probabilities — it breaks coherence
+    (probabilities stop summing to 1.0).  Currently disabled by
+    default (a=1, b=0 in calibration.json).
     """
     params = _load_platt_params()
     a = params.get("a", 1.0)
@@ -395,6 +401,15 @@ def platt_calibrate(prob: float) -> float:
 
     # Identity shortcut
     if a == 1.0 and b == 0.0:
+        return max(0.01, min(0.99, prob))
+
+    # Guard: b > 0.5 causes severe inflation (sum of buckets >> 1.0)
+    if abs(b) > 0.5:
+        logger.warning(
+            "Platt b=%.3f too large — disabling (bucket probabilities would not sum to 1.0). "
+            "Recalibrate with cross-validation or set b=0.",
+            b,
+        )
         return max(0.01, min(0.99, prob))
 
     # Clamp input to avoid log(0)
@@ -452,12 +467,12 @@ def compute_adaptive_sigma(
     if ema_error is not None and ema_error > 0:
         sigma_ema = ema_error * ema_to_sigma_factor
 
-    # Floor: calibrated horizon sigma * seasonal factor
-    try:
-        month = int(forecast_date.split("-")[1])
-    except (IndexError, ValueError):
-        month = datetime.now(timezone.utc).month
-    sigma_floor = _get_stddev(forecast_date, location) * _get_seasonal_factor(month, location)
+    # Floor: calibrated horizon sigma (WITHOUT seasonal factor — the per-horizon
+    # sigma from calibration already reflects the calibration period conditions;
+    # applying the seasonal factor here would double-count seasonality since
+    # estimate_bucket_probability also applies it when sigma_override is not set,
+    # and the calibration window is already season-specific).
+    sigma_floor = _get_stddev(forecast_date, location)
 
     max_of_signals = max(sigma_ensemble, sigma_spread, sigma_ema, sigma_floor)
 
@@ -467,7 +482,10 @@ def compute_adaptive_sigma(
         if kalman_sigma is not None:
             w = kalman_state.get_blend_weight(location, horizon)
             result = w * kalman_sigma + (1.0 - w) * max_of_signals
-            result = max(result, sigma_floor)  # never below floor
+            # Allow Kalman to pull sigma below the raw floor, but not below
+            # half the floor (prevents Kalman from being completely overridden
+            # by a high floor, while still maintaining a safety bound).
+            result = max(result, sigma_floor * 0.5)
         else:
             result = max_of_signals
     else:
