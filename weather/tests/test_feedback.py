@@ -1,10 +1,17 @@
 """Tests for the feedback loop module."""
 
+import os
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from weather.feedback import FeedbackEntry, FeedbackState, _season_key
+from weather.feedback import (
+    FeedbackEntry,
+    FeedbackState,
+    _HALF_LIFE_DAYS,
+    _season_key,
+)
 
 
 class TestSeasonKey(unittest.TestCase):
@@ -160,6 +167,91 @@ class TestGetAbsErrorEma(unittest.TestCase):
         state.record("NYC", 1, 50.0, 48.0)
         ema = state.get_abs_error_ema("NYC", 1)
         self.assertIsNone(ema)
+
+
+class TestFeedbackDecay(unittest.TestCase):
+
+    def test_recent_entry_minimal_decay(self):
+        """Entry updated just now should have decay_factor close to 1.0."""
+        entry = FeedbackEntry(bias_ema=2.0, abs_error_ema=3.0, sample_count=10,
+                              last_updated=datetime.now(timezone.utc).isoformat())
+        self.assertAlmostEqual(entry.decay_factor(), 1.0, delta=0.01)
+
+    def test_half_life_decay(self):
+        """Entry updated 30 days ago should have decay_factor ~0.5."""
+        old_time = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
+        entry = FeedbackEntry(bias_ema=2.0, abs_error_ema=3.0, sample_count=10,
+                              last_updated=old_time)
+        self.assertAlmostEqual(entry.decay_factor(), 0.5, delta=0.05)
+
+    def test_stale_entry_below_floor(self):
+        """Entry updated 100+ days ago should have decay < floor."""
+        old_time = (datetime.now(timezone.utc) - timedelta(days=120)).isoformat()
+        entry = FeedbackEntry(bias_ema=2.0, abs_error_ema=3.0, sample_count=10,
+                              last_updated=old_time)
+        self.assertLess(entry.decay_factor(), 0.1)
+
+    def test_stale_get_bias_returns_none(self):
+        """FeedbackState.get_bias should return None for very old entries."""
+        state = FeedbackState()
+        old_time = (datetime.now(timezone.utc) - timedelta(days=120)).isoformat()
+        state.entries["NYC|winter"] = FeedbackEntry(
+            bias_ema=2.0, abs_error_ema=3.0, sample_count=10, last_updated=old_time)
+        self.assertIsNone(state.get_bias("NYC", 1))
+
+    def test_recent_get_bias_returns_value(self):
+        """FeedbackState.get_bias should return decayed value for recent entries."""
+        state = FeedbackState()
+        state.entries["NYC|winter"] = FeedbackEntry(
+            bias_ema=2.0, abs_error_ema=3.0, sample_count=10,
+            last_updated=datetime.now(timezone.utc).isoformat())
+        result = state.get_bias("NYC", 1)
+        self.assertIsNotNone(result)
+        self.assertAlmostEqual(result, 2.0, delta=0.1)
+
+    def test_stale_get_abs_error_ema_returns_none(self):
+        """FeedbackState.get_abs_error_ema should return None for very old entries."""
+        state = FeedbackState()
+        old_time = (datetime.now(timezone.utc) - timedelta(days=120)).isoformat()
+        state.entries["NYC|winter"] = FeedbackEntry(
+            bias_ema=2.0, abs_error_ema=3.0, sample_count=10, last_updated=old_time)
+        self.assertIsNone(state.get_abs_error_ema("NYC", 1))
+
+    def test_recent_get_abs_error_ema_returns_value(self):
+        """FeedbackState.get_abs_error_ema should return decayed value for recent entries."""
+        state = FeedbackState()
+        state.entries["NYC|winter"] = FeedbackEntry(
+            bias_ema=2.0, abs_error_ema=3.0, sample_count=10,
+            last_updated=datetime.now(timezone.utc).isoformat())
+        result = state.get_abs_error_ema("NYC", 1)
+        self.assertIsNotNone(result)
+        self.assertAlmostEqual(result, 3.0, delta=0.1)
+
+    def test_empty_last_updated_returns_zero_decay(self):
+        """Entry with no timestamp should have decay_factor 0."""
+        entry = FeedbackEntry(bias_ema=2.0, sample_count=10)
+        self.assertEqual(entry.decay_factor(), 0.0)
+
+    def test_update_sets_last_updated(self):
+        """Calling update should set last_updated."""
+        entry = FeedbackEntry()
+        entry.update(70.0, 68.0)
+        self.assertTrue(len(entry.last_updated) > 0)
+
+    def test_serialization_roundtrip(self):
+        """last_updated field should survive save/load."""
+        state = FeedbackState()
+        state.record("NYC", 1, 70.0, 68.0)
+        with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as f:
+            path = f.name
+        try:
+            state.save(path)
+            loaded = FeedbackState.load(path)
+            entry = loaded.entries.get("NYC|winter")
+            self.assertIsNotNone(entry)
+            self.assertTrue(len(entry.last_updated) > 0)
+        finally:
+            os.unlink(path)
 
 
 if __name__ == "__main__":

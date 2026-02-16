@@ -18,6 +18,9 @@ logger = logging.getLogger(__name__)
 _MIN_SAMPLES = 7       # Minimum resolved trades before applying correction
 _ALPHA = 0.15          # EMA smoothing factor (slow learning)
 
+_HALF_LIFE_DAYS = 30.0   # Exponential decay half-life for feedback entries
+_DECAY_FLOOR = 0.1       # Below this decay factor, treat as no data
+
 _FEEDBACK_STATE_PATH = Path(__file__).parent / "feedback_state.json"
 
 # Season mapping: month → season name
@@ -41,12 +44,16 @@ class FeedbackEntry:
     bias_ema: float = 0.0       # EMA of (forecast - actual) — positive = overpredict
     abs_error_ema: float = 0.0  # EMA of |forecast - actual|
     sample_count: int = 0
+    last_updated: str = ""      # ISO timestamp of last update
 
     def update(self, forecast_temp: float, actual_temp: float) -> None:
         """Incorporate one resolved trade's error into the EMA."""
+        from datetime import datetime, timezone
+
         error = forecast_temp - actual_temp
         abs_error = abs(error)
         self.sample_count += 1
+        self.last_updated = datetime.now(timezone.utc).isoformat()
 
         if self.sample_count == 1:
             self.bias_ema = error
@@ -54,6 +61,22 @@ class FeedbackEntry:
         else:
             self.bias_ema = _ALPHA * error + (1 - _ALPHA) * self.bias_ema
             self.abs_error_ema = _ALPHA * abs_error + (1 - _ALPHA) * self.abs_error_ema
+
+    def decay_factor(self) -> float:
+        """Compute time-based decay factor (0.0 to 1.0).
+
+        Returns 0.0 if ``last_updated`` is missing or unparseable.
+        """
+        if not self.last_updated:
+            return 0.0
+        try:
+            from datetime import datetime, timezone
+
+            last = datetime.fromisoformat(self.last_updated)
+            days = (datetime.now(timezone.utc) - last).total_seconds() / 86400
+            return 0.5 ** (days / _HALF_LIFE_DAYS)
+        except (ValueError, TypeError):
+            return 0.0
 
     @property
     def has_enough_data(self) -> bool:
@@ -78,25 +101,33 @@ class FeedbackState:
     def get_bias(self, location: str, month: int) -> float | None:
         """Get the bias correction for a location+season.
 
-        Returns the bias EMA if enough samples exist, else None.
+        Returns the bias EMA (scaled by time-decay) if enough samples exist
+        and the data is not too stale, else None.
         Positive bias means forecast tends to overpredict → subtract from forecast.
         """
         key = _season_key(location, month)
         entry = self.entries.get(key)
         if entry and entry.has_enough_data:
-            return entry.bias_ema
+            decay = entry.decay_factor()
+            if decay < _DECAY_FLOOR:
+                return None  # Data too old — treat as no data
+            return entry.bias_ema * decay
         return None
 
     def get_abs_error_ema(self, location: str, month: int) -> float | None:
         """Get the absolute error EMA for a location+season.
 
-        Returns the abs-error EMA if enough samples exist, else None.
+        Returns the abs-error EMA (scaled by time-decay) if enough samples
+        exist and the data is not too stale, else None.
         Useful for adaptive sigma scaling.
         """
         key = _season_key(location, month)
         entry = self.entries.get(key)
         if entry and entry.has_enough_data:
-            return entry.abs_error_ema
+            decay = entry.decay_factor()
+            if decay < _DECAY_FLOOR:
+                return None  # Data too old — treat as no data
+            return entry.abs_error_ema * decay
         return None
 
     def save(self, path: str | None = None) -> None:
