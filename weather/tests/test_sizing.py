@@ -128,5 +128,24 @@ class TestComputeExitThreshold(unittest.TestCase):
         self.assertGreater(t, 0.05)
 
 
+def test_budget_deducts_exposure():
+    """Position size is smaller when exposure is high."""
+    size_no_exp = compute_position_size(0.6, 0.3, 50.0, 10.0, current_exposure=0.0)
+    size_with_exp = compute_position_size(0.6, 0.3, 50.0, 10.0, current_exposure=30.0)
+    assert size_with_exp < size_no_exp
+    assert size_with_exp > 0
+
+def test_budget_zero_when_fully_exposed():
+    """Position size is 0 when exposure equals balance."""
+    size = compute_position_size(0.6, 0.3, 50.0, 2.0, current_exposure=50.0)
+    assert size == 0.0
+
+def test_budget_backward_compatible():
+    """Default exposure=0 gives same result as before."""
+    size_default = compute_position_size(0.6, 0.3, 50.0, 2.0)
+    size_explicit = compute_position_size(0.6, 0.3, 50.0, 2.0, current_exposure=0.0)
+    assert size_default == size_explicit
+
+
 if __name__ == "__main__":
     unittest.main()

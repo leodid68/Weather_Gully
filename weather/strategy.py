@@ -618,25 +618,26 @@ def _apply_correlation_discount(
     open_locations: list[str],
     config: Config,
 ) -> float:
-    """Reduce position size when correlated positions are already open."""
+    """Reduce position size based on cumulative correlation with open positions."""
     if not open_locations:
         return base_size
 
-    max_corr = 0.0
+    # Sum of correlations above threshold (cumulative, not max)
+    total_corr = 0.0
     for open_loc in open_locations:
         if open_loc == location:
             continue
         corr = get_correlation(location, open_loc, month)
-        if corr > max_corr:
-            max_corr = corr
+        if corr > config.correlation_threshold:
+            total_corr += corr
 
-    if max_corr < config.correlation_threshold:
+    if total_corr <= 0:
         return base_size
 
-    factor = 1.0 - max_corr * config.correlation_discount
-    adjusted = base_size * max(0.1, factor)
-    logger.info("Correlation discount: %s corr=%.2f → sizing %.2f → %.2f",
-                location, max_corr, base_size, adjusted)
+    factor = max(0.1, 1.0 - total_corr * config.correlation_discount)
+    adjusted = base_size * factor
+    logger.info("Correlation discount: %s total_corr=%.2f → sizing $%.2f → $%.2f",
+                location, total_corr, base_size, adjusted)
     return round(adjusted, 2)
 
 
@@ -1246,6 +1247,22 @@ def run_weather_strategy(
             )
             if explain and position_size != base_position_size:
                 logger.info("  [EXPLAIN] Correlation discount: $%.2f → $%.2f", base_position_size, position_size)
+
+            # Same-location horizon penalty: reduce if holding same city within N days
+            if config.same_location_discount < 1.0:
+                for existing_trade in state.trades.values():
+                    if (existing_trade.location == location
+                        and existing_trade.forecast_date
+                        and existing_trade.shares >= MIN_SHARES_PER_ORDER):
+                        try:
+                            existing_horizon = get_horizon_days(existing_trade.forecast_date)
+                            if abs(days_ahead - existing_horizon) <= config.same_location_horizon_window:
+                                position_size = round(position_size * config.same_location_discount, 2)
+                                logger.info("Same-location penalty: %s horizon %d~%d → $%.2f",
+                                            location, existing_horizon, days_ahead, position_size)
+                                break  # Apply once, not per trade
+                        except (ValueError, TypeError):
+                            continue
 
             # Mean-reversion sizing modifier (always use YES price for consistency)
             if price_tracker and config.mean_reversion and entry.get("bucket"):

@@ -31,6 +31,7 @@ def compute_position_size(
     max_position_usd: float,
     kelly_frac: float = 0.25,
     min_trade: float = 1.0,
+    current_exposure: float = 0.0,
 ) -> float:
     """Compute trade size in USD using Kelly criterion.
 
@@ -54,7 +55,12 @@ def compute_position_size(
     if frac <= 0:
         return 0.0
 
-    size = balance * frac
+    # Budget: deduct current exposure from available balance
+    available = max(0.0, balance - current_exposure)
+    if available <= 0:
+        return 0.0
+
+    size = available * frac
     size = min(size, max_position_usd)
 
     # If Kelly says less than the minimum viable trade, don't trade at all
@@ -62,11 +68,11 @@ def compute_position_size(
         return 0.0
 
     # Don't bet more than we have
-    size = min(size, balance)
+    size = min(size, available)
 
     logger.debug(
-        "Kelly sizing: p=%.3f price=%.3f b=%.2f frac=%.4f → $%.2f",
-        probability, price, b, frac, size,
+        "Kelly sizing: p=%.3f price=%.3f b=%.2f frac=%.4f exposure=$%.2f → $%.2f",
+        probability, price, b, frac, current_exposure, size,
     )
     return round(size, 2)
 
