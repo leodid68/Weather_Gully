@@ -807,7 +807,7 @@ def run_weather_strategy(
                                 "outcome_name": outcome_name,
                                 "prob": prob,
                                 "price": price,
-                                "ev": prob - price,
+                                "ev": prob * (1.0 - config.trading_fees) - price,
                             })
                     break
 

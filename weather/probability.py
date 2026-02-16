@@ -154,7 +154,7 @@ def _regularized_incomplete_beta(x: float, a: float, b: float, max_iter: int = 2
         if abs(delta - 1.0) < 1e-10:
             break
 
-    return front * f * a
+    return front * f
 
 
 def _student_t_cdf(x: float, df: float) -> float:

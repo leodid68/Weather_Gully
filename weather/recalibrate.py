@@ -18,7 +18,8 @@ import tempfile
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from .calibrate import build_weighted_calibration_tables
+from .calibrate import build_weighted_calibration_tables, compute_horizon_errors
+from .config import LOCATIONS
 from .error_cache import (
     _DEFAULT_CACHE_PATH,
     fetch_new_errors,
@@ -27,6 +28,8 @@ from .error_cache import (
     save_error_cache,
 )
 from .guard_rails import clamp_calibration
+from .historical import get_historical_metar_actuals
+from .previous_runs import fetch_previous_runs
 
 logger = logging.getLogger(__name__)
 
@@ -137,6 +140,65 @@ def _save_log(log_entry: dict, log_dir: str) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Horizon error fetching
+# ---------------------------------------------------------------------------
+_HORIZONS = [0, 1, 2, 3, 5, 7]
+
+
+def _fetch_horizon_errors(
+    locations: list[str],
+    start_date: str,
+    end_date: str,
+) -> list[dict]:
+    """Fetch Previous Runs data and compute horizon-dependent errors.
+
+    For each location, fetches horizon-specific forecasts from the Previous
+    Runs API and METAR actuals, then computes errors at each horizon via
+    :func:`weather.calibrate.compute_horizon_errors`.
+
+    Returns:
+        Combined list of error records with ``"horizon"`` field.
+    """
+    all_horizon_errors: list[dict] = []
+
+    for loc in locations:
+        loc_data = LOCATIONS.get(loc)
+        if not loc_data:
+            logger.warning("Unknown location '%s' — skipping horizon errors", loc)
+            continue
+
+        station = loc_data.get("station")
+        if not station:
+            logger.warning("No METAR station for '%s' — skipping horizon errors", loc)
+            continue
+
+        lat, lon = loc_data["lat"], loc_data["lon"]
+        tz_name = loc_data.get("tz", "America/New_York")
+
+        logger.info("Fetching Previous Runs data for %s (%s to %s)...", loc, start_date, end_date)
+        prev_runs = fetch_previous_runs(
+            lat, lon, start_date, end_date,
+            horizons=_HORIZONS, tz_name=tz_name,
+        )
+
+        logger.info("Fetching METAR actuals for %s (station %s)...", loc, station)
+        actuals = get_historical_metar_actuals(
+            station, start_date, end_date, tz_name=tz_name,
+        )
+
+        if not actuals:
+            logger.warning("No METAR actuals for %s — skipping horizon errors", loc)
+            continue
+
+        loc_errors = compute_horizon_errors(prev_runs, actuals, location=loc)
+        all_horizon_errors.extend(loc_errors)
+        logger.info("  %s: %d horizon errors across %d horizons", loc, len(loc_errors), len(_HORIZONS))
+
+    logger.info("Total horizon errors: %d", len(all_horizon_errors))
+    return all_horizon_errors
+
+
+# ---------------------------------------------------------------------------
 # Main pipeline
 # ---------------------------------------------------------------------------
 def run_recalibration(
@@ -203,11 +265,34 @@ def run_recalibration(
         len(windowed), len(all_errors), WINDOW_DAYS,
     )
 
+    # 2b. Fetch horizon-dependent errors from Previous Runs API
+    #     These provide real RMSE by forecast horizon (replaces growth model).
+    if windowed:
+        dates = [e["target_date"] for e in windowed]
+        window_start = min(dates)
+        window_end = max(dates)
+    else:
+        window_start = window_end = None
+
+    horizon_errors: list[dict] | None = None
+    if window_start and window_end:
+        try:
+            horizon_errors = _fetch_horizon_errors(
+                locations, window_start, window_end,
+            )
+            if not horizon_errors:
+                horizon_errors = None
+                logger.warning("No horizon errors fetched — falling back to growth model")
+        except Exception as exc:
+            logger.warning("Failed to fetch horizon errors (%s) — falling back to growth model", exc)
+            horizon_errors = None
+
     # 3. Build weighted calibration tables
     calibration = build_weighted_calibration_tables(
         windowed, locations,
         half_life=HALF_LIFE,
         reference_date=reference_date,
+        horizon_errors=horizon_errors,
     )
 
     samples_total = calibration.get("metadata", {}).get("samples", 0)
@@ -255,7 +340,11 @@ def run_recalibration(
             ),
             "platt_a": calibration.get("platt_scaling", {}).get("a"),
             "platt_b": calibration.get("platt_scaling", {}).get("b"),
+            "distribution": calibration.get("distribution", "normal"),
+            "student_t_df": calibration.get("student_t_df"),
+            "horizon_model": calibration.get("metadata", {}).get("horizon_growth_model"),
         },
+        "horizon_errors_count": len(horizon_errors) if horizon_errors else 0,
         "clamped": clamped_list,
         "delta": delta,
         "fetch_stats": fetch_stats,
