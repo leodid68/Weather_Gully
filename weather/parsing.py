@@ -8,12 +8,22 @@ logger = logging.getLogger(__name__)
 
 # Location aliases → canonical key
 LOCATION_ALIASES = {
+    # US cities
     "nyc": "NYC", "new york": "NYC", "laguardia": "NYC", "la guardia": "NYC",
     "chicago": "Chicago", "o'hare": "Chicago", "ohare": "Chicago",
     "seattle": "Seattle", "sea-tac": "Seattle", "seatac": "Seattle",
     "atlanta": "Atlanta", "hartsfield": "Atlanta",
     "dallas": "Dallas", "dfw": "Dallas",
     "miami": "Miami",
+    # International cities
+    "london": "London", "heathrow": "London", "lhr": "London",
+    "paris": "Paris", "cdg": "Paris",
+    "seoul": "Seoul", "incheon": "Seoul",
+    "toronto": "Toronto", "pearson": "Toronto",
+    "buenos aires": "BuenosAires", "ezeiza": "BuenosAires",
+    "sao paulo": "SaoPaulo", "são paulo": "SaoPaulo",
+    "ankara": "Ankara", "esenboga": "Ankara",
+    "wellington": "Wellington",
 }
 
 MONTH_MAP = {

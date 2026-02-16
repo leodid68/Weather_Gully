@@ -82,6 +82,88 @@ class TestParseWeatherEvent(unittest.TestCase):
         result = parse_weather_event("Highest temp in NYC on February 30?")
         self.assertIsNone(result)
 
+    # --- International cities ---
+
+    def test_london(self):
+        result = parse_weather_event("Highest temperature in London on March 15?")
+        self.assertIsNotNone(result)
+        self.assertEqual(result["location"], "London")
+
+    def test_heathrow_alias(self):
+        result = parse_weather_event("High temp at Heathrow on March 15?")
+        self.assertIsNotNone(result)
+        self.assertEqual(result["location"], "London")
+
+    def test_lhr_alias(self):
+        result = parse_weather_event("High temp at LHR on March 15?")
+        self.assertIsNotNone(result)
+        self.assertEqual(result["location"], "London")
+
+    def test_paris(self):
+        result = parse_weather_event("Highest temperature in Paris on Apr 10?")
+        self.assertIsNotNone(result)
+        self.assertEqual(result["location"], "Paris")
+
+    def test_cdg_alias(self):
+        result = parse_weather_event("High temp at CDG on Apr 10?")
+        self.assertIsNotNone(result)
+        self.assertEqual(result["location"], "Paris")
+
+    def test_seoul(self):
+        result = parse_weather_event("Highest temperature in Seoul on May 20?")
+        self.assertIsNotNone(result)
+        self.assertEqual(result["location"], "Seoul")
+
+    def test_incheon_alias(self):
+        result = parse_weather_event("High temp at Incheon on May 20?")
+        self.assertIsNotNone(result)
+        self.assertEqual(result["location"], "Seoul")
+
+    def test_toronto(self):
+        result = parse_weather_event("Highest temperature in Toronto on Jun 1?")
+        self.assertIsNotNone(result)
+        self.assertEqual(result["location"], "Toronto")
+
+    def test_pearson_alias(self):
+        result = parse_weather_event("High temp at Pearson on Jun 1?")
+        self.assertIsNotNone(result)
+        self.assertEqual(result["location"], "Toronto")
+
+    def test_buenos_aires(self):
+        result = parse_weather_event("High temp in Buenos Aires on Jul 4?")
+        self.assertIsNotNone(result)
+        self.assertEqual(result["location"], "BuenosAires")
+
+    def test_ezeiza_alias(self):
+        result = parse_weather_event("High temp at Ezeiza on Jul 4?")
+        self.assertIsNotNone(result)
+        self.assertEqual(result["location"], "BuenosAires")
+
+    def test_sao_paulo(self):
+        result = parse_weather_event("High temp in Sao Paulo on Aug 10?")
+        self.assertIsNotNone(result)
+        self.assertEqual(result["location"], "SaoPaulo")
+
+    def test_sao_paulo_accented(self):
+        result = parse_weather_event("High temp in São Paulo on Aug 10?")
+        self.assertIsNotNone(result)
+        self.assertEqual(result["location"], "SaoPaulo")
+
+    def test_ankara(self):
+        result = parse_weather_event("Highest temperature in Ankara on Sep 5?")
+        self.assertIsNotNone(result)
+        self.assertEqual(result["location"], "Ankara")
+
+    def test_esenboga_alias(self):
+        result = parse_weather_event("High temp at Esenboga on Sep 5?")
+        self.assertIsNotNone(result)
+        self.assertEqual(result["location"], "Ankara")
+
+    def test_wellington(self):
+        result = parse_weather_event("Highest temperature in Wellington on Oct 15?")
+        self.assertIsNotNone(result)
+        self.assertEqual(result["location"], "Wellington")
+
 
 class TestParseTemperatureBucket(unittest.TestCase):
     """Covers open/closed buckets, various formats, edge cases."""

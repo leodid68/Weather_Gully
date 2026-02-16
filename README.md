@@ -32,9 +32,9 @@ Polymarket lists daily temperature markets for 14 cities worldwide (6 US + 8 int
 
 ## Code Quality
 
-This codebase has been through **4 rounds of comprehensive code audit**, covering all 3 modules (`weather/`, `bot/`, `polymarket/`). ~50 bugs were identified and fixed across the audit rounds, including 2 critical probability distribution bugs found in the latest audit.
+This codebase has been through **5 rounds of comprehensive code audit**, covering all 3 modules (`weather/`, `bot/`, `polymarket/`). ~55 bugs were identified and fixed across the audit rounds, including 2 critical probability distribution bugs, a Platt scaling coherence violation, sigma floor double-counting, and Kalman floor domination.
 
-**Current status:** 0 critical issues, 0 important issues remaining. 801 tests, all green.
+**Current status:** 0 critical issues, 0 important issues remaining. 846 tests, all green.
 
 | Category | Examples of fixes applied |
 |----------|-------------------------|
@@ -43,7 +43,7 @@ This codebase has been through **4 rounds of comprehensive code audit**, coverin
 | **Robustness** | Atomic file writes (tempfile + `os.replace`), file locking (`fcntl.flock`), circuit breaker (5xx only), retry with exponential backoff |
 | **Trading logic** | Kelly/exposure formulas correct for BUY and SELL, stop-loss uses state (not API), seasonal month parsed from forecast date, pending orders verified before removal |
 | **Data pipeline** | Historical actuals chunked for >90 day ranges, Open-Meteo multi-location batching (14 cities grouped by timezone + local model), Bessel's correction on model spread |
-| **Probability math** | Regularized incomplete beta `* a` bug (flattened all Student's t distributions), horizon override for backtest/calibration (was using horizon=0 for all past dates) |
+| **Probability math** | Regularized incomplete beta `* a` bug (flattened all Student's t distributions), horizon override for backtest/calibration (was using horizon=0 for all past dates), Platt scaling disabled (sigmoid on mutually-exclusive buckets breaks sum-to-1), IQR outlier filtering in calibration pipeline |
 
 ---
 
@@ -273,11 +273,10 @@ ECMWF: 50%  |  GFS: 30%  |  NOAA/Local: 20%  |  METAR: 80% (2 x 0.40 base weight
 
 ## Probability Model
 
-The probability that the actual temperature falls within a given bucket `[low, high]` is estimated using a **Student's t-distribution** (df=10) centered on the ensemble forecast temperature, with **Platt scaling** for market calibration:
+The probability that the actual temperature falls within a given bucket `[low, high]` is estimated using a **Student's t-distribution** (df=10) centered on the ensemble forecast temperature:
 
 ```
-P_raw(temp in [low, high]) = T_df((high + 0.5 - forecast) / sigma) - T_df((low - 0.5 - forecast) / sigma)
-P_calibrated = sigmoid(a * logit(P_raw) + b)     # Platt scaling
+P(temp in [low, high]) = T_df((high + 0.5 - forecast) / sigma) - T_df((low - 0.5 - forecast) / sigma)
 ```
 
 Where `T_df` is the Student's t-CDF (df=10, heavier tails than Gaussian — better fits real forecast error distribution which has kurtosis=4.4), and `sigma` depends on multiple factors:
@@ -288,14 +287,14 @@ Sigma grows with forecast horizon using **real RMSE** computed from the Open-Met
 
 | Horizon (days) | Global sigma | NYC    | Miami  | Seattle |
 |----------------|-------------|--------|--------|---------|
-| 0 (today)      | 2.34°F      | 3.64°F | 1.82°F | 1.81°F  |
-| 1              | 4.00°F      | 6.25°F | 3.07°F | 2.65°F  |
-| 3              | 4.60°F      | 5.92°F | 3.47°F | 2.71°F  |
-| 5              | 5.30°F      | 6.31°F | 4.12°F | 3.12°F  |
-| 7              | 7.54°F      | 8.44°F | 5.12°F | 4.32°F  |
-| 10             | 10.89°F     | 11.63°F| 6.61°F | 6.12°F  |
+| 0 (today)      | 1.64°F      | 2.38°F | 1.50°F | 1.04°F  |
+| 1              | 2.18°F      | 3.16°F | 2.00°F | 1.38°F  |
+| 3              | 3.22°F      | 4.67°F | 2.94°F | 2.04°F  |
+| 5              | 3.75°F      | 5.44°F | 3.43°F | 2.38°F  |
+| 7              | 5.21°F      | 7.55°F | 4.76°F | 3.30°F  |
+| 10             | 7.14°F      | 10.36°F| 6.53°F | 4.53°F  |
 
-Calibrated from ~2,100 weighted samples (exponential half-life 30 days) across 14 locations with METAR ground-truth actuals. Per-location sigma tables capture climate-specific error profiles (e.g., Miami is much more predictable than NYC/Chicago).
+Calibrated from ~2,100 weighted samples (exponential half-life 30 days) across 14 locations with METAR ground-truth actuals and IQR outlier filtering. Per-location sigma tables capture climate-specific error profiles (e.g., Miami is much more predictable than NYC/Chicago).
 
 ### 2. Seasonal Adjustment
 
@@ -342,15 +341,9 @@ The system uses a three-level fallback for sigma values:
 
 This ensures the bot works out-of-the-box (hardcoded fallback) while benefiting from calibration data when available.
 
-### 7. Platt Scaling (Market Calibration)
+### 7. Platt Scaling (Disabled)
 
-Raw probability estimates are post-processed through **Platt scaling** to align with observed market frequencies:
-
-```
-P_calibrated = sigmoid(a * logit(P_raw) + b)
-```
-
-Current calibrated parameters: `a=0.6205`, `b=0.6942` (fitted from ~2,100 weighted forecast error samples). This corrects systematic biases in the probability model — e.g., if raw probabilities of 30% historically win 35% of the time, Platt scaling adjusts upward.
+Platt scaling (`P = sigmoid(a * logit(P_raw) + b)`) is **disabled** (identity: `a=1.0, b=0.0`). Applying a sigmoid transform independently to mutually-exclusive bucket probabilities breaks the sum-to-1 invariant — e.g., if 7 buckets each get scaled up, they no longer sum to 1.0. The calibration pipeline still generates Platt params as identity for compatibility.
 
 ### 8. Adaptive Sigma (Live Adjustment)
 
@@ -409,10 +402,11 @@ The calibration pipeline replaces hardcoded sigma/seasonal tables with values em
 4. **Real RMSE by horizon** — `weather/previous_runs.py` fetches horizon-specific forecasts from the Previous Runs API; RMSE computed per horizon using METAR ground-truth actuals
 5. **Compute per-location and seasonal factors** — Separate sigma and seasonal adjustments for each city
 6. **Compute model weights** — Inverse-RMSE weighting per location (lower RMSE = higher weight)
-7. **Fit Platt scaling** — Logistic regression on (predicted probability, actual outcome) pairs
-8. **Fit adaptive sigma factors** — `spread_to_sigma_factor` and `ema_to_sigma_factor` from historical model spread and error EMA
-9. **Distribution selection** — Jarque-Bera test determines Normal vs Student's t (currently t with df=10)
-10. **Generate `calibration.json`** — Output file consumed by `probability.py` at runtime
+7. **Platt scaling** — Forced to identity (`a=1.0, b=0.0`); sigmoid on mutually-exclusive buckets breaks probability coherence
+8. **IQR outlier filtering** — Forecast errors beyond 1.5×IQR are excluded before sigma computation
+9. **Fit adaptive sigma factors** — `spread_to_sigma_factor` and `ema_to_sigma_factor` from historical model spread and error EMA
+10. **Distribution selection** — Jarque-Bera test determines Normal vs Student's t (currently t with df=10)
+11. **Generate `calibration.json`** — Output file consumed by `probability.py` at runtime
 
 ### Auto-Recalibration
 
@@ -449,10 +443,10 @@ python3 -m weather.calibrate --locations NYC --start-date 2025-06-01 --end-date 
 
 ```json
 {
-  "global_sigma": {"0": 2.34, "1": 4.00, "3": 4.60, "5": 5.30, "7": 7.54, "10": 10.89},
+  "global_sigma": {"0": 1.64, "1": 2.18, "3": 3.22, "5": 3.75, "7": 5.21, "10": 7.14},
   "location_sigma": {
-    "NYC": {"0": 3.64, "1": 6.25, "3": 5.92, ...},
-    "Miami": {"0": 1.82, "1": 3.07, "3": 3.47, ...}
+    "NYC": {"0": 2.38, "1": 3.16, "3": 4.67, ...},
+    "Miami": {"0": 1.50, "1": 2.00, "3": 2.94, ...}
   },
   "seasonal_factors": {"1": 0.944, "2": 1.258, "11": 0.907, "12": 0.891},
   "location_seasonal": {
@@ -467,7 +461,7 @@ python3 -m weather.calibrate --locations NYC --start-date 2025-06-01 --end-date 
     "ema_to_sigma_factor": 1.053,
     "samples": 176
   },
-  "platt_scaling": {"a": 0.6205, "b": 0.6942},
+  "platt_scaling": {"a": 1.0, "b": 0.0, "_note": "identity — Platt disabled"},
   "distribution": "student_t",
   "student_t_df": 10.0,
   "normality_test": {
@@ -481,7 +475,7 @@ python3 -m weather.calibrate --locations NYC --start-date 2025-06-01 --end-date 
     "samples": 2112,
     "samples_effective": 852.1,
     "weighting": "exponential half-life 30.0d",
-    "base_sigma_global": 2.51,
+    "base_sigma_global": 1.64,
     "horizon_growth_model": "real RMSE from Previous Runs data"
   }
 }
@@ -1021,7 +1015,7 @@ Follow these steps **in order** — each one builds on the previous.
 ```bash
 git clone <repo-url> && cd Weather_Gully
 pip install httpx eth-account eth-abi eth-utils websockets certifi
-python3 -m pytest -q  # 801 tests should pass
+python3 -m pytest -q  # 846 tests should pass
 ```
 
 #### Step 2: First dry-run
@@ -1213,12 +1207,12 @@ python3 -m weather --live \
 
 | City | Calibrated Sigma | Best Season | Liquidity | Notes |
 |------|-----------------|-------------|-----------|-------|
-| **NYC** | 2.15°F | Summer | Highest | Best starting location. Coastal — higher winter uncertainty (nor'easters). Tightest spreads on Polymarket. |
-| **Chicago** | 1.83°F | Fall | Good | Continental climate — large swings in spring/fall. Good calibration data. |
-| **Miami** | 1.94°F | Year-round | Moderate | Subtropical — smallest daily variation, most stable forecasts. Tight markets but smaller edges. |
-| **Seattle** | 1.73°F | Summer | Moderate | Marine — narrow range but cloud cover creates forecast challenges. Lowest sigma = tightest probability estimates. |
-| **Atlanta** | 1.89°F | Fall | Good | Moderate difficulty. Severe weather days (thunderstorms) can create large errors. |
-| **Dallas** | 1.99°F | Summer | Good | Hot summers are very predictable. Winter cold fronts add uncertainty. |
+| **NYC** | 2.38°F | Summer | Highest | Best starting location. Coastal — higher winter uncertainty (nor'easters). Tightest spreads on Polymarket. |
+| **Chicago** | 1.56°F | Fall | Good | Continental climate — large swings in spring/fall. Good calibration data. |
+| **Miami** | 1.50°F | Year-round | Moderate | Subtropical — smallest daily variation, most stable forecasts. Tight markets but smaller edges. |
+| **Seattle** | 1.04°F | Summer | Moderate | Marine — narrow range but cloud cover creates forecast challenges. Lowest sigma = tightest probability estimates. |
+| **Atlanta** | 1.53°F | Fall | Good | Moderate difficulty. Severe weather days (thunderstorms) can create large errors. |
+| **Dallas** | 1.57°F | Summer | Good | Hot summers are very predictable. Winter cold fronts add uncertainty. |
 
 #### International Cities
 
@@ -1442,7 +1436,7 @@ python3 -m pytest weather/tests/test_strategy.py -v
 
 | Package | Tests | Key coverage |
 |---------|-------|-------------|
-| `weather/` | ~463 tests | Strategy, bridge, paper bridge, NOAA, Open-Meteo (single + multi-location + local NWP models), aviation/METAR, probability (Student's t, Platt scaling, horizon override), calibration, recalibration, previous runs, METAR actuals, error cache, trade log, backtesting, sizing, state, parsing, AR(1) autocorrelation, Kalman filter sigma, mean-reversion timing, explain mode, location validation (station/coordinate/unit alignment with Polymarket) |
+| `weather/` | ~663 tests | Strategy, bridge, paper bridge, NOAA, Open-Meteo (single + multi-location + local NWP models), aviation/METAR, probability (Student's t, horizon override), calibration (IQR filtering, Platt identity, guard rails), recalibration, previous runs, METAR actuals, error cache, trade log, backtesting, sizing, state, parsing (US + international aliases), AR(1) autocorrelation, Kalman filter sigma, mean-reversion timing, explain mode, location validation (station/coordinate/unit alignment with Polymarket) |
 | `bot/` | ~137 tests | Scanner, signals, scoring, sizing, daemon, Gamma API, strategy, state |
 | `polymarket/` | ~46 tests | Order signing, HMAC auth, client REST, circuit breaker, fill detection |
 
@@ -1574,10 +1568,10 @@ sigma = max(sigma, 0.01)
 # Student's t-CDF probability (df=10, heavier tails than Gaussian)
 z_lo = (low - 0.5 - forecast) / sigma
 z_hi = (high + 0.5 - forecast) / sigma
-P_raw = student_t_cdf(z_hi, df=10) - student_t_cdf(z_lo, df=10)
+P = student_t_cdf(z_hi, df=10) - student_t_cdf(z_lo, df=10)
 
-# Platt scaling (market calibration)
-P = sigmoid(0.6205 * logit(P_raw) + 0.6942)
+# Note: Platt scaling is disabled (identity a=1.0, b=0.0)
+# Sigmoid on mutually-exclusive buckets breaks probability coherence
 ```
 
 ### 3. Kelly Criterion Sizing
@@ -1622,8 +1616,8 @@ if jb_statistic > 5.99:  # p < 0.05
     distribution = "student_t"
     df = fit_student_t_df(errors)  # currently df=10
 
-# 4. Platt scaling from probability-outcome pairs
-a, b = logistic_regression(predicted_probs, actual_outcomes)
+# 4. Platt scaling disabled (identity: a=1.0, b=0.0)
+# Sigmoid on mutually-exclusive buckets breaks sum-to-1
 ```
 
 ### 6. AR(1) Forecast Error Autocorrelation
