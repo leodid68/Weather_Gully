@@ -143,17 +143,14 @@ class TestSharpeRatio(unittest.TestCase):
 class TestRunBacktest(unittest.TestCase):
 
     def setUp(self):
-        """Reset calibration cache to avoid pollution from other test modules."""
-        import weather.probability as _prob
-        self._saved_cache = _prob._calibration_cache
-        self._saved_mtime = _prob._calibration_mtime
-        _prob._calibration_cache = {}  # Empty = use hardcoded defaults
-        _prob._calibration_mtime = 0.0
+        """Patch _load_calibration to return empty dict (hardcoded defaults)."""
+        self._cal_patcher = patch(
+            "weather.probability._load_calibration", return_value={}
+        )
+        self._cal_patcher.start()
 
     def tearDown(self):
-        import weather.probability as _prob
-        _prob._calibration_cache = self._saved_cache
-        _prob._calibration_mtime = self._saved_mtime
+        self._cal_patcher.stop()
 
     @patch("weather.backtest.get_historical_actuals")
     @patch("weather.backtest.get_historical_forecasts")
