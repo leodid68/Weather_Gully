@@ -193,13 +193,6 @@ class CLOBWeatherBridge:
             "discipline": {},
         }
 
-    def get_price_history(self, market_id: str) -> list:
-        """Price history is not available on CLOB — return empty list.
-
-        The existing strategy code handles empty history gracefully.
-        """
-        return []
-
     # ------------------------------------------------------------------
     # Fill verification
     # ------------------------------------------------------------------

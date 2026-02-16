@@ -156,7 +156,6 @@ def _run_weather_pipeline(
             state=weather_state,
             dry_run=dry_run,
             use_safeguards=True,
-            use_trends=True,
             state_path=weather_state_path,
         )
 

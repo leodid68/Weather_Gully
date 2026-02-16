@@ -141,16 +141,6 @@ class TestGetMarketContext(unittest.TestCase):
         self.assertIsNone(bridge.get_market_context("unknown"))
 
 
-class TestGetPriceHistory(unittest.TestCase):
-
-    def test_returns_empty_list(self):
-        bridge = CLOBWeatherBridge(
-            clob_client=MagicMock(),
-            gamma_client=MagicMock(),
-        )
-        self.assertEqual(bridge.get_price_history("any-id"), [])
-
-
 class TestExecuteTrade(unittest.TestCase):
 
     def test_buy_yes(self):

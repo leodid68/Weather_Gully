@@ -75,7 +75,6 @@ def main() -> None:
     parser.add_argument("--verbose", action="store_true", help="Enable DEBUG logging")
     parser.add_argument("--json-log", action="store_true", help="Output structured JSON logs")
     parser.add_argument("--no-safeguards", action="store_true", help="Disable context safeguards")
-    parser.add_argument("--no-trends", action="store_true", help="Disable price trend detection")
     parser.add_argument("--no-aviation", action="store_true", help="Disable METAR aviation observations")
 
     args = parser.parse_args()
@@ -143,7 +142,6 @@ def main() -> None:
             positions_only=args.positions,
             show_config=False,
             use_safeguards=not args.no_safeguards,
-            use_trends=not args.no_trends,
             state_path=state_path,
         )
 

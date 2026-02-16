@@ -8,6 +8,7 @@ from unittest.mock import patch
 from weather.aviation import (
     STATION_MAP,
     _celsius_to_fahrenheit,
+    _utc_to_local_date,
     compute_daily_extremes,
     get_aviation_daily_data,
     get_metar_observations,
@@ -248,6 +249,124 @@ class TestGetAviationDailyData(unittest.TestCase):
         self.assertAlmostEqual(chi_mar15["obs_high"], 41.0, places=1)
         self.assertAlmostEqual(chi_mar15["obs_low"], 28.4, places=1)
         self.assertEqual(chi_mar15["obs_count"], 2)
+
+
+class TestUtcToLocalDate(unittest.TestCase):
+    """Test the _utc_to_local_date helper used for timezone conversion."""
+
+    def test_nyc_early_morning_utc_is_previous_local_day(self):
+        """2025-01-16T03:00:00Z in NYC (UTC-5) is still Jan 15 local."""
+        result = _utc_to_local_date("2025-01-16T03:00:00Z", "America/New_York")
+        self.assertEqual(result, "2025-01-15")
+
+    def test_nyc_late_utc_is_same_local_day(self):
+        """2025-01-16T18:00:00Z in NYC (UTC-5) is Jan 16 local."""
+        result = _utc_to_local_date("2025-01-16T18:00:00Z", "America/New_York")
+        self.assertEqual(result, "2025-01-16")
+
+    def test_chicago_utc_offset(self):
+        """2025-03-15T04:00:00Z in Chicago (UTC-5 in March DST) is Mar 14 local."""
+        # March 15 is after DST spring-forward (CDT = UTC-5)
+        result = _utc_to_local_date("2025-03-15T04:00:00Z", "America/Chicago")
+        self.assertEqual(result, "2025-03-14")
+
+    def test_seattle_utc_offset(self):
+        """2025-06-15T06:00:00Z in Seattle (UTC-7 PDT) is Jun 14 local."""
+        result = _utc_to_local_date("2025-06-15T06:00:00Z", "America/Los_Angeles")
+        self.assertEqual(result, "2025-06-14")
+
+    def test_miami_same_day(self):
+        """2025-01-16T12:00:00Z in Miami (UTC-5) is Jan 16 local."""
+        result = _utc_to_local_date("2025-01-16T12:00:00Z", "America/New_York")
+        self.assertEqual(result, "2025-01-16")
+
+
+class TestComputeDailyExtremesWithTimezone(unittest.TestCase):
+    """Test that compute_daily_extremes correctly assigns UTC obs to local dates."""
+
+    def test_utc_early_morning_obs_assigned_to_previous_local_day(self):
+        """An observation at 03:00 UTC should be on the previous local day in NYC."""
+        observations = [
+            {"time": "2025-01-16T03:00:00Z", "temp_f": 28.0},  # Jan 15 local in NYC
+            {"time": "2025-01-16T12:00:00Z", "temp_f": 35.0},  # Jan 16 local in NYC
+            {"time": "2025-01-16T18:00:00Z", "temp_f": 40.0},  # Jan 16 local in NYC
+        ]
+        # Asking for Jan 15 local: should only include the 03:00Z obs
+        result = compute_daily_extremes(observations, "2025-01-15", tz_name="America/New_York")
+        self.assertIsNotNone(result)
+        self.assertEqual(result["obs_count"], 1)
+        self.assertAlmostEqual(result["high"], 28.0)
+
+        # Asking for Jan 16 local: should include the 12:00Z and 18:00Z obs
+        result_16 = compute_daily_extremes(observations, "2025-01-16", tz_name="America/New_York")
+        self.assertIsNotNone(result_16)
+        self.assertEqual(result_16["obs_count"], 2)
+        self.assertAlmostEqual(result_16["high"], 40.0)
+        self.assertAlmostEqual(result_16["low"], 35.0)
+
+    def test_without_tz_name_uses_utc_date(self):
+        """Without tz_name, falls back to UTC date prefix (legacy behaviour)."""
+        observations = [
+            {"time": "2025-01-16T03:00:00Z", "temp_f": 28.0},
+        ]
+        # UTC date is Jan 16, so asking for Jan 16 should match
+        result = compute_daily_extremes(observations, "2025-01-16")
+        self.assertIsNotNone(result)
+        self.assertEqual(result["obs_count"], 1)
+
+        # And Jan 15 should not match (UTC date is Jan 16)
+        result_15 = compute_daily_extremes(observations, "2025-01-15")
+        self.assertIsNone(result_15)
+
+    def test_chicago_timezone_grouping(self):
+        """Chicago CDT (UTC-5 in summer): 04:30Z should be previous local day."""
+        observations = [
+            {"time": "2025-06-15T04:30:00Z", "temp_f": 65.0},  # Jun 14 local (CDT)
+            {"time": "2025-06-15T15:00:00Z", "temp_f": 82.0},  # Jun 15 local
+        ]
+        result_14 = compute_daily_extremes(observations, "2025-06-14", tz_name="America/Chicago")
+        self.assertIsNotNone(result_14)
+        self.assertEqual(result_14["obs_count"], 1)
+        self.assertAlmostEqual(result_14["high"], 65.0)
+
+        result_15 = compute_daily_extremes(observations, "2025-06-15", tz_name="America/Chicago")
+        self.assertIsNotNone(result_15)
+        self.assertEqual(result_15["obs_count"], 1)
+        self.assertAlmostEqual(result_15["high"], 82.0)
+
+
+class TestGetAviationDailyDataWithTimezone(unittest.TestCase):
+    """Test that get_aviation_daily_data uses local timezone for date grouping."""
+
+    @patch("weather.aviation.get_metar_observations")
+    def test_utc_midnight_crossing_grouped_correctly(self, mock_obs):
+        """Observations near UTC midnight should be grouped by local date, not UTC."""
+        mock_obs.return_value = {
+            "NYC": [
+                # 2025-01-16T03:00:00Z = 2025-01-15 22:00 EST → Jan 15 local
+                {"time": "2025-01-16T03:00:00Z", "temp_f": 25.0},
+                # 2025-01-16T06:00:00Z = 2025-01-16 01:00 EST → Jan 16 local
+                {"time": "2025-01-16T06:00:00Z", "temp_f": 22.0},
+                # 2025-01-16T18:00:00Z = 2025-01-16 13:00 EST → Jan 16 local
+                {"time": "2025-01-16T18:00:00Z", "temp_f": 38.0},
+            ],
+        }
+
+        result = get_aviation_daily_data(["NYC"])
+
+        self.assertIn("NYC", result)
+        # Jan 15 should have 1 obs (the 03:00Z one)
+        self.assertIn("2025-01-15", result["NYC"])
+        jan15 = result["NYC"]["2025-01-15"]
+        self.assertEqual(jan15["obs_count"], 1)
+        self.assertAlmostEqual(jan15["obs_high"], 25.0)
+
+        # Jan 16 should have 2 obs (the 06:00Z and 18:00Z ones)
+        self.assertIn("2025-01-16", result["NYC"])
+        jan16 = result["NYC"]["2025-01-16"]
+        self.assertEqual(jan16["obs_count"], 2)
+        self.assertAlmostEqual(jan16["obs_high"], 38.0)
+        self.assertAlmostEqual(jan16["obs_low"], 22.0)
 
 
 if __name__ == "__main__":

@@ -74,9 +74,6 @@ class PaperBridge:
     def get_market_context(self, market_id: str, **kwargs) -> dict | None:
         return self._real.get_market_context(market_id, **kwargs)
 
-    def get_price_history(self, market_id: str) -> list:
-        return self._real.get_price_history(market_id)
-
     def get_positions(self) -> list:
         return []
 

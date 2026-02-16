@@ -8,10 +8,13 @@ making this the ground-truth data source.
 import json
 import logging
 import time
+from datetime import datetime, timezone
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
+from zoneinfo import ZoneInfo
 
 from ._ssl import SSL_CTX as _SSL_CTX
+from .config import LOCATIONS
 
 logger = logging.getLogger(__name__)
 
@@ -164,15 +167,33 @@ def get_metar_observations(
     return result
 
 
+def _utc_to_local_date(obs_time: str, tz_name: str) -> str:
+    """Convert a UTC observation time string to a local date string.
+
+    Args:
+        obs_time: UTC time string like ``"2025-01-16T03:00:00Z"``.
+        tz_name: IANA timezone name (e.g. ``"America/New_York"``).
+
+    Returns:
+        Local date string ``"YYYY-MM-DD"``.
+    """
+    utc_dt = datetime.fromisoformat(obs_time.replace("Z", "+00:00"))
+    local_dt = utc_dt.astimezone(ZoneInfo(tz_name))
+    return local_dt.strftime("%Y-%m-%d")
+
+
 def compute_daily_extremes(
     observations: list[dict],
     target_date: str,
+    tz_name: str = "",
 ) -> dict | None:
     """Compute daily high/low from METAR observations for a specific date.
 
     Args:
         observations: List of observation dicts (from ``get_metar_observations``).
-        target_date: Date string ``"YYYY-MM-DD"`` to filter observations.
+        target_date: Date string ``"YYYY-MM-DD"`` to filter observations (local date).
+        tz_name: IANA timezone name for converting UTC obs times to local dates.
+            When empty, falls back to comparing the UTC date prefix (legacy behaviour).
 
     Returns:
         ``{"high": float, "low": float, "obs_count": int, "latest_obs_time": str}``
@@ -181,8 +202,14 @@ def compute_daily_extremes(
     day_obs = []
     for obs in observations:
         obs_time = obs.get("time", "")
-        # Match observations whose date portion matches target_date
-        if obs_time[:10] == target_date:
+        if tz_name:
+            try:
+                local_date = _utc_to_local_date(obs_time, tz_name)
+            except (ValueError, KeyError):
+                local_date = obs_time[:10]
+        else:
+            local_date = obs_time[:10]
+        if local_date == target_date:
             day_obs.append(obs)
 
     if not day_obs:
@@ -222,12 +249,26 @@ def get_aviation_daily_data(
         if not observations:
             continue
 
-        # Collect all unique dates from observations
-        dates = sorted(set(obs["time"][:10] for obs in observations))
+        # Resolve timezone for this location
+        loc_info = LOCATIONS.get(loc, {})
+        tz_name = loc_info.get("tz", "")
+
+        # Collect all unique *local* dates from observations
+        local_dates: set[str] = set()
+        for obs in observations:
+            obs_time = obs.get("time", "")
+            if tz_name:
+                try:
+                    local_dates.add(_utc_to_local_date(obs_time, tz_name))
+                except (ValueError, KeyError):
+                    local_dates.add(obs_time[:10])
+            else:
+                local_dates.add(obs_time[:10])
+        dates = sorted(local_dates)
         loc_data: dict[str, dict] = {}
 
         for date_str in dates:
-            extremes = compute_daily_extremes(observations, date_str)
+            extremes = compute_daily_extremes(observations, date_str, tz_name=tz_name)
             if extremes:
                 loc_data[date_str] = {
                     "obs_high": extremes["high"],

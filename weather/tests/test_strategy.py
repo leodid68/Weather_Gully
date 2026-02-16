@@ -13,7 +13,6 @@ from weather.state import TradingState
 from weather.strategy import (
     check_context_safeguards,
     check_exit_opportunities,
-    detect_price_trend,
     run_weather_strategy,
     score_buckets,
 )
@@ -71,24 +70,6 @@ class TestCheckContextSafeguards(unittest.TestCase):
         }
         ok, _ = check_context_safeguards(ctx, Config())
         self.assertFalse(ok)
-
-
-class TestDetectPriceTrend(unittest.TestCase):
-
-    def test_empty_history(self):
-        result = detect_price_trend([])
-        self.assertEqual(result["direction"], "unknown")
-
-    def test_flat_market(self):
-        history = [{"price_yes": 0.50}] * 100
-        result = detect_price_trend(history)
-        self.assertEqual(result["direction"], "flat")
-
-    def test_dropping_market(self):
-        history = [{"price_yes": 0.50}] * 50 + [{"price_yes": 0.35}] * 50
-        result = detect_price_trend(history)
-        self.assertEqual(result["direction"], "down")
-        self.assertTrue(result["is_opportunity"])
 
 
 class TestScoreBuckets(unittest.TestCase):
@@ -162,7 +143,6 @@ class TestStrategyIntegration(unittest.TestCase):
         bridge.fetch_weather_markets.return_value = _load_fixture("weather_markets.json")["markets"]
         bridge.get_positions.return_value = _load_fixture("weather_positions.json")["positions"]
         bridge.get_market_context.return_value = None  # No safeguards blocking
-        bridge.get_price_history.return_value = []
         bridge.get_position.return_value = None
         return bridge
 
@@ -191,7 +171,6 @@ class TestStrategyIntegration(unittest.TestCase):
             state=state,
             dry_run=True,
             use_safeguards=False,
-            use_trends=False,
         )
 
         # Markets should have been fetched
@@ -218,7 +197,7 @@ class TestStrategyIntegration(unittest.TestCase):
 
         run_weather_strategy(
             client=bridge, config=config, state=state,
-            dry_run=True, use_safeguards=False, use_trends=False,
+            dry_run=True, use_safeguards=False,
         )
 
         # No trades should have been executed
@@ -247,7 +226,7 @@ class TestHealthCheck(unittest.TestCase):
 
         run_weather_strategy(
             client=bridge, config=config, state=state,
-            dry_run=True, use_safeguards=False, use_trends=False,
+            dry_run=True, use_safeguards=False,
         )
 
         # No trades should have been attempted (early return)

@@ -112,27 +112,6 @@ def _parse_time_to_hours(time_str: str) -> float | None:
         return None
 
 
-def detect_price_trend(history: list, price_drop_threshold: float = 0.10) -> dict:
-    """Analyze price history for 24h trend."""
-    if not history or len(history) < 2:
-        return {"direction": "unknown", "change_24h": 0, "is_opportunity": False}
-
-    recent_price = history[-1].get("price_yes", 0.5)
-    lookback = min(96, len(history) - 1)
-    old_price = history[-lookback].get("price_yes", recent_price)
-
-    if old_price == 0:
-        return {"direction": "unknown", "change_24h": 0, "is_opportunity": False}
-
-    change = (recent_price - old_price) / old_price
-
-    if change < -price_drop_threshold:
-        return {"direction": "down", "change_24h": change, "is_opportunity": True}
-    elif change > price_drop_threshold:
-        return {"direction": "up", "change_24h": change, "is_opportunity": False}
-    return {"direction": "flat", "change_24h": change, "is_opportunity": False}
-
-
 # --------------------------------------------------------------------------
 # Bucket scoring (adjacent buckets)
 # --------------------------------------------------------------------------
@@ -474,7 +453,6 @@ def run_weather_strategy(
     positions_only: bool = False,
     show_config: bool = False,
     use_safeguards: bool = True,
-    use_trends: bool = True,
     state_path: str | None = None,
 ) -> None:
     """Run the weather trading strategy."""
@@ -861,13 +839,6 @@ def run_weather_strategy(
                 if reasons:
                     logger.info("Warnings: %s", "; ".join(reasons))
 
-            # Price trend
-            if use_trends:
-                history = client.get_price_history(market_id)
-                trend = detect_price_trend(history, config.price_drop_threshold)
-                if trend["is_opportunity"]:
-                    logger.info("Price dropped %.0f%% in 24h — stronger signal", abs(trend["change_24h"]) * 100)
-
             # Kelly position sizing
             position_size = compute_position_size(
                 probability=prob,
@@ -907,7 +878,11 @@ def run_weather_strategy(
                 )
             else:
                 logger.info("Executing trade: $%.2f on '%s'...", position_size, outcome_name)
-                result = client.execute_trade(market_id, "yes", position_size)
+                result = client.execute_trade(
+                    market_id, "yes", position_size,
+                    fill_timeout=config.fill_timeout_seconds,
+                    fill_poll_interval=config.fill_poll_interval,
+                )
 
                 if result.get("success"):
                     trades_executed += 1
