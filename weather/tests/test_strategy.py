@@ -141,7 +141,6 @@ class TestStrategyIntegration(unittest.TestCase):
             "positions_count": 2,
         }
         bridge.fetch_weather_markets.return_value = _load_fixture("weather_markets.json")["markets"]
-        bridge.get_positions.return_value = _load_fixture("weather_positions.json")["positions"]
         bridge.get_market_context.return_value = None  # No safeguards blocking
         bridge.get_position.return_value = None
         return bridge
@@ -217,7 +216,6 @@ class TestHealthCheck(unittest.TestCase):
         bridge = MagicMock(spec=CLOBWeatherBridge)
         bridge.get_portfolio.return_value = {"balance_usdc": 50.0, "total_exposure": 0, "positions_count": 0}
         bridge.fetch_weather_markets.return_value = _load_fixture("weather_markets.json")["markets"]
-        bridge.get_positions.return_value = []
         bridge.get_position.return_value = None
 
         config = Config(locations="NYC", multi_source=True, max_days_ahead=365,

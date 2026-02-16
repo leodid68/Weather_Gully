@@ -66,24 +66,3 @@ def calibration_curve(
         actual.append(sum(bucket_o) / len(bucket_o) if bucket_o else 0.0)
 
     return {"bins": bins, "predicted": predicted, "actual": actual, "count": counts}
-
-
-def edge_confidence(
-    our_prob: float, market_price: float, n_similar: int, hit_rate: float,
-) -> float:
-    """Confidence score for a detected edge.
-
-    Combines raw edge magnitude with historical track record.
-    Scales down when fewer than 30 similar trades exist (sqrt scaling).
-
-    Formula: confidence = edge * min(1, sqrt(n_similar / 30)) * (hit_rate / expected_rate)
-    """
-    edge = abs(our_prob - market_price)
-    if edge == 0:
-        return 0.0
-
-    expected_rate = market_price if market_price > 0 else 0.5
-    sample_factor = min(1.0, math.sqrt(n_similar / 30))
-    rate_factor = min(hit_rate / expected_rate, 3.0) if expected_rate > 0 else 0.0
-
-    return edge * sample_factor * rate_factor

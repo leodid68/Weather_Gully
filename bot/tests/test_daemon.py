@@ -1,4 +1,4 @@
-"""Tests for bot.daemon and bot.retry."""
+"""Tests for bot.daemon."""
 
 import contextlib
 import os
@@ -19,68 +19,6 @@ from bot.daemon import (
     check_health,
     run_daemon,
 )
-from bot.retry import with_retry
-
-
-class TestWithRetry(unittest.TestCase):
-    def test_success_first_try(self):
-        result = with_retry(lambda: 42, max_attempts=3)
-        self.assertEqual(result, 42)
-
-    def test_success_after_failures(self):
-        call_count = 0
-
-        def flaky():
-            nonlocal call_count
-            call_count += 1
-            if call_count < 3:
-                raise ValueError("not yet")
-            return "ok"
-
-        with patch("bot.retry.time.sleep"):
-            result = with_retry(flaky, max_attempts=5, backoff_base=0.01)
-        self.assertEqual(result, "ok")
-        self.assertEqual(call_count, 3)
-
-    def test_all_attempts_fail(self):
-        def always_fail():
-            raise RuntimeError("boom")
-
-        with patch("bot.retry.time.sleep"):
-            with self.assertRaises(RuntimeError):
-                with_retry(always_fail, max_attempts=3, backoff_base=0.01)
-
-    def test_backoff_capped(self):
-        sleeps = []
-
-        def fail_then_ok():
-            if len(sleeps) < 2:
-                raise ValueError("fail")
-            return "ok"
-
-        with patch("bot.retry.time.sleep", side_effect=lambda d: sleeps.append(d)):
-            with_retry(fail_then_ok, max_attempts=5, backoff_base=2.0, backoff_max=3.0)
-
-        # backoff: 2^0=1, 2^1=2 — both under cap of 3
-        self.assertEqual(sleeps, [1.0, 2.0])
-
-    def test_backoff_max_enforced(self):
-        sleeps = []
-        call_count = 0
-
-        def fail_three_times():
-            nonlocal call_count
-            call_count += 1
-            if call_count <= 3:
-                raise ValueError("fail")
-            return "done"
-
-        with patch("bot.retry.time.sleep", side_effect=lambda d: sleeps.append(d)):
-            with_retry(fail_three_times, max_attempts=5, backoff_base=10.0, backoff_max=5.0)
-
-        # All delays should be capped at 5.0
-        for d in sleeps:
-            self.assertLessEqual(d, 5.0)
 
 
 class TestPidHeartbeat(unittest.TestCase):

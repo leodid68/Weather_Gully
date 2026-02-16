@@ -3,7 +3,7 @@
 import math
 import unittest
 
-from bot.scoring import brier_score, calibration_curve, edge_confidence, log_score
+from bot.scoring import brier_score, calibration_curve, log_score
 
 
 class TestBrierScore(unittest.TestCase):
@@ -79,26 +79,6 @@ class TestCalibrationCurve(unittest.TestCase):
     def test_empty(self):
         result = calibration_curve([], [])
         self.assertEqual(sum(result["count"]), 0)
-
-
-class TestEdgeConfidence(unittest.TestCase):
-    def test_no_edge(self):
-        self.assertEqual(edge_confidence(0.5, 0.5, 100, 0.5), 0.0)
-
-    def test_high_confidence(self):
-        conf = edge_confidence(0.6, 0.5, 100, 0.6)
-        self.assertGreater(conf, 0)
-
-    def test_low_sample_penalty(self):
-        full = edge_confidence(0.6, 0.5, 100, 0.6)
-        low = edge_confidence(0.6, 0.5, 5, 0.6)
-        self.assertGreater(full, low)
-
-    def test_sqrt_scaling(self):
-        # At n=30, sample_factor should be 1.0
-        conf_30 = edge_confidence(0.6, 0.5, 30, 0.6)
-        conf_60 = edge_confidence(0.6, 0.5, 60, 0.6)
-        self.assertAlmostEqual(conf_30, conf_60)  # both capped at 1.0
 
 
 if __name__ == "__main__":

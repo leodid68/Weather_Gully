@@ -99,14 +99,7 @@ class TestGetPortfolio(unittest.TestCase):
         self.assertEqual(portfolio["balance_usdc"], 100.0)
 
 
-class TestGetPositions(unittest.TestCase):
-
-    def test_returns_empty(self):
-        bridge = CLOBWeatherBridge(
-            clob_client=MagicMock(),
-            gamma_client=MagicMock(),
-        )
-        self.assertEqual(bridge.get_positions(), [])
+class TestGetPosition(unittest.TestCase):
 
     def test_get_position_returns_none(self):
         bridge = CLOBWeatherBridge(

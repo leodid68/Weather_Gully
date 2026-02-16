@@ -481,18 +481,16 @@ def run_weather_strategy(
         return
 
     if positions_only:
-        logger.info("Current Positions:")
-        positions = client.get_positions()
-        if not positions:
+        logger.info("Current Positions (from state):")
+        if not state.trades:
             logger.info("  No open positions")
         else:
-            for pos in positions:
+            for market_id, trade in state.trades.items():
                 logger.info(
-                    "  %s — YES: %.1f | NO: %.1f | P&L: $%.2f",
-                    pos.get("question", "Unknown")[:50],
-                    pos.get("shares_yes", 0),
-                    pos.get("shares_no", 0),
-                    pos.get("pnl", 0),
+                    "  %s — shares: %.1f | cost: $%.2f",
+                    trade.outcome_name[:50],
+                    trade.shares,
+                    trade.cost_basis,
                 )
         return
 

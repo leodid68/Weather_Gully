@@ -137,13 +137,6 @@ class CLOBWeatherBridge:
             "positions_count": self._position_count,
         }
 
-    def get_positions(self) -> list:
-        """Return empty list — positions are tracked in weather.state.TradingState.
-
-        The weather strategy reads positions from state, not from the API.
-        """
-        return []
-
     def get_position(self, market_id: str) -> dict | None:
         """Return None — position tracking is done via state."""
         return None

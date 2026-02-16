@@ -77,7 +77,6 @@ class Config:
     # Context safeguards
     slippage_max_pct: float = 0.15
     time_to_resolution_min_hours: int = 2
-    price_drop_threshold: float = 0.10
 
     # Multi-source forecasting (Open-Meteo)
     multi_source: bool = True
