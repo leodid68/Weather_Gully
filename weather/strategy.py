@@ -941,15 +941,17 @@ def run_weather_strategy(
             # Confidence = our probability estimate
             confidence = round(prob, 2)
 
+            side = entry.get("side", "yes")
+
             if dry_run:
                 logger.info(
-                    "[DRY RUN] Would buy $%.2f (~%.1f shares) of '%s' — confidence=%.0f%%",
-                    position_size, position_size / price, outcome_name, confidence * 100,
+                    "[DRY RUN] Would buy %s $%.2f (~%.1f shares) of '%s' — confidence=%.0f%%",
+                    side.upper(), position_size, position_size / price, outcome_name, confidence * 100,
                 )
             else:
-                logger.info("Executing trade: $%.2f on '%s'...", position_size, outcome_name)
+                logger.info("Executing trade: %s $%.2f on '%s'...", side.upper(), position_size, outcome_name)
                 result = client.execute_trade(
-                    market_id, "yes", position_size,
+                    market_id, side, position_size,
                     fill_timeout=config.fill_timeout_seconds,
                     fill_poll_interval=config.fill_poll_interval,
                 )
@@ -968,7 +970,7 @@ def run_weather_strategy(
                     state.record_trade(
                         market_id=market_id,
                         outcome_name=outcome_name,
-                        side="yes",
+                        side=side,
                         cost_basis=price,
                         shares=shares,
                         location=location,

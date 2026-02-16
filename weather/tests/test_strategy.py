@@ -465,6 +465,25 @@ class TestScoreBucketsNO(unittest.TestCase):
             self.assertIn("side", entry, f"Entry missing 'side' field: {entry}")
 
 
+class TestExecuteNOTrade(unittest.TestCase):
+
+    def test_no_side_in_state_record(self):
+        """When recording a NO-side trade, state should store side='no'."""
+        from weather.state import TradingState
+        state = TradingState()
+        state.record_trade("m1", "bucket_name", "no", 0.20, 10.0,
+                           location="NYC", forecast_date="2026-02-20")
+        self.assertEqual(state.trades["m1"].side, "no")
+
+    def test_yes_side_still_works(self):
+        """YES-side trades should still be recorded correctly."""
+        from weather.state import TradingState
+        state = TradingState()
+        state.record_trade("m2", "bucket_name", "yes", 0.10, 10.0,
+                           location="NYC", forecast_date="2026-02-20")
+        self.assertEqual(state.trades["m2"].side, "yes")
+
+
 class TestCircuitBreaker(unittest.TestCase):
 
     def test_daily_loss_stops_trading(self):
