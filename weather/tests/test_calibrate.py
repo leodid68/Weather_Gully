@@ -9,11 +9,13 @@ from weather.calibrate import (
     _compute_adaptive_factors,
     _compute_base_sigma,
     _compute_platt_params,
+    _compute_sigma_by_horizon,
     _expand_sigma_by_horizon,
     _HORIZON_GROWTH,
     build_calibration_tables,
     compute_empirical_sigma,
     compute_forecast_errors,
+    compute_horizon_errors,
     compute_model_weights,
     compute_exponential_weights,
     _weighted_base_sigma,
@@ -419,6 +421,230 @@ class TestWeightedCalibration(unittest.TestCase):
         self.assertIn("samples_effective", metadata)
         self.assertGreater(metadata["samples_effective"], 0)
         self.assertLessEqual(metadata["samples_effective"], metadata["samples"])
+
+
+class TestComputeSigmaByHorizon(unittest.TestCase):
+
+    def test_real_sigmas_computed(self):
+        """Known horizons should have real RMSE values."""
+        errors = []
+        for h in [0, 3]:
+            for _ in range(40):
+                errors.append({"horizon": h, "error": (h + 1) * 1.0})
+                errors.append({"horizon": h, "error": -(h + 1) * 1.0})
+        result = _compute_sigma_by_horizon(errors)
+        self.assertIn("0", result)
+        self.assertIn("3", result)
+        # Horizon 0: errors are +1/-1, RMSE = 1.0
+        self.assertAlmostEqual(result["0"], 1.0, places=1)
+        # Horizon 3: errors are +4/-4, RMSE = 4.0
+        self.assertAlmostEqual(result["3"], 4.0, places=1)
+        self.assertGreater(float(result["3"]), float(result["0"]))
+
+    def test_interpolation_for_missing_horizons(self):
+        """Missing horizons should be interpolated."""
+        errors = []
+        for _ in range(40):
+            errors.append({"horizon": 0, "error": 1.0})
+            errors.append({"horizon": 0, "error": -1.0})
+            errors.append({"horizon": 7, "error": 5.0})
+            errors.append({"horizon": 7, "error": -5.0})
+        result = _compute_sigma_by_horizon(errors)
+        # Horizon 3 should be between 0 and 7
+        self.assertGreater(float(result["3"]), float(result["0"]))
+        self.assertLess(float(result["3"]), float(result["7"]))
+
+    def test_insufficient_samples_ignored(self):
+        """Horizons with < 20 samples should be interpolated, not used directly."""
+        errors = [{"horizon": 0, "error": 1.0}] * 40
+        errors += [{"horizon": 5, "error": 3.0}] * 10  # only 10 samples
+        errors += [{"horizon": 7, "error": 5.0}] * 40
+        result = _compute_sigma_by_horizon(errors)
+        # Horizon 5 should be interpolated (not 3.0)
+        self.assertIn("5", result)
+
+    def test_extrapolation_beyond_last_known(self):
+        """Horizons beyond last known should be extrapolated."""
+        errors = []
+        for _ in range(40):
+            errors.append({"horizon": 0, "error": 1.0})
+            errors.append({"horizon": 0, "error": -1.0})
+            errors.append({"horizon": 3, "error": 4.0})
+            errors.append({"horizon": 3, "error": -4.0})
+        result = _compute_sigma_by_horizon(errors)
+        # Horizons 4-10 should be extrapolated and increasing
+        self.assertIn("10", result)
+        self.assertGreater(float(result["10"]), float(result["3"]))
+
+    def test_all_horizons_present(self):
+        """Result should have entries for all horizons 0-10."""
+        errors = []
+        for _ in range(40):
+            errors.append({"horizon": 0, "error": 1.0})
+            errors.append({"horizon": 0, "error": -1.0})
+            errors.append({"horizon": 5, "error": 3.0})
+            errors.append({"horizon": 5, "error": -3.0})
+        result = _compute_sigma_by_horizon(errors)
+        self.assertEqual(len(result), 11)
+        for h in range(11):
+            self.assertIn(str(h), result)
+
+    def test_fallback_when_no_sufficient_horizons(self):
+        """When no horizon has >= 20 samples, fall back to growth model."""
+        errors = [{"horizon": 0, "error": 1.5}] * 5  # Only 5 samples
+        result = _compute_sigma_by_horizon(errors)
+        # Should still return 11 horizons (via fallback)
+        self.assertEqual(len(result), 11)
+
+    def test_empty_errors(self):
+        """Empty errors should fall back to growth model."""
+        result = _compute_sigma_by_horizon([])
+        self.assertEqual(len(result), 11)
+
+
+class TestComputeHorizonErrors(unittest.TestCase):
+
+    def test_basic_errors(self):
+        prev_runs = {
+            0: {"2025-06-01": {"gfs_high": 82.0, "gfs_low": 65.0, "ecmwf_high": 84.0, "ecmwf_low": 66.0}},
+            3: {"2025-06-01": {"gfs_high": 80.0, "gfs_low": 63.0, "ecmwf_high": 81.0, "ecmwf_low": 64.0}},
+        }
+        actuals = {"2025-06-01": {"high": 83.0, "low": 64.5}}
+        errors = compute_horizon_errors(prev_runs, actuals, "NYC")
+        self.assertTrue(len(errors) > 0)
+        horizons = {e["horizon"] for e in errors}
+        self.assertIn(0, horizons)
+        self.assertIn(3, horizons)
+        # All errors should have the standard fields
+        for e in errors:
+            self.assertIn("error", e)
+            self.assertIn("horizon", e)
+            self.assertIn("location", e)
+            self.assertIn("target_date", e)
+            self.assertIn("month", e)
+            self.assertIn("metric", e)
+            self.assertIn("model", e)
+            self.assertIn("forecast", e)
+            self.assertIn("actual", e)
+            self.assertIn("model_spread", e)
+
+    def test_error_values_correct(self):
+        prev_runs = {
+            0: {"2025-06-01": {"gfs_high": 82.0, "gfs_low": 65.0, "ecmwf_high": 84.0, "ecmwf_low": 66.0}},
+        }
+        actuals = {"2025-06-01": {"high": 83.0, "low": 64.5}}
+        errors = compute_horizon_errors(prev_runs, actuals, "NYC")
+        gfs_high = [e for e in errors if e["model"] == "gfs" and e["metric"] == "high"][0]
+        # error = forecast - actual = 82.0 - 83.0 = -1.0
+        self.assertAlmostEqual(gfs_high["error"], -1.0, places=1)
+        self.assertEqual(gfs_high["horizon"], 0)
+        self.assertEqual(gfs_high["location"], "NYC")
+
+    def test_missing_actuals_skipped(self):
+        prev_runs = {
+            0: {"2025-06-01": {"gfs_high": 82.0, "gfs_low": 65.0, "ecmwf_high": 84.0, "ecmwf_low": 66.0}},
+        }
+        actuals = {}  # No actuals
+        errors = compute_horizon_errors(prev_runs, actuals, "NYC")
+        self.assertEqual(len(errors), 0)
+
+    def test_model_spread_computed(self):
+        prev_runs = {
+            0: {"2025-06-01": {"gfs_high": 82.0, "gfs_low": 65.0, "ecmwf_high": 84.0, "ecmwf_low": 66.0}},
+        }
+        actuals = {"2025-06-01": {"high": 83.0, "low": 64.5}}
+        errors = compute_horizon_errors(prev_runs, actuals, "NYC")
+        gfs_high = [e for e in errors if e["model"] == "gfs" and e["metric"] == "high"][0]
+        # |82.0 - 84.0| = 2.0
+        self.assertAlmostEqual(gfs_high["model_spread"], 2.0, places=1)
+
+    def test_multiple_dates_and_horizons(self):
+        prev_runs = {
+            0: {
+                "2025-06-01": {"gfs_high": 82.0, "gfs_low": 65.0, "ecmwf_high": 84.0, "ecmwf_low": 66.0},
+                "2025-06-02": {"gfs_high": 80.0, "gfs_low": 62.0, "ecmwf_high": 81.0, "ecmwf_low": 63.0},
+            },
+            3: {
+                "2025-06-01": {"gfs_high": 79.0, "gfs_low": 61.0, "ecmwf_high": 80.0, "ecmwf_low": 62.0},
+            },
+        }
+        actuals = {
+            "2025-06-01": {"high": 83.0, "low": 64.5},
+            "2025-06-02": {"high": 81.0, "low": 63.0},
+        }
+        errors = compute_horizon_errors(prev_runs, actuals, "NYC")
+        # 2 models * 2 metrics * 2 dates at h=0 + 2 models * 2 metrics * 1 date at h=3 = 12
+        self.assertEqual(len(errors), 12)
+
+
+class TestBuildCalibrationTablesWithHorizonErrors(unittest.TestCase):
+
+    def test_uses_real_rmse_when_horizon_errors_provided(self):
+        """When horizon_errors is given, should use real RMSE, not growth model."""
+        import random
+        # Regular errors for the standard calibration fields
+        all_errors = []
+        for day in range(1, 20):
+            for month in [1, 6]:
+                for model in ["gfs", "ecmwf"]:
+                    err = random.gauss(0, 2.5)
+                    all_errors.append({
+                        "location": "NYC",
+                        "target_date": f"2025-{month:02d}-{day:02d}",
+                        "month": month,
+                        "metric": "high",
+                        "model": model,
+                        "forecast": 50.0 + err,
+                        "actual": 50.0,
+                        "error": err,
+                        "model_spread": abs(random.gauss(0, 1.5)),
+                    })
+
+        # Horizon errors with known RMSE pattern
+        horizon_errors = []
+        for h in [0, 3, 7]:
+            sigma = (h + 1) * 1.0
+            for _ in range(40):
+                horizon_errors.append({
+                    "location": "NYC",
+                    "target_date": "2025-06-01",
+                    "horizon": h,
+                    "error": sigma,
+                })
+                horizon_errors.append({
+                    "location": "NYC",
+                    "target_date": "2025-06-01",
+                    "horizon": h,
+                    "error": -sigma,
+                })
+
+        result = build_calibration_tables(all_errors, ["NYC"], horizon_errors=horizon_errors)
+        self.assertIn("global_sigma", result)
+        # Should use real RMSE model
+        self.assertIn("real RMSE", result["metadata"]["horizon_growth_model"])
+        # Horizon 0 RMSE = 1.0
+        self.assertAlmostEqual(result["global_sigma"]["0"], 1.0, places=1)
+
+    def test_backward_compatible_without_horizon_errors(self):
+        """Without horizon_errors, should use old growth model."""
+        import random
+        errors = []
+        for day in range(1, 20):
+            for model in ["gfs", "ecmwf"]:
+                err = random.gauss(0, 2.5)
+                errors.append({
+                    "location": "NYC",
+                    "target_date": f"2025-01-{day:02d}",
+                    "month": 1,
+                    "metric": "high",
+                    "model": model,
+                    "forecast": 50.0 + err,
+                    "actual": 50.0,
+                    "error": err,
+                    "model_spread": 1.0,
+                })
+        result = build_calibration_tables(errors, ["NYC"])
+        self.assertIn("NWP linear", result["metadata"]["horizon_growth_model"])
 
 
 if __name__ == "__main__":

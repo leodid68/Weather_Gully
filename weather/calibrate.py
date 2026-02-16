@@ -363,6 +363,162 @@ def _expand_sigma_by_horizon(base_sigma: float) -> dict[str, float]:
     }
 
 
+def _compute_sigma_by_horizon(errors: list[dict], max_horizon: int = 10) -> dict[str, float]:
+    """Compute real sigma at each horizon from error data.
+
+    For horizons with data: sigma = sqrt(mean(error^2)) (RMSE).
+    For horizons without data: linear interpolation/extrapolation.
+    Requires at least 20 samples per horizon for a data point.
+
+    Args:
+        errors: List of error records, each containing ``"horizon"`` (int)
+            and ``"error"`` (float) fields.
+        max_horizon: Maximum horizon to compute (default 10).
+
+    Returns:
+        ``{"0": sigma_0, "1": sigma_1, ...}`` rounded to 2 decimals.
+    """
+    # Group errors by horizon
+    by_horizon: dict[int, list[float]] = defaultdict(list)
+    for e in errors:
+        h = e.get("horizon")
+        if h is not None:
+            by_horizon[h].append(e["error"])
+
+    # Compute RMSE for horizons with >= 20 samples
+    known: dict[int, float] = {}
+    for h, errs in sorted(by_horizon.items()):
+        if len(errs) >= 20:
+            rmse = math.sqrt(sum(e ** 2 for e in errs) / len(errs))
+            known[h] = rmse
+
+    if not known:
+        # No horizon has enough data — fall back to growth model
+        base = _compute_base_sigma(errors) if errors else 1.5
+        return _expand_sigma_by_horizon(base)
+
+    # Fill all horizons 0..max_horizon via interpolation/extrapolation
+    known_horizons = sorted(known.keys())
+    result: dict[str, float] = {}
+
+    for h in range(max_horizon + 1):
+        if h in known:
+            result[str(h)] = round(known[h], 2)
+            continue
+
+        # Find surrounding known horizons for interpolation
+        lower = [kh for kh in known_horizons if kh < h]
+        upper = [kh for kh in known_horizons if kh > h]
+
+        if lower and upper:
+            # Interpolate between nearest lower and upper
+            h_lo = lower[-1]
+            h_hi = upper[0]
+            sigma_lo = known[h_lo]
+            sigma_hi = known[h_hi]
+            fraction = (h - h_lo) / (h_hi - h_lo)
+            sigma = sigma_lo + fraction * (sigma_hi - sigma_lo)
+            result[str(h)] = round(sigma, 2)
+        elif lower:
+            # Extrapolate beyond last known horizon
+            if len(known_horizons) >= 2:
+                # Use growth rate between last two known horizons
+                h_prev = known_horizons[-2]
+                h_last = known_horizons[-1]
+                sigma_prev = known[h_prev]
+                sigma_last = known[h_last]
+                rate = (sigma_last - sigma_prev) / (h_last - h_prev)
+                sigma = sigma_last + rate * (h - h_last)
+                result[str(h)] = round(max(sigma, 0.01), 2)
+            else:
+                # Only one known horizon — use its value
+                result[str(h)] = round(known[known_horizons[-1]], 2)
+        elif upper:
+            # Extrapolate below first known horizon
+            if len(known_horizons) >= 2:
+                h_first = known_horizons[0]
+                h_second = known_horizons[1]
+                sigma_first = known[h_first]
+                sigma_second = known[h_second]
+                rate = (sigma_second - sigma_first) / (h_second - h_first)
+                sigma = sigma_first + rate * (h - h_first)
+                result[str(h)] = round(max(sigma, 0.01), 2)
+            else:
+                result[str(h)] = round(known[known_horizons[0]], 2)
+
+    return result
+
+
+def compute_horizon_errors(
+    previous_runs_data: dict[int, dict[str, dict]],
+    actuals: dict[str, dict],
+    location: str,
+) -> list[dict]:
+    """Compute forecast errors at each horizon from Previous Runs data.
+
+    Compares forecasts issued at different horizons against observed actuals
+    to produce error records that include a ``"horizon"`` field.  Each record
+    has the same fields as :func:`compute_forecast_errors` returns, plus
+    ``"horizon": int``.
+
+    Args:
+        previous_runs_data: ``{horizon: {date_str: {gfs_high, gfs_low,
+            ecmwf_high, ecmwf_low}}}`` — output of
+            :func:`weather.previous_runs.fetch_previous_runs`.
+        actuals: ``{date_str: {high, low}}`` — observed temperatures.
+        location: Location key (e.g. ``"NYC"``), stored in each record.
+
+    Returns:
+        List of error records with ``"horizon"`` field.
+    """
+    errors: list[dict] = []
+
+    for horizon, dates in previous_runs_data.items():
+        for date_str, model_data in dates.items():
+            actual = actuals.get(date_str)
+            if not actual:
+                continue
+
+            month = datetime.strptime(date_str, "%Y-%m-%d").month
+
+            # Compute model spread for this target date
+            spread: dict[str, float] = {}
+            for metric in ["high", "low"]:
+                gfs_val = model_data.get(f"gfs_{metric}")
+                ecmwf_val = model_data.get(f"ecmwf_{metric}")
+                if gfs_val is not None and ecmwf_val is not None:
+                    spread[metric] = abs(gfs_val - ecmwf_val)
+
+            for model_prefix in ["gfs", "ecmwf"]:
+                for metric in ["high", "low"]:
+                    forecast_key = f"{model_prefix}_{metric}"
+                    forecast_val = model_data.get(forecast_key)
+                    actual_val = actual.get(metric)
+
+                    if forecast_val is None or actual_val is None:
+                        continue
+
+                    record = {
+                        "location": location,
+                        "target_date": date_str,
+                        "month": month,
+                        "metric": metric,
+                        "model": model_prefix,
+                        "forecast": forecast_val,
+                        "actual": actual_val,
+                        "error": forecast_val - actual_val,
+                        "model_spread": spread.get(metric, 0.0),
+                        "horizon": int(horizon),
+                    }
+                    errors.append(record)
+
+    logger.info(
+        "Computed %d horizon errors for %s across %d horizons",
+        len(errors), location, len(previous_runs_data),
+    )
+    return errors
+
+
 def _compute_mean_model_spread(errors: list[dict]) -> float:
     """Average model spread across all errors (for diagnostics)."""
     spreads = [e.get("model_spread", 0.0) for e in errors if e.get("model_spread")]
@@ -521,15 +677,20 @@ def _fit_platt_from_errors(errors: list[dict]) -> dict:
 def build_calibration_tables(
     all_errors: list[dict],
     locations: list[str],
+    horizon_errors: list[dict] | None = None,
 ) -> dict:
     """Build the full calibration.json structure from all errors.
 
-    Uses a **hybrid approach**: empirical base sigma from the data, then the
-    NWP horizon growth model to generate sigma for all horizons 0-10.
+    Uses a **hybrid approach**: empirical base sigma from the data, then either
+    real RMSE by horizon (when ``horizon_errors`` is provided) or the NWP
+    horizon growth model (fallback) to generate sigma for all horizons 0-10.
 
     Args:
         all_errors: Combined error records from all locations.
         locations: List of location keys processed.
+        horizon_errors: Optional list of error records with ``"horizon"`` field
+            from :func:`compute_horizon_errors`.  When provided, real RMSE per
+            horizon is used instead of the fictitious growth model.
 
     Returns:
         Dict ready to be serialized to ``calibration.json``.
@@ -538,8 +699,14 @@ def build_calibration_tables(
     global_base = _compute_base_sigma(all_errors)
     logger.info("Global base sigma: %.2f°F", global_base)
 
-    # Expand to full horizon table using NWP growth model
-    global_sigma = _expand_sigma_by_horizon(global_base)
+    # Expand to full horizon table
+    if horizon_errors is not None:
+        global_sigma = _compute_sigma_by_horizon(horizon_errors)
+        horizon_model = "real RMSE from Previous Runs data"
+        logger.info("Using real RMSE by horizon (global)")
+    else:
+        global_sigma = _expand_sigma_by_horizon(global_base)
+        horizon_model = "NWP linear: sigma(h) = base * growth(h)"
 
     # Seasonal factors (relative sigma by month)
     # Factor > 1.0 means this month is MORE uncertain than average (multiply sigma up).
@@ -555,7 +722,7 @@ def build_calibration_tables(
     else:
         seasonal_factors = {}
 
-    # Per-location sigma (base + growth)
+    # Per-location sigma (base + growth or real RMSE)
     location_sigma: dict[str, dict] = {}
     location_seasonal: dict[str, dict] = {}
     for loc in locations:
@@ -563,9 +730,19 @@ def build_calibration_tables(
         if not loc_errors:
             continue
 
-        loc_base = _compute_base_sigma(loc_errors)
-        location_sigma[loc] = _expand_sigma_by_horizon(loc_base)
-        logger.info("  %s base sigma: %.2f°F", loc, loc_base)
+        if horizon_errors is not None:
+            loc_horizon_errors = [e for e in horizon_errors if e.get("location") == loc]
+            if loc_horizon_errors:
+                location_sigma[loc] = _compute_sigma_by_horizon(loc_horizon_errors)
+                logger.info("  %s: using real RMSE by horizon", loc)
+            else:
+                loc_base = _compute_base_sigma(loc_errors)
+                location_sigma[loc] = _expand_sigma_by_horizon(loc_base)
+                logger.info("  %s base sigma: %.2f°F (fallback — no horizon data)", loc, loc_base)
+        else:
+            loc_base = _compute_base_sigma(loc_errors)
+            location_sigma[loc] = _expand_sigma_by_horizon(loc_base)
+            logger.info("  %s base sigma: %.2f°F", loc, loc_base)
 
         loc_monthly_sigma = compute_empirical_sigma(loc_errors, group_by="month")
         if loc_monthly_sigma:
@@ -607,7 +784,7 @@ def build_calibration_tables(
             "locations": locations,
             "base_sigma_global": round(global_base, 2),
             "mean_model_spread": round(mean_spread, 2),
-            "horizon_growth_model": "NWP linear: sigma(h) = base * growth(h)",
+            "horizon_growth_model": horizon_model,
         },
     }
 
@@ -737,6 +914,7 @@ def build_weighted_calibration_tables(
     locations: list[str],
     half_life: float = 30.0,
     reference_date: str | None = None,
+    horizon_errors: list[dict] | None = None,
 ) -> dict:
     """Build calibration tables with exponential decay weighting.
 
@@ -748,6 +926,9 @@ def build_weighted_calibration_tables(
         locations: List of location keys processed.
         half_life: Half-life in days for exponential weighting (default 30).
         reference_date: Override "today" for testing (YYYY-MM-DD string).
+        horizon_errors: Optional list of error records with ``"horizon"`` field
+            from :func:`compute_horizon_errors`.  When provided, real RMSE per
+            horizon is used instead of the fictitious growth model.
 
     Returns:
         Dict ready to be serialized to ``calibration.json``.
@@ -761,7 +942,13 @@ def build_weighted_calibration_tables(
     logger.info("Weighted global base sigma: %.2f°F (half-life=%.0fd)", global_base, half_life)
 
     # Expand to full horizon table
-    global_sigma = _expand_sigma_by_horizon(global_base)
+    if horizon_errors is not None:
+        global_sigma = _compute_sigma_by_horizon(horizon_errors)
+        horizon_model = "real RMSE from Previous Runs data"
+        logger.info("Using real RMSE by horizon (global, weighted)")
+    else:
+        global_sigma = _expand_sigma_by_horizon(global_base)
+        horizon_model = "NWP linear: sigma(h) = base * growth(h)"
 
     # Weighted seasonal factors
     # Group errors by month, compute weighted sigma per month
@@ -791,9 +978,19 @@ def build_weighted_calibration_tables(
         if not loc_errors:
             continue
 
-        loc_base = _weighted_base_sigma(loc_errors, weights)
-        location_sigma[loc] = _expand_sigma_by_horizon(loc_base)
-        logger.info("  %s weighted base sigma: %.2f°F", loc, loc_base)
+        if horizon_errors is not None:
+            loc_horizon_errors = [e for e in horizon_errors if e.get("location") == loc]
+            if loc_horizon_errors:
+                location_sigma[loc] = _compute_sigma_by_horizon(loc_horizon_errors)
+                logger.info("  %s: using real RMSE by horizon (weighted)", loc)
+            else:
+                loc_base = _weighted_base_sigma(loc_errors, weights)
+                location_sigma[loc] = _expand_sigma_by_horizon(loc_base)
+                logger.info("  %s weighted base sigma: %.2f°F (fallback)", loc, loc_base)
+        else:
+            loc_base = _weighted_base_sigma(loc_errors, weights)
+            location_sigma[loc] = _expand_sigma_by_horizon(loc_base)
+            logger.info("  %s weighted base sigma: %.2f°F", loc, loc_base)
 
         loc_monthly: dict[str, list[dict]] = defaultdict(list)
         for e in loc_errors:
@@ -841,7 +1038,7 @@ def build_weighted_calibration_tables(
             "date_range": date_range,
             "locations": locations,
             "base_sigma_global": round(global_base, 2),
-            "horizon_growth_model": "NWP linear: sigma(h) = base * growth(h)",
+            "horizon_growth_model": horizon_model,
         },
     }
 
