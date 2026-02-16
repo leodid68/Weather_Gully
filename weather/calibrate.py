@@ -274,67 +274,106 @@ def compute_empirical_sigma(
 def compute_model_weights(
     errors: list[dict],
     group_by: str = "location",
+    grid_step: float = 0.01,
 ) -> dict[str, dict[str, float]]:
-    """Compute optimal model weights per group by minimizing RMSE via grid search.
+    """Compute optimal model weights per group via 2-D grid search on MAE.
+
+    Searches the full simplex ``(w_gfs, w_ecmwf, w_noaa)`` where each weight
+    is in ``[0, 1]`` and they sum to 1.  Because NOAA has no historical
+    forecast archive, its contribution is proxied by the model consensus
+    (midpoint of GFS and ECMWF).  The ensemble is then::
+
+        ensemble = w_gfs * gfs + w_ecmwf * ecmwf + w_noaa * (gfs + ecmwf) / 2
+
+    This gives the NOAA axis real meaning: allocating weight to the proxy
+    acts as *shrinkage towards the model consensus*, which can reduce
+    variance when one model is noisy.
 
     Args:
-        errors: List of error records.
+        errors: List of error records (must contain ``"model"``, ``"forecast"``,
+            ``"actual"``, ``"target_date"``, ``"metric"`` and the *group_by* key).
         group_by: Key to group by (typically ``"location"``).
+        grid_step: Step size for each axis of the 2-D grid (default 0.01 = 1%).
 
     Returns:
-        Dict mapping group key to model weight dict, e.g.::
-
-            {"NYC": {"noaa": 0.20, "gfs_seamless": 0.30, "ecmwf_ifs025": 0.50}}
+        Dict mapping group key to ``{"gfs_seamless": w, "ecmwf_ifs025": w,
+        "noaa": w}`` with weights summing to 1.0.
     """
-    # Group errors by (group_key, target_date, metric) to get paired model predictions
-    paired: dict[str, dict[str, list[tuple[float, float]]]] = defaultdict(
-        lambda: defaultdict(list)
-    )
+    # Align GFS & ECMWF forecasts by (group, target_date, metric)
+    aligned: dict[str, dict[tuple[str, str], dict[str, float]]] = defaultdict(dict)
 
     for err in errors:
         group_key = str(err.get(group_by, "global"))
-        model = err["model"]
-        paired[group_key][model].append((err["forecast"], err["actual"]))
+        obs_key = (err["target_date"], err["metric"])
+        if obs_key not in aligned[group_key]:
+            aligned[group_key][obs_key] = {"actual": err["actual"]}
+        aligned[group_key][obs_key][err["model"]] = err["forecast"]
 
     results: dict[str, dict[str, float]] = {}
 
-    for group_key, model_data in paired.items():
-        # Compute RMSE for each model
-        model_rmse: dict[str, float] = {}
-        for model, pairs in model_data.items():
-            if not pairs:
-                continue
-            mse = sum((f - a) ** 2 for f, a in pairs) / len(pairs)
-            model_rmse[model] = math.sqrt(mse)
+    steps = int(round(1.0 / grid_step)) + 1
 
-        if not model_rmse:
+    for group_key, observations in aligned.items():
+        paired = [
+            obs for obs in observations.values()
+            if "gfs" in obs and "ecmwf" in obs
+        ]
+        if len(paired) < 5:
             continue
 
-        # Inverse-RMSE weighting (lower RMSE → higher weight)
-        inv_rmse = {m: 1.0 / r for m, r in model_rmse.items() if r > 0}
-        total_inv = sum(inv_rmse.values())
+        # Pre-compute arrays for speed
+        gfs_vals = [obs["gfs"] for obs in paired]
+        ecmwf_vals = [obs["ecmwf"] for obs in paired]
+        actual_vals = [obs["actual"] for obs in paired]
+        n = len(paired)
 
-        if total_inv == 0:
-            continue
+        best_mae = float("inf")
+        best_w = (0.5, 0.5, 0.0)  # (gfs, ecmwf, noaa)
 
-        # Map to canonical model names
-        model_map = {"gfs": "gfs_seamless", "ecmwf": "ecmwf_ifs025"}
-        weights: dict[str, float] = {}
-        for model, inv in inv_rmse.items():
-            canonical = model_map.get(model, model)
-            weights[canonical] = round(inv / total_inv, 3)
+        # Pre-compute NOAA proxy = model consensus (midpoint GFS/ECMWF)
+        noaa_proxy = [(gfs_vals[k] + ecmwf_vals[k]) / 2.0 for k in range(n)]
 
-        # Add NOAA weight (default 0.20, reduce proportionally from others)
-        noaa_weight = 0.20
-        remaining = 1.0 - noaa_weight
-        for k in weights:
-            weights[k] = round(weights[k] * remaining, 3)
-        weights["noaa"] = noaa_weight
+        # 2-D grid: w_gfs ∈ [0,1], w_noaa ∈ [0,1], w_ecmwf = 1 - w_gfs - w_noaa ≥ 0
+        for i in range(steps):
+            w_gfs = round(i * grid_step, 4)
+            max_noaa = round(1.0 - w_gfs, 4)
+            noaa_steps = int(round(max_noaa / grid_step)) + 1
+            for j in range(noaa_steps):
+                w_noaa = round(j * grid_step, 4)
+                w_ecmwf = round(1.0 - w_gfs - w_noaa, 4)
+                if w_ecmwf < -1e-9:
+                    continue
 
-        # Normalize to sum to 1.0
+                total_ae = 0.0
+                for k in range(n):
+                    ens = (w_gfs * gfs_vals[k]
+                           + w_ecmwf * ecmwf_vals[k]
+                           + w_noaa * noaa_proxy[k])
+                    total_ae += abs(ens - actual_vals[k])
+                mae = total_ae / n
+
+                if mae < best_mae:
+                    best_mae = mae
+                    best_w = (w_gfs, w_ecmwf, w_noaa)
+
+        weights: dict[str, float] = {
+            "gfs_seamless": round(max(0.0, best_w[0]), 3),
+            "ecmwf_ifs025": round(max(0.0, best_w[1]), 3),
+            "noaa": round(max(0.0, best_w[2]), 3),
+        }
+
+        # Normalize to exactly 1.0
         total = sum(weights.values())
         if total > 0:
             weights = {k: round(v / total, 3) for k, v in weights.items()}
+
+        logger.info(
+            "Optimal weights for %s: GFS=%.1f%% ECMWF=%.1f%% NOAA=%.1f%% "
+            "(MAE=%.3f°F, n=%d obs)",
+            group_key, weights["gfs_seamless"] * 100,
+            weights["ecmwf_ifs025"] * 100, weights["noaa"] * 100,
+            best_mae, n,
+        )
 
         results[group_key] = weights
 
@@ -1010,61 +1049,75 @@ def _weighted_model_weights(
     errors: list[dict],
     weights: dict[str, float],
     group_by: str = "location",
+    grid_step: float = 0.01,
 ) -> dict[str, dict[str, float]]:
-    """Compute model weights per group using weighted RMSE.
+    """Compute model weights per group via 2-D grid search on time-weighted MAE.
 
-    Same structure as ``compute_model_weights()`` but uses exponential weights.
-
-    wmse = sum(w * (forecast - actual)^2) / sum(w), then sqrt for RMSE.
-    Uses inverse-RMSE weighting with NOAA fixed at 0.20.
+    Same as ``compute_model_weights()`` but applies exponential time-decay
+    weights so recent observations count more heavily.
     """
-    # Group errors by (group_key, model)
-    grouped: dict[str, dict[str, list[tuple[float, float, float]]]] = defaultdict(
-        lambda: defaultdict(list)
-    )
+    # Align GFS & ECMWF by (group, target_date, metric) with time-weight
+    aligned: dict[str, dict[tuple[str, str], dict[str, float]]] = defaultdict(dict)
 
     for err in errors:
         group_key = str(err.get(group_by, "global"))
-        model = err["model"]
-        w = weights.get(err["target_date"], 0.0)
-        grouped[group_key][model].append((err["forecast"], err["actual"], w))
+        obs_key = (err["target_date"], err["metric"])
+        if obs_key not in aligned[group_key]:
+            aligned[group_key][obs_key] = {
+                "actual": err["actual"],
+                "tw": weights.get(err["target_date"], 0.0),
+            }
+        aligned[group_key][obs_key][err["model"]] = err["forecast"]
 
     results: dict[str, dict[str, float]] = {}
+    steps = int(round(1.0 / grid_step)) + 1
 
-    for group_key, model_data in grouped.items():
-        model_rmse: dict[str, float] = {}
-        for model, triples in model_data.items():
-            sum_w = sum(t[2] for t in triples)
-            if sum_w < 1e-9:
-                continue
-            wmse = sum(t[2] * (t[0] - t[1]) ** 2 for t in triples) / sum_w
-            model_rmse[model] = math.sqrt(wmse)
-
-        if not model_rmse:
+    for group_key, observations in aligned.items():
+        paired = [
+            obs for obs in observations.values()
+            if "gfs" in obs and "ecmwf" in obs and obs.get("tw", 0) > 1e-9
+        ]
+        if len(paired) < 5:
             continue
 
-        # Inverse-RMSE weighting
-        inv_rmse = {m: 1.0 / r for m, r in model_rmse.items() if r > 0}
-        total_inv = sum(inv_rmse.values())
+        gfs_vals = [obs["gfs"] for obs in paired]
+        ecmwf_vals = [obs["ecmwf"] for obs in paired]
+        actual_vals = [obs["actual"] for obs in paired]
+        tw_vals = [obs["tw"] for obs in paired]
+        total_tw = sum(tw_vals)
+        noaa_proxy = [(gfs_vals[k] + ecmwf_vals[k]) / 2.0 for k in range(len(paired))]
 
-        if total_inv == 0:
-            continue
+        best_mae = float("inf")
+        best_w = (0.5, 0.5, 0.0)
 
-        # Map to canonical model names
-        model_map = {"gfs": "gfs_seamless", "ecmwf": "ecmwf_ifs025"}
-        model_weights: dict[str, float] = {}
-        for model, inv in inv_rmse.items():
-            canonical = model_map.get(model, model)
-            model_weights[canonical] = round(inv / total_inv, 3)
+        for i in range(steps):
+            w_gfs = round(i * grid_step, 4)
+            max_noaa = round(1.0 - w_gfs, 4)
+            noaa_steps = int(round(max_noaa / grid_step)) + 1
+            for j in range(noaa_steps):
+                w_noaa = round(j * grid_step, 4)
+                w_ecmwf = round(1.0 - w_gfs - w_noaa, 4)
+                if w_ecmwf < -1e-9:
+                    continue
 
-        # Add NOAA weight (fixed 0.20)
-        noaa_weight = 0.20
-        remaining = 1.0 - noaa_weight
-        for k in model_weights:
-            model_weights[k] = round(model_weights[k] * remaining, 3)
-        model_weights["noaa"] = noaa_weight
+                sum_w_ae = 0.0
+                for k in range(len(paired)):
+                    ens = (w_gfs * gfs_vals[k]
+                           + w_ecmwf * ecmwf_vals[k]
+                           + w_noaa * noaa_proxy[k])
+                    sum_w_ae += tw_vals[k] * abs(ens - actual_vals[k])
+                mae = sum_w_ae / total_tw if total_tw > 1e-9 else float("inf")
 
-        # Normalize to sum to 1.0
+                if mae < best_mae:
+                    best_mae = mae
+                    best_w = (w_gfs, w_ecmwf, w_noaa)
+
+        model_weights: dict[str, float] = {
+            "gfs_seamless": round(max(0.0, best_w[0]), 3),
+            "ecmwf_ifs025": round(max(0.0, best_w[1]), 3),
+            "noaa": round(max(0.0, best_w[2]), 3),
+        }
+
         total = sum(model_weights.values())
         if total > 0:
             model_weights = {k: round(v / total, 3) for k, v in model_weights.items()}

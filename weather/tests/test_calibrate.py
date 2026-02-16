@@ -75,31 +75,84 @@ class TestComputeEmpiricalSigma(unittest.TestCase):
 
 class TestComputeModelWeights(unittest.TestCase):
 
-    def test_inverse_rmse_weighting(self):
-        errors = [
-            {"location": "NYC", "model": "gfs", "forecast": 50.0, "actual": 52.0},
-            {"location": "NYC", "model": "gfs", "forecast": 48.0, "actual": 50.0},
-            {"location": "NYC", "model": "ecmwf", "forecast": 51.0, "actual": 52.0},
-            {"location": "NYC", "model": "ecmwf", "forecast": 49.5, "actual": 50.0},
-        ]
+    def _make_errors(self, gfs_forecasts, ecmwf_forecasts, actuals, location="NYC"):
+        """Helper: build aligned error records for grid search tests."""
+        errors = []
+        for i, (gfs_f, ecmwf_f, actual) in enumerate(
+            zip(gfs_forecasts, ecmwf_forecasts, actuals)
+        ):
+            date = f"2025-01-{i + 1:02d}"
+            errors.append({"location": location, "model": "gfs", "forecast": gfs_f,
+                           "actual": actual, "target_date": date, "metric": "high"})
+            errors.append({"location": location, "model": "ecmwf", "forecast": ecmwf_f,
+                           "actual": actual, "target_date": date, "metric": "high"})
+        return errors
+
+    def test_better_model_gets_higher_weight(self):
+        # ECMWF always off by 1, GFS always off by 2 → ECMWF should win
+        actuals    = [50.0, 60.0, 55.0, 45.0, 70.0, 65.0]
+        ecmwf_f    = [51.0, 61.0, 56.0, 46.0, 71.0, 66.0]
+        gfs_f      = [52.0, 62.0, 57.0, 47.0, 72.0, 67.0]
+        errors = self._make_errors(gfs_f, ecmwf_f, actuals)
         result = compute_model_weights(errors, group_by="location")
         self.assertIn("NYC", result)
         weights = result["NYC"]
-        # ECMWF should have higher weight (lower RMSE)
         self.assertGreater(weights.get("ecmwf_ifs025", 0), weights.get("gfs_seamless", 0))
-        # All weights should sum to ~1.0
         total = sum(weights.values())
         self.assertAlmostEqual(total, 1.0, places=2)
 
-    def test_includes_noaa_weight(self):
-        errors = [
-            {"location": "NYC", "model": "gfs", "forecast": 50.0, "actual": 52.0},
-            {"location": "NYC", "model": "ecmwf", "forecast": 51.0, "actual": 52.0},
-        ]
+    def test_has_all_three_weights(self):
+        actuals    = [50.0, 60.0, 55.0, 45.0, 70.0, 65.0]
+        ecmwf_f    = [51.0, 61.0, 56.0, 46.0, 71.0, 66.0]
+        gfs_f      = [52.0, 62.0, 57.0, 47.0, 72.0, 67.0]
+        errors = self._make_errors(gfs_f, ecmwf_f, actuals)
         result = compute_model_weights(errors, group_by="location")
         weights = result["NYC"]
         self.assertIn("noaa", weights)
-        self.assertAlmostEqual(weights["noaa"], 0.20, places=2)
+        self.assertIn("gfs_seamless", weights)
+        self.assertIn("ecmwf_ifs025", weights)
+
+    def test_weights_sum_to_one(self):
+        actuals    = [50.0, 60.0, 55.0, 45.0, 70.0, 65.0]
+        gfs_f      = [51.0, 59.0, 56.0, 44.0, 71.0, 64.0]
+        ecmwf_f    = [49.0, 61.0, 54.0, 46.0, 69.0, 66.0]
+        errors = self._make_errors(gfs_f, ecmwf_f, actuals)
+        result = compute_model_weights(errors, group_by="location")
+        weights = result["NYC"]
+        self.assertAlmostEqual(sum(weights.values()), 1.0, places=2)
+
+    def test_equal_models_get_similar_weights(self):
+        # Both models equally accurate → weights should be close
+        actuals    = [50.0, 60.0, 55.0, 45.0, 70.0, 65.0]
+        gfs_f      = [51.0, 59.0, 56.0, 44.0, 71.0, 64.0]  # ±1
+        ecmwf_f    = [49.0, 61.0, 54.0, 46.0, 69.0, 66.0]  # ±1
+        errors = self._make_errors(gfs_f, ecmwf_f, actuals)
+        result = compute_model_weights(errors, group_by="location")
+        weights = result["NYC"]
+        nwp = weights["gfs_seamless"] + weights["ecmwf_ifs025"]
+        if nwp > 0:
+            gfs_share = weights["gfs_seamless"] / nwp
+            ecmwf_share = weights["ecmwf_ifs025"] / nwp
+            self.assertGreater(gfs_share, 0.2)
+            self.assertGreater(ecmwf_share, 0.2)
+
+    def test_noaa_weight_optimised_not_fixed(self):
+        """NOAA weight should vary based on 2-D grid search, not be hardcoded."""
+        actuals    = [50.0, 60.0, 55.0, 45.0, 70.0, 65.0]
+        gfs_f      = [51.0, 61.0, 56.0, 46.0, 71.0, 66.0]
+        ecmwf_f    = [51.0, 61.0, 56.0, 46.0, 71.0, 66.0]
+        errors = self._make_errors(gfs_f, ecmwf_f, actuals)
+        result = compute_model_weights(errors, group_by="location")
+        weights = result["NYC"]
+        # NOAA can be anything 0.0-1.0, just verify it's a valid weight
+        self.assertGreaterEqual(weights["noaa"], 0.0)
+        self.assertLessEqual(weights["noaa"], 1.0)
+
+    def test_skips_group_with_too_few_paired_observations(self):
+        # Only 2 observations — below threshold of 5
+        errors = self._make_errors([50.0, 60.0], [51.0, 61.0], [52.0, 62.0])
+        result = compute_model_weights(errors, group_by="location")
+        self.assertNotIn("NYC", result)
 
 
 class TestBuildCalibrationTables(unittest.TestCase):

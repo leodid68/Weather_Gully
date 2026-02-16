@@ -133,9 +133,9 @@ class TestModelWeightClamping(unittest.TestCase):
 
     def test_model_weight_clamped(self):
         cal = _make_calibration()
-        cal["model_weights"]["NYC"]["gfs_seamless"] = 0.75
+        cal["model_weights"]["NYC"]["gfs_seamless"] = 0.90
         clamped, clamped_list = clamp_calibration(cal)
-        self.assertEqual(clamped["model_weights"]["NYC"]["gfs_seamless"], 0.70)
+        self.assertEqual(clamped["model_weights"]["NYC"]["gfs_seamless"], 0.85)
         params_clamped = [e["param"] for e in clamped_list]
         self.assertIn("model_weight", params_clamped)
 

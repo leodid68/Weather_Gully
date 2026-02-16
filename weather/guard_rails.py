@@ -9,7 +9,7 @@ logger = logging.getLogger(__name__)
 PARAM_BOUNDS = {
     "base_sigma": (1.0, 4.0),
     "seasonal_factor": (0.5, 2.0),
-    "model_weight": (0.15, 0.70),
+    "model_weight": (0.0, 0.85),
     "platt_a": (0.3, 2.0),
     "platt_b": (-1.0, 1.0),
     "spread_to_sigma": (0.3, 1.5),
