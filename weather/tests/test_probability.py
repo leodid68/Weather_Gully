@@ -500,6 +500,45 @@ class TestStudentTCDF(unittest.TestCase):
         self.assertGreater(tail_t, tail_normal)
 
 
+class TestProbabilityOutputBounds(unittest.TestCase):
+    """Ensure estimate_bucket_probability always returns [0, 1]."""
+
+    def test_never_exceeds_one(self):
+        result = estimate_bucket_probability(
+            forecast_temp=50.0, bucket_low=-999, bucket_high=999,
+            forecast_date="2026-02-16", sigma_override=0.001,
+        )
+        self.assertLessEqual(result, 1.0)
+
+    def test_zero_sigma_returns_valid(self):
+        result = estimate_bucket_probability(
+            forecast_temp=50.0, bucket_low=45, bucket_high=55,
+            forecast_date="2026-02-16", sigma_override=0.0,
+        )
+        self.assertGreaterEqual(result, 0.0)
+        self.assertLessEqual(result, 1.0)
+
+    def test_huge_sigma_returns_valid(self):
+        result = estimate_bucket_probability(
+            forecast_temp=50.0, bucket_low=45, bucket_high=55,
+            forecast_date="2026-02-16", sigma_override=1000.0,
+        )
+        self.assertGreaterEqual(result, 0.0)
+        self.assertLessEqual(result, 1.0)
+
+    def test_sigma_capped_at_fifty(self):
+        """With sigma_override=1000, behavior should be same as sigma=50."""
+        result_huge = estimate_bucket_probability(
+            forecast_temp=50.0, bucket_low=45, bucket_high=55,
+            forecast_date="2026-02-16", sigma_override=1000.0,
+        )
+        result_fifty = estimate_bucket_probability(
+            forecast_temp=50.0, bucket_low=45, bucket_high=55,
+            forecast_date="2026-02-16", sigma_override=50.0,
+        )
+        self.assertAlmostEqual(result_huge, result_fifty, places=4)
+
+
 class TestStudentTCDFEdgeCases(unittest.TestCase):
     """Edge cases for _student_t_cdf robustness."""
 

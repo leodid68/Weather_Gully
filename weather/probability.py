@@ -478,6 +478,7 @@ def estimate_bucket_probability(
     # Guard against zero sigma
     if sigma <= 0:
         sigma = 0.01
+    sigma = min(sigma, 50.0)
 
     # Determine CDF function based on calibration distribution
     cal = _load_calibration()
@@ -499,7 +500,7 @@ def estimate_bucket_probability(
     else:
         cdf_high = cdf_fn((bucket_high + 0.5 - forecast_temp) / sigma)
 
-    prob = max(0.0, cdf_high - cdf_low)
+    prob = max(0.0, min(1.0, cdf_high - cdf_low))
     return round(prob, 4)
 
 
@@ -666,6 +667,7 @@ def estimate_bucket_probability_with_obs(
     # Guard against zero sigma
     if sigma <= 0:
         sigma = 0.01
+    sigma = min(sigma, 50.0)
 
     # Determine CDF function based on calibration distribution
     cal = _load_calibration()
@@ -687,5 +689,5 @@ def estimate_bucket_probability_with_obs(
     else:
         cdf_high = cdf_fn((bucket_high + 0.5 - effective_temp) / sigma)
 
-    prob = max(0.0, cdf_high - cdf_low)
+    prob = max(0.0, min(1.0, cdf_high - cdf_low))
     return round(prob, 4)
