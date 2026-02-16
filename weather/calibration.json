@@ -241,7 +241,8 @@
       "SON": -0.091
     }
   },
-  "distribution": "student_t",
+  "distribution": "skew_t",
+  "skew_t_gamma": 0.8,
   "normality_test": {
     "normal": false,
     "jb_statistic": 2500.8,
@@ -280,5 +281,5 @@
     "mean_model_spread": 1.68,
     "horizon_growth_model": "NWP linear: sigma(h) = base * growth(h)"
   },
-  "student_t_df": 10.0
+  "student_t_df": 50.0
 }
