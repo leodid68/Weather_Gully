@@ -109,6 +109,12 @@ class Config:
     fill_timeout_seconds: float = 30.0
     fill_poll_interval: float = 2.0
 
+    # Circuit breaker (risk management)
+    daily_loss_limit: float = 10.0           # Stop trading after $X daily loss
+    max_positions_per_day: int = 20           # Max new positions per calendar day
+    cooldown_hours_after_max_loss: float = 24.0  # Hours to wait after circuit break
+    max_open_positions: int = 15              # Max simultaneous open positions
+
     @property
     def active_locations(self) -> list[str]:
         """Return canonical location keys matching LOCATIONS dict keys.
