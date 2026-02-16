@@ -287,32 +287,51 @@ def check_exit_opportunities(
     exits_found = 0
     exits_executed = 0
 
+    # Pre-fetch all orderbooks in parallel
+    orderbook_targets: list[tuple[str, str]] = []  # (market_id, token_id)
+    for market_id, trade in state.trades.items():
+        if trade.shares < MIN_SHARES_PER_ORDER:
+            continue
+        gm = client._market_cache.get(market_id)
+        if gm and gm.clob_token_ids:
+            orderbook_targets.append((market_id, gm.clob_token_ids[0]))
+
+    orderbooks: dict[str, dict] = {}  # market_id → orderbook
+    if orderbook_targets:
+        with ThreadPoolExecutor(max_workers=min(len(orderbook_targets), 8)) as pool:
+            futures = {
+                pool.submit(client.clob.get_orderbook, tid): mid
+                for mid, tid in orderbook_targets
+            }
+            for fut in as_completed(futures):
+                mid = futures[fut]
+                try:
+                    orderbooks[mid] = fut.result()
+                except Exception:
+                    logger.debug("Orderbook fetch failed for %s", mid, exc_info=True)
+
     for market_id, trade in list(state.trades.items()):
         shares = trade.shares
         if shares < MIN_SHARES_PER_ORDER:
             continue
 
-        # Fetch current price from orderbook
-        gm = client._market_cache.get(market_id)
-        if not gm or not gm.clob_token_ids:
+        # Look up pre-fetched orderbook
+        book = orderbooks.get(market_id)
+        if not book:
             continue
-        token_id = gm.clob_token_ids[0]
-        try:
-            book = client.clob.get_orderbook(token_id)
-            bids = book.get("bids") or []
-            current_price = float(bids[0]["price"]) if bids else 0.0
-        except Exception:
-            continue
+        bids = book.get("bids") or []
+        current_price = float(bids[0]["price"]) if bids else 0.0
 
         if current_price <= 0:
             continue
 
         # Dynamic exit threshold
+        gm = client._market_cache.get(market_id)
         cost_basis = trade.cost_basis or config.exit_threshold
         if config.dynamic_exits:
             # Estimate hours to resolution from end_date in cached market
             hours = 168.0
-            if gm.end_date:
+            if gm and gm.end_date:
                 try:
                     end_dt = datetime.fromisoformat(gm.end_date.replace("Z", "+00:00"))
                     delta = end_dt - datetime.now(timezone.utc)

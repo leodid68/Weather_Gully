@@ -567,5 +567,76 @@ class TestEdgeInversionExit(unittest.TestCase):
         ))
 
 
+class TestExitParallelFetch(unittest.TestCase):
+    """Verify that check_exit_opportunities pre-fetches orderbooks in parallel."""
+
+    def _make_mock_client(self, market_ids: list[str]) -> MagicMock:
+        """Build a mock CLOBWeatherBridge with market cache for given IDs."""
+        client = MagicMock()
+        client._market_cache = {}
+        for mid in market_ids:
+            gm = MagicMock()
+            gm.clob_token_ids = [f"token_{mid}"]
+            gm.end_date = None
+            client._market_cache[mid] = gm
+        return client
+
+    def test_exit_parallel_fetch(self):
+        """All orderbooks should be fetched and positions processed."""
+        market_ids = ["m-1", "m-2", "m-3"]
+        client = self._make_mock_client(market_ids)
+
+        # get_orderbook returns a book with bids above exit threshold
+        client.clob.get_orderbook.return_value = {
+            "bids": [{"price": "0.90"}],
+        }
+        client.get_market_context.return_value = None
+
+        state = TradingState()
+        for mid in market_ids:
+            state.record_trade(mid, f"bucket_{mid}", "yes", 0.10, 20.0,
+                               location="NYC", forecast_date="2026-02-20")
+
+        config = Config(dynamic_exits=False)
+
+        found, executed = check_exit_opportunities(
+            client, config, state, dry_run=True, use_safeguards=False,
+        )
+
+        # All 3 should be found as exit opportunities (0.90 >= default threshold)
+        self.assertEqual(found, 3)
+        # get_orderbook should have been called once per market
+        self.assertEqual(client.clob.get_orderbook.call_count, 3)
+
+    def test_exit_handles_fetch_failure(self):
+        """If one orderbook fetch fails, other positions should still be processed."""
+        market_ids = ["m-ok", "m-fail"]
+        client = self._make_mock_client(market_ids)
+
+        def mock_get_orderbook(token_id: str) -> dict:
+            if token_id == "token_m-fail":
+                raise ConnectionError("timeout")
+            return {"bids": [{"price": "0.90"}]}
+
+        client.clob.get_orderbook.side_effect = mock_get_orderbook
+        client.get_market_context.return_value = None
+
+        state = TradingState()
+        for mid in market_ids:
+            state.record_trade(mid, f"bucket_{mid}", "yes", 0.10, 20.0,
+                               location="NYC", forecast_date="2026-02-20")
+
+        config = Config(dynamic_exits=False)
+
+        found, executed = check_exit_opportunities(
+            client, config, state, dry_run=True, use_safeguards=False,
+        )
+
+        # Only the successful fetch should result in an exit opportunity
+        self.assertEqual(found, 1)
+        # Both fetches were attempted
+        self.assertEqual(client.clob.get_orderbook.call_count, 2)
+
+
 if __name__ == "__main__":
     unittest.main()
