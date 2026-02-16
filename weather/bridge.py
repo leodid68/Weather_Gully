@@ -18,6 +18,56 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def compute_available_depth(book_side: list[dict], max_levels: int = 5) -> float:
+    """Compute total USD liquidity in the top N levels of an orderbook side."""
+    total = 0.0
+    for level in book_side[:max_levels]:
+        try:
+            price = float(level["price"])
+            size = float(level["size"])
+            total += size * price
+        except (KeyError, ValueError, TypeError):
+            continue
+    return total
+
+
+def compute_vwap(book_side: list[dict], target_usd: float) -> float:
+    """Compute volume-weighted average price to fill target_usd.
+
+    Walks the orderbook from best price, computing shares bought at each level.
+    Returns total_cost / total_shares (true VWAP).
+    """
+    if not book_side:
+        return 0.0
+
+    total_shares = 0.0
+    total_cost = 0.0
+    remaining = target_usd
+    for level in book_side:
+        try:
+            price = float(level["price"])
+            size = float(level["size"])  # size is in shares
+        except (KeyError, ValueError, TypeError):
+            continue
+        if price <= 0:
+            continue
+        available_usd = size * price
+        take_usd = min(available_usd, remaining)
+        take_shares = take_usd / price
+        total_shares += take_shares
+        total_cost += take_usd
+        remaining -= take_usd
+        if remaining <= 0:
+            break
+
+    if total_shares > 0:
+        return total_cost / total_shares
+    try:
+        return float(book_side[0]["price"])
+    except (KeyError, ValueError, TypeError, IndexError):
+        return 0.0
+
+
 class CLOBWeatherBridge:
     """Adapter: Polymarket CLOB + Gamma API for weather strategy.
 
@@ -269,6 +319,8 @@ class CLOBWeatherBridge:
         amount: float,
         fill_timeout: float = 30.0,
         fill_poll_interval: float = 2.0,
+        depth_fill_ratio: float = 0.0,
+        vwap_max_levels: int = 0,
     ) -> dict:
         """Execute a buy trade via CLOB limit order at fresh best ask.
 
@@ -304,7 +356,20 @@ class CLOBWeatherBridge:
             book = self.clob.get_orderbook(token_id)
             asks = book.get("asks") or []
             if asks:
-                price = float(asks[0]["price"])
+                # Depth-aware sizing: cap amount to available liquidity
+                if depth_fill_ratio > 0:
+                    depth = compute_available_depth(asks, max_levels=max(vwap_max_levels, 5))
+                    max_from_depth = depth * depth_fill_ratio
+                    if amount > max_from_depth > 0:
+                        logger.info("Depth cap: $%.2f → $%.2f (%.0f%% of $%.2f depth)",
+                                    amount, max_from_depth, depth_fill_ratio * 100, depth)
+                        amount = max_from_depth
+
+                # VWAP pricing across multiple levels
+                if vwap_max_levels > 1:
+                    price = compute_vwap(asks[:vwap_max_levels], amount)
+                else:
+                    price = float(asks[0]["price"])
             else:
                 # Fallback to cached price
                 price = gm.best_ask if gm.best_ask > 0 else (
