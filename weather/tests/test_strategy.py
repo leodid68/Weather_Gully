@@ -11,6 +11,7 @@ from weather.config import Config
 from weather.bridge import CLOBWeatherBridge
 from weather.state import TradingState
 from weather.strategy import (
+    check_circuit_breaker,
     check_context_safeguards,
     check_exit_opportunities,
     run_weather_strategy,
@@ -411,6 +412,52 @@ class TestAdaptiveSigmaConfig(unittest.TestCase):
         from weather.config import Config
         config = Config(adaptive_sigma=False)
         self.assertFalse(config.adaptive_sigma)
+
+
+class TestCircuitBreaker(unittest.TestCase):
+
+    def test_daily_loss_stops_trading(self):
+        state = TradingState()
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        state.record_daily_pnl(today, -11.0)
+        config = Config()
+        config.daily_loss_limit = 10.0
+        blocked, reason = check_circuit_breaker(state, config)
+        self.assertTrue(blocked)
+        self.assertIn("loss", reason.lower())
+
+    def test_max_positions_stops_trading(self):
+        state = TradingState()
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        for _ in range(21):
+            state.record_position_opened(today)
+        config = Config()
+        config.max_positions_per_day = 20
+        blocked, reason = check_circuit_breaker(state, config)
+        self.assertTrue(blocked)
+
+    def test_cooldown_blocks_after_circuit_break(self):
+        state = TradingState()
+        state.last_circuit_break = datetime.now(timezone.utc).isoformat()
+        config = Config()
+        config.cooldown_hours_after_max_loss = 24.0
+        blocked, reason = check_circuit_breaker(state, config)
+        self.assertTrue(blocked)
+
+    def test_max_open_positions_blocks(self):
+        state = TradingState()
+        for i in range(16):
+            state.record_trade(f"market_{i}", f"outcome_{i}", "yes", 0.1, 10)
+        config = Config()
+        config.max_open_positions = 15
+        blocked, reason = check_circuit_breaker(state, config)
+        self.assertTrue(blocked)
+
+    def test_no_block_when_within_limits(self):
+        state = TradingState()
+        config = Config()
+        blocked, reason = check_circuit_breaker(state, config)
+        self.assertFalse(blocked)
 
 
 if __name__ == "__main__":

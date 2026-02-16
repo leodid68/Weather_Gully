@@ -97,6 +97,40 @@ def check_context_safeguards(
     return True, reasons
 
 
+def check_circuit_breaker(state: "TradingState", config: Config) -> tuple[bool, str]:
+    """Check global circuit breaker conditions.
+
+    Returns (blocked: bool, reason: str). If blocked, all trading should halt.
+    """
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+    # 1. Daily loss limit
+    daily_pnl = state.get_daily_pnl(today)
+    if daily_pnl <= -config.daily_loss_limit:
+        return True, f"Daily loss limit hit: ${daily_pnl:.2f} (limit -${config.daily_loss_limit:.2f})"
+
+    # 2. Max positions per day
+    positions_today = state.positions_opened_today(today)
+    if positions_today >= config.max_positions_per_day:
+        return True, f"Max positions per day: {positions_today} (limit {config.max_positions_per_day})"
+
+    # 3. Cooldown after last circuit break
+    if state.last_circuit_break:
+        try:
+            last_break = datetime.fromisoformat(state.last_circuit_break)
+            hours_since = (datetime.now(timezone.utc) - last_break).total_seconds() / 3600
+            if hours_since < config.cooldown_hours_after_max_loss:
+                return True, f"Cooldown active: {hours_since:.1f}h since circuit break (need {config.cooldown_hours_after_max_loss}h)"
+        except (ValueError, TypeError):
+            pass
+
+    # 4. Max open positions
+    if len(state.trades) >= config.max_open_positions:
+        return True, f"Max open positions: {len(state.trades)} (limit {config.max_open_positions})"
+
+    return False, ""
+
+
 def _parse_time_to_hours(time_str: str) -> float | None:
     """Parse '3d 5h' style string to total hours."""
     try:
@@ -498,6 +532,15 @@ def run_weather_strategy(
                 )
         return
 
+    # Circuit breaker check
+    blocked, reason = check_circuit_breaker(state, config)
+    if blocked:
+        logger.warning("CIRCUIT BREAKER: %s", reason)
+        state.last_circuit_break = datetime.now(timezone.utc).isoformat()
+        save_path = state_path or config.state_file
+        state.save(save_path)
+        return
+
     # Sync bridge exposure from persisted state
     client.sync_exposure_from_state(state.trades)
 
@@ -897,6 +940,10 @@ def run_weather_strategy(
                     shares = result.get("shares_bought") or result.get("shares") or 0
                     trade_id = result.get("trade_id")
                     logger.info("Bought %.1f shares @ $%.2f", shares, price)
+
+                    # Circuit breaker: record position opened
+                    today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+                    state.record_position_opened(today_str)
 
                     # Record in state for dynamic exits
                     state.record_trade(
