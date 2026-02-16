@@ -867,7 +867,8 @@ def run_weather_strategy(
 
         # Feedback bias correction (before delta detection so both use corrected temp)
         forecast_month = int(date_str.split("-")[1])
-        feedback_bias = feedback.get_bias(location, forecast_month)
+        feedback_bias = feedback.get_bias(location, forecast_month,
+                                          use_autocorrelation=config.ar_autocorrelation)
         if feedback_bias is not None:
             forecast_temp -= feedback_bias
             logger.info("Feedback bias correction: %+.1f°F → adjusted forecast %.0f°F",

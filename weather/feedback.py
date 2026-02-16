@@ -17,6 +17,7 @@ logger = logging.getLogger(__name__)
 
 _MIN_SAMPLES = 7       # Minimum resolved trades before applying correction
 _ALPHA = 0.15          # EMA smoothing factor (slow learning)
+_MIN_AR_SAMPLES = 10   # Minimum AR(1) pairs before applying autocorrelation correction
 
 _HALF_LIFE_DAYS = 30.0   # Exponential decay half-life for feedback entries
 _DECAY_FLOOR = 0.1       # Below this decay factor, treat as no data
@@ -46,6 +47,13 @@ class FeedbackEntry:
     sample_count: int = 0
     last_updated: str = ""      # ISO timestamp of last update
 
+    # AR(1) online estimator fields
+    last_error: float | None = None   # Previous (forecast - actual)
+    ar_phi: float = 0.0               # Running AR(1) coefficient
+    cov_sum: float = 0.0              # Running sum of e(t)*e(t-1)
+    var_sum: float = 0.0              # Running sum of e(t-1)^2
+    ar_count: int = 0                 # Number of AR pairs observed
+
     def update(self, forecast_temp: float, actual_temp: float) -> None:
         """Incorporate one resolved trade's error into the EMA."""
         from datetime import datetime, timezone
@@ -61,6 +69,18 @@ class FeedbackEntry:
         else:
             self.bias_ema = _ALPHA * error + (1 - _ALPHA) * self.bias_ema
             self.abs_error_ema = _ALPHA * abs_error + (1 - _ALPHA) * self.abs_error_ema
+
+        # Online AR(1) coefficient
+        if self.last_error is not None:
+            self.cov_sum += error * self.last_error
+            self.var_sum += self.last_error * self.last_error
+            self.ar_count += 1
+            if self.var_sum > 1e-10:
+                raw_phi = self.cov_sum / self.var_sum
+                self.ar_phi = max(-0.8, min(0.8, raw_phi))
+            else:
+                self.ar_phi = 0.0
+        self.last_error = error
 
     def decay_factor(self) -> float:
         """Compute time-based decay factor (0.0 to 1.0).
@@ -98,11 +118,14 @@ class FeedbackState:
                       key, forecast_temp - actual_temp,
                       self.entries[key].bias_ema, self.entries[key].sample_count)
 
-    def get_bias(self, location: str, month: int) -> float | None:
+    def get_bias(self, location: str, month: int,
+                 use_autocorrelation: bool = True) -> float | None:
         """Get the bias correction for a location+season.
 
         Returns the bias EMA (scaled by time-decay) if enough samples exist
         and the data is not too stale, else None.
+        When *use_autocorrelation* is True and AR(1) data is sufficient,
+        adds a correction term based on serial error correlation.
         Positive bias means forecast tends to overpredict → subtract from forecast.
         """
         key = _season_key(location, month)
@@ -111,7 +134,15 @@ class FeedbackState:
             decay = entry.decay_factor()
             if decay < _DECAY_FLOOR:
                 return None  # Data too old — treat as no data
-            return entry.bias_ema * decay
+            base_bias = entry.bias_ema * decay
+            # AR(1) correction
+            if (use_autocorrelation
+                    and entry.last_error is not None
+                    and entry.ar_count >= _MIN_AR_SAMPLES
+                    and abs(entry.ar_phi) > 0.1):
+                ar_correction = entry.ar_phi * entry.last_error * decay
+                return base_bias + ar_correction
+            return base_bias
         return None
 
     def get_abs_error_ema(self, location: str, month: int) -> float | None:

@@ -119,6 +119,9 @@ class Config:
     correlation_threshold: float = 0.5    # Ignore correlations below this
     correlation_discount: float = 0.5     # How much to reduce sizing (0=ignore, 1=full)
 
+    # AR(1) autocorrelation correction in feedback bias
+    ar_autocorrelation: bool = True
+
     @property
     def active_locations(self) -> list[str]:
         """Return canonical location keys matching LOCATIONS dict keys.
