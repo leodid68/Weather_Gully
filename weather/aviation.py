@@ -28,7 +28,7 @@ STATION_MAP: dict[str, str] = {
     "Chicago": "KORD",       # O'Hare International
     "Seattle": "KSEA",       # Seattle-Tacoma International
     "Atlanta": "KATL",       # Hartsfield-Jackson
-    "Dallas": "KDFW",        # Dallas/Fort Worth International
+    "Dallas": "KDAL",        # Love Field (Polymarket resolution station)
     "Miami": "KMIA",         # Miami International
     # International cities
     "London": "EGLC",        # London City Airport

@@ -164,6 +164,22 @@ class TestParseWeatherEvent(unittest.TestCase):
         self.assertIsNotNone(result)
         self.assertEqual(result["location"], "Wellington")
 
+    def test_london_low_metric(self):
+        result = parse_weather_event("What will be the lowest temperature in London on March 15?")
+        self.assertIsNotNone(result)
+        self.assertEqual(result["location"], "London")
+        self.assertEqual(result["metric"], "low")
+
+    def test_buenosaires_no_space(self):
+        result = parse_weather_event("High temp in BuenosAires on Jul 4?")
+        self.assertIsNotNone(result)
+        self.assertEqual(result["location"], "BuenosAires")
+
+    def test_saopaulo_no_space(self):
+        result = parse_weather_event("High temp in SaoPaulo on Aug 10?")
+        self.assertIsNotNone(result)
+        self.assertEqual(result["location"], "SaoPaulo")
+
 
 class TestParseTemperatureBucket(unittest.TestCase):
     """Covers open/closed buckets, various formats, edge cases."""

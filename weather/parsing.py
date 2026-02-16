@@ -20,8 +20,8 @@ LOCATION_ALIASES = {
     "paris": "Paris", "cdg": "Paris",
     "seoul": "Seoul", "incheon": "Seoul",
     "toronto": "Toronto", "pearson": "Toronto",
-    "buenos aires": "BuenosAires", "ezeiza": "BuenosAires",
-    "sao paulo": "SaoPaulo", "são paulo": "SaoPaulo",
+    "buenos aires": "BuenosAires", "buenosaires": "BuenosAires", "ezeiza": "BuenosAires",
+    "sao paulo": "SaoPaulo", "saopaulo": "SaoPaulo", "são paulo": "SaoPaulo",
     "ankara": "Ankara", "esenboga": "Ankara",
     "wellington": "Wellington",
 }
