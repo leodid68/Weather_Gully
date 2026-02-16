@@ -212,6 +212,47 @@ class TestExecuteSell(unittest.TestCase):
         self.assertEqual(call_kwargs[1]["side"], "SELL")
         self.assertAlmostEqual(call_kwargs[1]["size"], 10.0)
 
+    def test_sell_no_side_uses_no_token(self):
+        """Selling with side='no' should use clob_token_ids[1]."""
+        gamma = MagicMock()
+        clob = MagicMock()
+        clob.post_order.return_value = {"orderID": "sell-no-789"}
+        clob.get_orderbook.return_value = {
+            "asks": [{"price": "0.60", "size": "100"}],
+            "bids": [{"price": "0.58", "size": "100"}],
+        }
+
+        bridge = CLOBWeatherBridge(clob_client=clob, gamma_client=gamma)
+        gm = _make_gamma_market(best_bid=0.58)
+        bridge._market_cache["cond-1"] = gm
+
+        result = bridge.execute_sell("cond-1", 10.0, side="no", fill_timeout=0)
+        self.assertTrue(result["success"])
+
+        call_kwargs = clob.post_order.call_args
+        # Should use the NO token (token-no-1)
+        self.assertEqual(call_kwargs[1]["token_id"], "token-no-1")
+        self.assertEqual(call_kwargs[1]["side"], "SELL")
+
+    def test_sell_yes_side_uses_yes_token(self):
+        """Selling with side='yes' (default) should use clob_token_ids[0]."""
+        gamma = MagicMock()
+        clob = MagicMock()
+        clob.post_order.return_value = {"orderID": "sell-yes-789"}
+        clob.get_orderbook.return_value = {
+            "bids": [{"price": "0.40", "size": "100"}],
+        }
+
+        bridge = CLOBWeatherBridge(clob_client=clob, gamma_client=gamma)
+        gm = _make_gamma_market(best_bid=0.40)
+        bridge._market_cache["cond-1"] = gm
+
+        result = bridge.execute_sell("cond-1", 10.0, side="yes", fill_timeout=0)
+        self.assertTrue(result["success"])
+
+        call_kwargs = clob.post_order.call_args
+        self.assertEqual(call_kwargs[1]["token_id"], "token-yes-1")
+
     def test_unknown_market(self):
         bridge = CLOBWeatherBridge(
             clob_client=MagicMock(),

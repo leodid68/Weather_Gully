@@ -287,14 +287,17 @@ def check_exit_opportunities(
     exits_found = 0
     exits_executed = 0
 
-    # Pre-fetch all orderbooks in parallel
+    # Pre-fetch all orderbooks in parallel (use correct token for YES/NO side)
     orderbook_targets: list[tuple[str, str]] = []  # (market_id, token_id)
     for market_id, trade in state.trades.items():
         if trade.shares < MIN_SHARES_PER_ORDER:
             continue
         gm = client._market_cache.get(market_id)
         if gm and gm.clob_token_ids:
-            orderbook_targets.append((market_id, gm.clob_token_ids[0]))
+            if trade.side == "no" and len(gm.clob_token_ids) > 1:
+                orderbook_targets.append((market_id, gm.clob_token_ids[1]))
+            else:
+                orderbook_targets.append((market_id, gm.clob_token_ids[0]))
 
     orderbooks: dict[str, dict] = {}  # market_id → orderbook
     if orderbook_targets:
@@ -374,11 +377,11 @@ def check_exit_opportunities(
                 logger.info("[DRY RUN] Would sell %.1f shares of %s", shares, outcome_name)
             else:
                 logger.info("Selling %.1f shares of %s...", shares, outcome_name)
-                result = client.execute_sell(market_id, shares)
+                result = client.execute_sell(market_id, shares, side=trade.side)
 
                 if result.get("success"):
                     exits_executed += 1
-                    logger.info("Sold %.1f shares @ $%.2f", shares, current_price)
+                    logger.info("Sold %.1f %s shares @ $%.2f", shares, trade.side.upper(), current_price)
                     state.remove_trade(market_id)
                     for eid, mid in list(state.event_positions.items()):
                         if mid == market_id:
@@ -519,12 +522,21 @@ def _check_stop_loss_reversals(
 
         # How far has the forecast moved from our original entry forecast?
         shift = abs(current_temp - trade.forecast_temp)
+        in_bucket = bucket[0] <= current_temp <= bucket[1]
 
-        # Check if current forecast is now outside our bucket AND shifted significantly
-        if shift >= config.stop_loss_reversal_threshold and not (bucket[0] <= current_temp <= bucket[1]):
+        # YES position: stop-loss if forecast moved OUTSIDE our bucket (we lose)
+        # NO position: stop-loss if forecast moved INTO our bucket (we lose)
+        if trade.side == "no":
+            should_stop = shift >= config.stop_loss_reversal_threshold and in_bucket
+        else:
+            should_stop = shift >= config.stop_loss_reversal_threshold and not in_bucket
+
+        if should_stop:
             logger.warning(
-                "STOP-LOSS: %s forecast shifted %.1f°F (was %.0f°F, now %.0f°F) — bucket %s no longer viable",
-                trade.location, shift, trade.forecast_temp, current_temp, trade.outcome_name,
+                "STOP-LOSS: %s (%s) forecast shifted %.1f°F (was %.0f°F, now %.0f°F) — bucket %s %s",
+                trade.location, trade.side.upper(), shift, trade.forecast_temp, current_temp,
+                trade.outcome_name,
+                "now in bucket (bad for NO)" if trade.side == "no" else "no longer viable",
             )
 
             # Attempt to sell — use state-based lookup (bridge returns None)
@@ -540,7 +552,7 @@ def _check_stop_loss_reversals(
                 logger.info("[DRY RUN] Would stop-loss sell %.1f shares of %s", fresh_shares, fresh_trade.outcome_name)
             else:
                 logger.info("Stop-loss selling %.1f shares of %s...", fresh_shares, fresh_trade.outcome_name)
-                result = client.execute_sell(market_id, fresh_shares)
+                result = client.execute_sell(market_id, fresh_shares, side=fresh_trade.side)
                 if result.get("success"):
                     exits += 1
                     state.remove_trade(market_id)
@@ -606,14 +618,17 @@ def _emergency_exit_losers(
     if not state.trades:
         return 0
 
-    # Pre-fetch orderbooks in parallel (same pattern as check_exit_opportunities)
+    # Pre-fetch orderbooks in parallel (use correct token for YES/NO side)
     orderbook_targets: list[tuple[str, str]] = []
     for market_id, trade in state.trades.items():
         if trade.shares < MIN_SHARES_PER_ORDER:
             continue
         gm = client._market_cache.get(market_id)
         if gm and gm.clob_token_ids:
-            orderbook_targets.append((market_id, gm.clob_token_ids[0]))
+            if trade.side == "no" and len(gm.clob_token_ids) > 1:
+                orderbook_targets.append((market_id, gm.clob_token_ids[1]))
+            else:
+                orderbook_targets.append((market_id, gm.clob_token_ids[0]))
 
     if not orderbook_targets:
         return 0
@@ -655,7 +670,7 @@ def _emergency_exit_losers(
         if dry_run:
             logger.info("[DRY RUN] Would emergency sell %.1f shares of %s", trade.shares, outcome_name)
         else:
-            result = client.execute_sell(market_id, trade.shares)
+            result = client.execute_sell(market_id, trade.shares, side=trade.side)
             if result.get("success"):
                 exits += 1
                 state.remove_trade(market_id)
@@ -663,7 +678,7 @@ def _emergency_exit_losers(
                     if mid == market_id:
                         state.remove_event_position(eid)
                         break
-                logger.info("[EMERGENCY EXIT] Sold %.1f shares of %s", trade.shares, outcome_name)
+                logger.info("[EMERGENCY EXIT] Sold %.1f %s shares of %s", trade.shares, trade.side.upper(), outcome_name)
             else:
                 logger.error("[EMERGENCY EXIT] Sell failed for %s: %s", outcome_name, result.get("error", "Unknown"))
 
@@ -689,6 +704,8 @@ def run_weather_strategy(
     feedback = FeedbackState.load()
     from .kalman import KalmanState
     kalman = KalmanState.load() if config.kalman_sigma else None
+    if kalman is not None:
+        kalman.prewarm()  # Seed missing entries with calibrated priors
     price_tracker = PriceTracker.load() if config.mean_reversion else None
 
     explain_stats = {
@@ -1113,9 +1130,11 @@ def run_weather_strategy(
             ev = entry["ev"]
 
             # Record price snapshot for mean-reversion tracking
+            # Always track the YES token price for consistency (NO price = 1 - YES price)
             if price_tracker and entry.get("bucket"):
                 bucket_mr = (entry["bucket"][0], entry["bucket"][1])
-                price_tracker.record_price(location, date_str, metric, bucket_mr, price)
+                yes_price = price if entry.get("side", "yes") == "yes" else (1.0 - price)
+                price_tracker.record_price(location, date_str, metric, bucket_mr, yes_price)
 
             logger.info(
                 "Bucket: %s @ $%.2f — prob=%.1f%% EV=%.3f",
@@ -1166,10 +1185,11 @@ def run_weather_strategy(
             if explain and position_size != base_position_size:
                 logger.info("  [EXPLAIN] Correlation discount: $%.2f → $%.2f", base_position_size, position_size)
 
-            # Mean-reversion sizing modifier
+            # Mean-reversion sizing modifier (always use YES price for consistency)
             if price_tracker and config.mean_reversion and entry.get("bucket"):
                 bucket_mr = (entry["bucket"][0], entry["bucket"][1])
-                mr_mult = price_tracker.sizing_multiplier(location, date_str, metric, bucket_mr, price)
+                mr_yes_price = price if entry.get("side", "yes") == "yes" else (1.0 - price)
+                mr_mult = price_tracker.sizing_multiplier(location, date_str, metric, bucket_mr, mr_yes_price)
                 if mr_mult != 1.0:
                     position_size = round(position_size * mr_mult, 2)
                     logger.info("Mean-reversion: z-mult=%.2f -> $%.2f", mr_mult, position_size)
@@ -1185,6 +1205,11 @@ def run_weather_strategy(
                     "Position size $%.2f too small for %d shares at $%.2f",
                     position_size, MIN_SHARES_PER_ORDER, price,
                 )
+                continue
+
+            # Guard: never hold two positions on the same market
+            if market_id in state.trades:
+                logger.info("Already hold position in market %s — skip", market_id)
                 continue
 
             opportunities_found += 1

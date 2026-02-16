@@ -261,6 +261,91 @@ class TestSaveLoadRoundtrip:
 
 
 # ---------------------------------------------------------------------------
+# Pre-warming
+# ---------------------------------------------------------------------------
+
+class TestPrewarm:
+
+    def test_prewarm_creates_all_entries(self):
+        """Should create 6 locations × 4 buckets = 24 entries."""
+        ks = KalmanState()
+        count = ks.prewarm()
+        assert count == 24
+        assert len(ks.entries) == 24
+
+    def test_prewarm_entries_are_warmed_up(self):
+        """Pre-warmed entries should have sample_count=10, past threshold."""
+        ks = KalmanState()
+        ks.prewarm()
+        for entry in ks.entries.values():
+            assert entry.sample_count == 10
+            assert entry.is_warmed_up
+
+    def test_prewarm_sigma_values(self):
+        """NYC short should be ~2.15 * 1.165 ≈ 2.50."""
+        ks = KalmanState()
+        ks.prewarm()
+        nyc_short = ks.entries.get("NYC|short")
+        assert nyc_short is not None
+        assert nyc_short.x == pytest.approx(2.15 * (1.0 + 1.33) / 2, abs=0.01)
+
+    def test_prewarm_extended_sigma(self):
+        """Seattle extended should be ~1.73 * 5.333 ≈ 9.23."""
+        ks = KalmanState()
+        ks.prewarm()
+        sea_ext = ks.entries.get("Seattle|extended")
+        assert sea_ext is not None
+        assert sea_ext.x == pytest.approx(1.73 * (4.67 + 5.33 + 6.0) / 3, abs=0.01)
+
+    def test_prewarm_reduced_uncertainty(self):
+        """P should be 1.0, not default 4.0."""
+        ks = KalmanState()
+        ks.prewarm()
+        for entry in ks.entries.values():
+            assert entry.P == 1.0
+
+    def test_prewarm_does_not_overwrite_existing(self):
+        """Existing trained entries should not be replaced by default."""
+        ks = KalmanState()
+        # Manually insert an entry with different values
+        ks.entries["NYC|short"] = KalmanSigmaEntry(
+            x=5.0, P=0.5, sample_count=50, last_updated="trained",
+        )
+        count = ks.prewarm()
+        assert count == 23  # 24 - 1 existing
+        assert ks.entries["NYC|short"].x == 5.0  # Not overwritten
+        assert ks.entries["NYC|short"].sample_count == 50
+
+    def test_prewarm_overwrite_flag(self):
+        """With overwrite=True, even existing entries are replaced."""
+        ks = KalmanState()
+        ks.entries["NYC|short"] = KalmanSigmaEntry(
+            x=5.0, P=0.5, sample_count=50,
+        )
+        count = ks.prewarm(overwrite=True)
+        assert count == 24
+        assert ks.entries["NYC|short"].x != 5.0  # Was overwritten
+
+    def test_prewarm_blend_weight_positive(self):
+        """Pre-warmed entries (10 samples) should have blend weight > 0."""
+        ks = KalmanState()
+        ks.prewarm()
+        # 10 samples → weight = 0.5 * (10-5)/25 = 0.1
+        w = ks.get_blend_weight("NYC", 3)  # medium bucket
+        assert w == pytest.approx(0.1)
+
+    def test_prewarm_get_sigma_works(self):
+        """After prewarm, get_sigma should return values."""
+        ks = KalmanState()
+        ks.prewarm()
+        for loc in ["NYC", "Chicago", "Miami", "Seattle", "Atlanta", "Dallas"]:
+            for h in [0, 3, 6, 9]:
+                sigma = ks.get_sigma(loc, h)
+                assert sigma is not None
+                assert sigma > 0
+
+
+# ---------------------------------------------------------------------------
 # Integration: compute_adaptive_sigma with Kalman blending
 # ---------------------------------------------------------------------------
 

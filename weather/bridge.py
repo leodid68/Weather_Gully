@@ -376,6 +376,7 @@ class CLOBWeatherBridge:
         self,
         market_id: str,
         shares: float,
+        side: str = "yes",
         fill_timeout: float = 30.0,
         fill_poll_interval: float = 2.0,
     ) -> dict:
@@ -387,6 +388,7 @@ class CLOBWeatherBridge:
         Args:
             market_id: condition_id of the market.
             shares: Number of shares to sell.
+            side: "yes" or "no" — which token to sell (must match the buy side).
             fill_timeout: Seconds to wait for fill verification (default 30s).
             fill_poll_interval: Seconds between fill status polls.
 
@@ -400,7 +402,13 @@ class CLOBWeatherBridge:
         if not gm.clob_token_ids:
             return {"error": "No token ID", "success": False}
 
-        token_id = gm.clob_token_ids[0]  # YES token
+        # Sell the same token we bought
+        if side.lower() == "no":
+            if len(gm.clob_token_ids) < 2:
+                return {"error": "No NO token ID", "success": False}
+            token_id = gm.clob_token_ids[1]
+        else:
+            token_id = gm.clob_token_ids[0]
 
         # Re-fetch fresh price from orderbook
         try:
