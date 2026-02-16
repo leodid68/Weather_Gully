@@ -25,6 +25,7 @@ from .bridge import CLOBWeatherBridge
 from .feedback import FeedbackState
 from .sigma_log import log_sigma_signals
 from .sizing import compute_exit_threshold, compute_position_size
+from .trade_log import log_trade
 from .state import PredictionRecord, TradingState
 
 logger = logging.getLogger(__name__)
@@ -185,6 +186,7 @@ def score_buckets(
                 sigma_override=sigma_override,
             )
 
+        prob_raw = prob
         prob = platt_calibrate(prob)
         # EV adjusted for trading fees (Polymarket ~2%)
         ev = prob * (1.0 - config.trading_fees) - price
@@ -198,6 +200,7 @@ def score_buckets(
             "bucket": bucket,
             "outcome_name": outcome_name,
             "prob": prob,
+            "prob_raw": prob_raw,
             "price": price,
             "ev": ev,
         })
@@ -806,6 +809,7 @@ def run_weather_strategy(
                                 "bucket": bucket,
                                 "outcome_name": outcome_name,
                                 "prob": prob,
+                                "prob_raw": prob,
                                 "price": price,
                                 "ev": prob * (1.0 - config.trading_fees) - price,
                             })
@@ -910,8 +914,26 @@ def run_weather_strategy(
                     if config.correlation_guard:
                         state.record_event_position(event_id, market_id)
 
-                    # Calibration: record prediction
+                    # Trade log: record for model improvement
                     bucket = entry["bucket"]
+                    try:
+                        log_trade(
+                            location=location,
+                            date=date_str,
+                            metric=metric,
+                            bucket=tuple(bucket),
+                            prob_raw=entry.get("prob_raw", prob),
+                            prob_platt=prob,
+                            market_price=price,
+                            position_usd=position_size,
+                            shares=shares,
+                            forecast_temp=forecast_temp,
+                            horizon=get_horizon_days(date_str),
+                        )
+                    except Exception:
+                        logger.debug("Failed to write trade log", exc_info=True)
+
+                    # Calibration: record prediction
                     state.record_prediction(PredictionRecord(
                         market_id=market_id,
                         event_id=event_id,
