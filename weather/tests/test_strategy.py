@@ -16,6 +16,7 @@ from weather.strategy import (
     check_exit_opportunities,
     run_weather_strategy,
     score_buckets,
+    should_exit_on_edge_inversion,
 )
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -528,6 +529,42 @@ class TestCircuitBreaker(unittest.TestCase):
         config = Config()
         blocked, reason = check_circuit_breaker(state, config)
         self.assertFalse(blocked)
+
+
+class TestEdgeInversionExit(unittest.TestCase):
+
+    def test_sell_yes_when_model_disagrees(self):
+        """If we hold YES at $0.10 and current prob=0.05 while market=0.15, should exit."""
+        self.assertTrue(should_exit_on_edge_inversion(
+            our_prob=0.05, market_price=0.15, cost_basis=0.10, side="yes",
+        ))
+
+    def test_keep_yes_when_edge_holds(self):
+        """If we hold YES at $0.08 and prob=0.30, market=0.10, keep holding."""
+        self.assertFalse(should_exit_on_edge_inversion(
+            our_prob=0.30, market_price=0.10, cost_basis=0.08, side="yes",
+        ))
+
+    def test_sell_no_when_model_flips(self):
+        """If we hold NO and model now favors YES, should exit."""
+        # Bought NO at 0.20 (market YES was 0.80). Now market YES is 0.75, our prob now 0.80
+        self.assertTrue(should_exit_on_edge_inversion(
+            our_prob=0.80, market_price=0.75, cost_basis=0.20, side="no",
+        ))
+
+    def test_keep_no_when_edge_holds(self):
+        """If we hold NO and model still disagrees with YES, keep holding."""
+        # Bought NO at 0.20 (market YES 0.80). Market still 0.80, our prob still 0.10
+        self.assertFalse(should_exit_on_edge_inversion(
+            our_prob=0.10, market_price=0.80, cost_basis=0.20, side="no",
+        ))
+
+    def test_no_exit_if_would_lose_too_much(self):
+        """Even if edge inverted, don't exit at a big loss."""
+        # Edge inverted but market price (0.06) is well below cost basis (0.10) - loss too big
+        self.assertFalse(should_exit_on_edge_inversion(
+            our_prob=0.05, market_price=0.06, cost_basis=0.10, side="yes",
+        ))
 
 
 if __name__ == "__main__":

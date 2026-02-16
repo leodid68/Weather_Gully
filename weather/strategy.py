@@ -372,6 +372,31 @@ def check_exit_opportunities(
 
 
 # --------------------------------------------------------------------------
+# Edge inversion exit
+# --------------------------------------------------------------------------
+
+def should_exit_on_edge_inversion(
+    our_prob: float,
+    market_price: float,
+    cost_basis: float,
+    side: str = "yes",
+    min_loss_to_trigger: float = 0.02,
+) -> bool:
+    """Check if the edge has inverted, suggesting we should exit.
+
+    For YES positions: exit if market values it higher than our model AND we can sell near cost.
+    For NO positions: exit if model now favors YES side AND we can sell near cost.
+    """
+    if side == "yes":
+        # We bought YES. Exit if market price > our probability AND we can sell without big loss
+        return market_price > our_prob and market_price >= cost_basis - min_loss_to_trigger
+    else:
+        # We bought NO at (1-market_price). Exit if our model now favors the YES side
+        no_market_price = 1.0 - market_price  # current NO price
+        return our_prob > (1 - market_price) and no_market_price >= cost_basis - min_loss_to_trigger
+
+
+# --------------------------------------------------------------------------
 # Stop-loss on forecast reversal
 # --------------------------------------------------------------------------
 
