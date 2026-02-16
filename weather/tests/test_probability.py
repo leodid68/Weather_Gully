@@ -147,6 +147,30 @@ class TestEstimateBucketProbability(unittest.TestCase):
         p_far = estimate_bucket_probability(52, 50, 54, far, apply_seasonal=False)
         self.assertGreater(p_near, p_far)
 
+    def test_horizon_override_uses_fixed_horizon(self):
+        """horizon_override bypasses date-based horizon computation."""
+        # Use a date far in the past — without override, horizon would be 0
+        past_date = "2020-01-01"
+        p_h0 = estimate_bucket_probability(
+            52, 50, 54, past_date, apply_seasonal=False, horizon_override=0,
+        )
+        p_h7 = estimate_bucket_probability(
+            52, 50, 54, past_date, apply_seasonal=False, horizon_override=7,
+        )
+        # Horizon 7 → wider sigma → lower center bucket probability
+        self.assertGreater(p_h0, p_h7)
+
+    def test_horizon_override_none_uses_date(self):
+        """horizon_override=None falls back to date-based computation."""
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        p_default = estimate_bucket_probability(
+            52, 50, 54, today, apply_seasonal=False,
+        )
+        p_explicit_none = estimate_bucket_probability(
+            52, 50, 54, today, apply_seasonal=False, horizon_override=None,
+        )
+        self.assertAlmostEqual(p_default, p_explicit_none, places=6)
+
 
 class TestCalibrationFallback(unittest.TestCase):
     """When no calibration.json exists, hardcoded defaults should be used."""

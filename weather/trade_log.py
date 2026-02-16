@@ -4,6 +4,7 @@ Records (prob_raw, prob_platt, market_price, outcome) per trade,
 enabling future Platt re-fitting, threshold tuning, and Kelly calibration.
 """
 
+import fcntl
 import json
 import logging
 import os
@@ -54,9 +55,10 @@ def log_trade(
         "outcome": None,  # filled by resolve_trades
         "pnl": None,
     }
-    entries = load_trade_log(str(log_path))
-    entries.append(entry)
-    _write(entries, log_path)
+    with _locked(log_path):
+        entries = load_trade_log(str(log_path))
+        entries.append(entry)
+        _write(entries, log_path)
 
 
 def resolve_trades(
@@ -73,28 +75,34 @@ def resolve_trades(
         Number of trades resolved.
     """
     log_path = Path(path) if path else _DEFAULT_PATH
-    entries = load_trade_log(str(log_path))
-    resolved = 0
-    for entry in entries:
-        if entry.get("outcome") is not None:
-            continue
-        date = entry.get("date", "")
-        metric = entry.get("metric", "")
-        if date not in actuals or metric not in actuals[date]:
-            continue
-        actual = actuals[date][metric]
-        lo, hi = entry["bucket"]
-        won = lo <= actual <= hi
-        entry["outcome"] = 1 if won else 0
-        entry["actual_temp"] = actual
-        price = entry["market_price"]
-        entry["pnl"] = round((1.0 - price) if won else -price, 4)
-        entry["edge_realized"] = round(entry["outcome"] - price, 4)
-        resolved += 1
+    with _locked(log_path):
+        entries = load_trade_log(str(log_path))
+        resolved = 0
+        for entry in entries:
+            if entry.get("outcome") is not None:
+                continue
+            date = entry.get("date", "")
+            metric = entry.get("metric", "")
+            if date not in actuals or metric not in actuals[date]:
+                continue
+            actual = actuals[date][metric]
+            lo, hi = entry["bucket"]
+            if lo <= -900:
+                won = actual <= hi
+            elif hi >= 900:
+                won = actual >= lo
+            else:
+                won = lo <= actual <= hi
+            entry["outcome"] = 1 if won else 0
+            entry["actual_temp"] = actual
+            price = entry["market_price"]
+            entry["pnl"] = round((1.0 - price) if won else -price, 4)
+            entry["edge_realized"] = round(entry["outcome"] - price, 4)
+            resolved += 1
 
-    if resolved:
-        _write(entries, log_path)
-        logger.info("Resolved %d trades in trade log", resolved)
+        if resolved:
+            _write(entries, log_path)
+            logger.info("Resolved %d trades in trade log", resolved)
     return resolved
 
 
@@ -108,6 +116,23 @@ def load_trade_log(path: str | None = None) -> list[dict]:
             return json.load(f)
     except (json.JSONDecodeError, IOError):
         return []
+
+
+class _locked:
+    """File lock context manager for trade log read-modify-write."""
+
+    def __init__(self, log_path: Path) -> None:
+        self._lock_path = str(log_path) + ".lock"
+        self._fd: int | None = None
+
+    def __enter__(self) -> None:
+        self._fd = os.open(self._lock_path, os.O_CREAT | os.O_RDWR)
+        fcntl.flock(self._fd, fcntl.LOCK_EX)
+
+    def __exit__(self, *_: object) -> None:
+        if self._fd is not None:
+            fcntl.flock(self._fd, fcntl.LOCK_UN)
+            os.close(self._fd)
 
 
 def _write(entries: list[dict], log_path: Path) -> None:

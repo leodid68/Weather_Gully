@@ -103,5 +103,65 @@ class TestResolveTrades(unittest.TestCase):
             self.assertEqual(resolved, 0)
 
 
+class TestOpenEndedBuckets(unittest.TestCase):
+    """Ensure open-ended buckets resolve correctly."""
+
+    def test_lower_open_ended_bucket_win(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = os.path.join(tmpdir, "log.json")
+            log_trade(
+                location="NYC", date="2026-02-15", metric="high",
+                bucket=(-999, 54), prob_raw=0.10, prob_platt=0.12,
+                market_price=0.05, position_usd=1.0, shares=20.0,
+                forecast_temp=50.0, path=path,
+            )
+            actuals = {"2026-02-15": {"high": 52.0}}
+            resolve_trades(actuals, path=path)
+            entries = load_trade_log(path)
+            self.assertEqual(entries[0]["outcome"], 1)  # 52 <= 54
+
+    def test_lower_open_ended_bucket_lose(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = os.path.join(tmpdir, "log.json")
+            log_trade(
+                location="NYC", date="2026-02-15", metric="high",
+                bucket=(-999, 54), prob_raw=0.10, prob_platt=0.12,
+                market_price=0.05, position_usd=1.0, shares=20.0,
+                forecast_temp=50.0, path=path,
+            )
+            actuals = {"2026-02-15": {"high": 60.0}}
+            resolve_trades(actuals, path=path)
+            entries = load_trade_log(path)
+            self.assertEqual(entries[0]["outcome"], 0)  # 60 > 54
+
+    def test_upper_open_ended_bucket_win(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = os.path.join(tmpdir, "log.json")
+            log_trade(
+                location="NYC", date="2026-02-15", metric="high",
+                bucket=(55, 999), prob_raw=0.10, prob_platt=0.12,
+                market_price=0.05, position_usd=1.0, shares=20.0,
+                forecast_temp=58.0, path=path,
+            )
+            actuals = {"2026-02-15": {"high": 60.0}}
+            resolve_trades(actuals, path=path)
+            entries = load_trade_log(path)
+            self.assertEqual(entries[0]["outcome"], 1)  # 60 >= 55
+
+    def test_upper_open_ended_bucket_lose(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = os.path.join(tmpdir, "log.json")
+            log_trade(
+                location="NYC", date="2026-02-15", metric="high",
+                bucket=(55, 999), prob_raw=0.10, prob_platt=0.12,
+                market_price=0.05, position_usd=1.0, shares=20.0,
+                forecast_temp=58.0, path=path,
+            )
+            actuals = {"2026-02-15": {"high": 50.0}}
+            resolve_trades(actuals, path=path)
+            entries = load_trade_log(path)
+            self.assertEqual(entries[0]["outcome"], 0)  # 50 < 55
+
+
 if __name__ == "__main__":
     unittest.main()

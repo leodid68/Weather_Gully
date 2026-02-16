@@ -795,7 +795,7 @@ def run_weather_strategy(
                     best_ask = market.get("best_ask")
                     price = best_ask if best_ask and best_ask > 0 else (market.get("external_price_yes") or 0.5)
                     if MIN_TICK_SIZE <= price <= (1 - MIN_TICK_SIZE):
-                        prob = estimate_bucket_probability(
+                        prob_raw = estimate_bucket_probability(
                             forecast_temp, bucket[0], bucket[1], date_str,
                             apply_seasonal=config.seasonal_adjustments,
                             location=location,
@@ -803,13 +803,14 @@ def run_weather_strategy(
                             metric=metric,
                             sigma_override=adaptive_sigma_value,
                         )
+                        prob = platt_calibrate(prob_raw)
                         if prob >= config.min_probability:
                             tradeable.append({
                                 "market": market,
                                 "bucket": bucket,
                                 "outcome_name": outcome_name,
                                 "prob": prob,
-                                "prob_raw": prob,
+                                "prob_raw": prob_raw,
                                 "price": price,
                                 "ev": prob * (1.0 - config.trading_fees) - price,
                             })
@@ -928,6 +929,7 @@ def run_weather_strategy(
                             position_usd=position_size,
                             shares=shares,
                             forecast_temp=forecast_temp,
+                            sigma=adaptive_sigma_value,
                             horizon=get_horizon_days(date_str),
                         )
                     except Exception:
