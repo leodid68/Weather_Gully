@@ -186,7 +186,7 @@
     "kurtosis": 4.434
   },
   "metadata": {
-    "generated": "2026-02-16T11:06:35.823210+00:00",
+    "generated": "2026-02-16T11:23:57.643866+00:00",
     "samples": 2112,
     "samples_effective": 852.1,
     "weighting": "exponential half-life 30.0d",
