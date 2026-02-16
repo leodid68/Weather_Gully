@@ -112,10 +112,20 @@ class TestPlattClamping(unittest.TestCase):
     def test_platt_b_clamped(self):
         cal = _make_calibration(**{"platt_scaling.b": -2.0})
         clamped, clamped_list = clamp_calibration(cal)
-        self.assertEqual(clamped["platt_scaling"]["b"], -1.0)
+        self.assertEqual(clamped["platt_scaling"]["b"], -0.5)
         entry = [e for e in clamped_list if e["param"] == "platt_b"][0]
         self.assertEqual(entry["original"], -2.0)
-        self.assertEqual(entry["clamped"], -1.0)
+        self.assertEqual(entry["clamped"], -0.5)
+
+    def test_platt_b_positive_clamped(self):
+        cal = _make_calibration(**{"platt_scaling.b": 0.7})
+        clamped, clamped_list = clamp_calibration(cal)
+        self.assertEqual(clamped["platt_scaling"]["b"], 0.5)
+
+    def test_platt_b_within_bounds_unchanged(self):
+        cal = _make_calibration(**{"platt_scaling.b": 0.3})
+        clamped, clamped_list = clamp_calibration(cal)
+        self.assertEqual(clamped["platt_scaling"]["b"], 0.3)
 
 
 class TestSeasonalFactorClamping(unittest.TestCase):

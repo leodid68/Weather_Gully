@@ -11,7 +11,7 @@ PARAM_BOUNDS = {
     "seasonal_factor": (0.5, 2.0),
     "model_weight": (0.0, 0.85),
     "platt_a": (0.3, 2.0),
-    "platt_b": (-1.0, 1.0),
+    "platt_b": (-0.5, 0.5),
     "spread_to_sigma": (0.3, 1.5),
     "ema_to_sigma": (0.5, 2.0),
 }

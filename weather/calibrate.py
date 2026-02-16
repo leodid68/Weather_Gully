@@ -380,15 +380,39 @@ def compute_model_weights(
     return results
 
 
+def _iqr_bounds(vals: list[float], factor: float = 1.5) -> tuple[float, float]:
+    """Compute IQR outlier bounds: (lo, hi).
+
+    Returns ``(-inf, inf)`` if fewer than 4 values (no filtering).
+    """
+    if len(vals) < 4:
+        return (float("-inf"), float("inf"))
+    s = sorted(vals)
+    n = len(s)
+    q1 = s[n // 4]
+    q3 = s[3 * n // 4]
+    iqr = q3 - q1
+    return (q1 - factor * iqr, q3 + factor * iqr)
+
+
+def _iqr_filter(vals: list[float], factor: float = 1.5) -> list[float]:
+    """Remove outliers beyond factor * IQR from Q1/Q3.
+
+    Returns the filtered list.  If fewer than 4 values, returns *vals* as-is.
+    """
+    lo, hi = _iqr_bounds(vals, factor)
+    return [v for v in vals if lo <= v <= hi]
+
+
 def _compute_base_sigma(errors: list[dict]) -> float:
-    """Compute base sigma (stddev of all errors, deduplicated)."""
-    vals = [e["error"] for e in errors]
+    """Compute base sigma (stddev of all errors, IQR-filtered)."""
+    vals = _iqr_filter([e["error"] for e in errors])
     if len(vals) < 3:
         return 1.5  # Fallback
     n = len(vals)
     mean = sum(vals) / n
     variance = sum((v - mean) ** 2 for v in vals) / (n - 1)  # Bessel's correction
-    return math.sqrt(variance)
+    return max(0.1, math.sqrt(variance))  # Floor to prevent zero sigma
 
 
 def _expand_sigma_by_horizon(base_sigma: float) -> dict[str, float]:
@@ -424,11 +448,12 @@ def _compute_sigma_by_horizon(errors: list[dict], max_horizon: int = 10) -> dict
         if h is not None:
             by_horizon[h].append(e["error"])
 
-    # Compute RMSE for horizons with >= 20 samples
+    # Compute RMSE for horizons with >= 20 samples (IQR-filtered)
     known: dict[int, float] = {}
     for h, errs in sorted(by_horizon.items()):
-        if len(errs) >= 20:
-            rmse = math.sqrt(sum(e ** 2 for e in errs) / len(errs))
+        filtered = _iqr_filter(errs)
+        if len(filtered) >= 20:
+            rmse = math.sqrt(sum(e ** 2 for e in filtered) / len(filtered))
             known[h] = rmse
 
     if not known:
@@ -816,9 +841,12 @@ def _compute_platt_params(predictions: list[float], actuals: list[float]) -> dic
 
 
 def _fit_platt_from_errors(errors: list[dict]) -> dict:
-    """Fit Platt params by simulating bucket probabilities vs actual outcomes.
-    Groups errors into probability bins and computes actual hit rates,
-    then fits Platt scaling on the resulting calibration curve.
+    """DEPRECATED — kept for reference only.
+
+    Platt scaling is disabled because applying sigmoid transform independently
+    to mutually-exclusive bucket probabilities breaks coherence (sum >> 1.0).
+    Both ``build_calibration_tables`` and ``build_weighted_calibration_tables``
+    now force identity ``{a: 1.0, b: 0.0}``.
     """
     if not errors:
         return {"a": 1.0, "b": 0.0}
@@ -943,8 +971,13 @@ def build_calibration_tables(
     # Adaptive sigma factors
     adaptive_factors = _compute_adaptive_factors(all_errors)
 
-    # Platt scaling
-    platt_params = _fit_platt_from_errors(all_errors)
+    # Platt scaling: forced to identity — applying Platt independently to
+    # mutually-exclusive bucket probabilities breaks coherence (sum >> 1.0).
+    platt_params = {
+        "a": 1.0,
+        "b": 0.0,
+        "_note": "Platt disabled: sigmoid transform on mutually-exclusive buckets breaks probability coherence.",
+    }
 
     # Test normality and fit distribution
     all_error_values = [e["error"] for e in all_errors]
@@ -1028,15 +1061,19 @@ def compute_exponential_weights(
 
 
 def _weighted_base_sigma(errors: list[dict], weights: dict[str, float]) -> float:
-    """Compute base sigma using exponentially-weighted errors.
+    """Compute base sigma using exponentially-weighted errors (IQR-filtered).
 
     Formula: sqrt(sum(w * error^2) / sum(w))
 
     Falls back to 1.5 if sum of weights is near zero.
     """
+    lo, hi = _iqr_bounds([e["error"] for e in errors])
+
     sum_w = 0.0
     sum_w_err_sq = 0.0
     for e in errors:
+        if not (lo <= e["error"] <= hi):
+            continue
         w = weights.get(e["target_date"], 0.0)
         sum_w += w
         sum_w_err_sq += w * e["error"] ** 2
@@ -1229,9 +1266,14 @@ def build_weighted_calibration_tables(
     # Weighted model weights
     model_weights = _weighted_model_weights(all_errors, weights, group_by="location")
 
-    # Reuse existing unweighted functions for adaptive and Platt
+    # Reuse existing unweighted function for adaptive sigma
     adaptive_factors = _compute_adaptive_factors(all_errors)
-    platt_params = _fit_platt_from_errors(all_errors)
+    # Platt scaling: forced to identity (see build_calibration_tables)
+    platt_params = {
+        "a": 1.0,
+        "b": 0.0,
+        "_note": "Platt disabled: sigmoid transform on mutually-exclusive buckets breaks probability coherence.",
+    }
 
     # Test normality and fit distribution
     all_error_values = [e["error"] for e in all_errors]
@@ -1374,6 +1416,14 @@ def main() -> None:
         sys.exit(1)
 
     calibration = build_calibration_tables(all_errors, loc_keys)
+
+    # Apply guard rails to clamp any out-of-bounds parameters
+    from .guard_rails import clamp_calibration
+    calibration, clamped_list = clamp_calibration(calibration)
+    if clamped_list:
+        for entry in clamped_list:
+            logger.warning("Guard rail: %s clamped %.4f → %.4f",
+                           entry["param"], entry["original"], entry["clamped"])
 
     with open(args.output, "w") as f:
         json.dump(calibration, f, indent=2)

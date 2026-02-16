@@ -138,10 +138,10 @@ class KalmanState:
         "extended": (4.67 + 5.33 + 6.00) / 3, # horizons 8-10 → 5.333
     }
 
-    # Calibrated base sigma per location (2025 full year, 6 locations)
+    # Calibrated base sigma per location (90-day rolling, IQR-filtered)
     _CALIBRATED_SIGMA = {
-        "NYC": 2.15, "Chicago": 1.83, "Miami": 1.94,
-        "Seattle": 1.73, "Atlanta": 1.89, "Dallas": 1.99,
+        "NYC": 2.38, "Chicago": 1.56, "Miami": 1.50,
+        "Seattle": 1.04, "Atlanta": 1.53, "Dallas": 1.57,
     }
 
     def prewarm(self, overwrite: bool = False) -> int:

@@ -13,6 +13,8 @@ from weather.calibrate import (
     _expand_sigma_by_horizon,
     _fit_student_t_df,
     _HORIZON_GROWTH,
+    _iqr_bounds,
+    _iqr_filter,
     _test_normality,
     build_calibration_tables,
     compute_empirical_sigma,
@@ -749,6 +751,140 @@ class TestStudentTFitting(unittest.TestCase):
             errors.append(z / (chi2**0.5) * 2)
         df = _fit_student_t_df(errors)
         self.assertLessEqual(df, 10)  # Should prefer low df
+
+
+class TestIQRFilter(unittest.TestCase):
+
+    def test_removes_outliers(self):
+        vals = [1.0, 2.0, 3.0, 4.0, 5.0, 100.0]
+        filtered = _iqr_filter(vals)
+        self.assertNotIn(100.0, filtered)
+        self.assertIn(3.0, filtered)
+
+    def test_symmetric_outliers(self):
+        vals = [-50.0, 1.0, 2.0, 3.0, 4.0, 5.0, 50.0]
+        filtered = _iqr_filter(vals)
+        self.assertNotIn(-50.0, filtered)
+        self.assertNotIn(50.0, filtered)
+
+    def test_no_filtering_below_4_values(self):
+        vals = [1.0, 100.0, -100.0]
+        filtered = _iqr_filter(vals)
+        self.assertEqual(len(filtered), 3)
+
+    def test_bounds_match_filter(self):
+        vals = [1.0, 2.0, 3.0, 4.0, 5.0, 100.0]
+        lo, hi = _iqr_bounds(vals)
+        manual = [v for v in vals if lo <= v <= hi]
+        self.assertEqual(_iqr_filter(vals), manual)
+
+    def test_all_identical_values(self):
+        vals = [5.0] * 10
+        filtered = _iqr_filter(vals)
+        self.assertEqual(len(filtered), 10)
+
+    def test_cluster_with_outlier(self):
+        vals = [1.0, 1.0, 1.0, 1.0, 100.0]
+        filtered = _iqr_filter(vals)
+        self.assertNotIn(100.0, filtered)
+        self.assertEqual(len(filtered), 4)
+
+    def test_empty_list(self):
+        self.assertEqual(_iqr_filter([]), [])
+
+
+class TestBaseSigmaWithIQR(unittest.TestCase):
+
+    def test_outliers_reduce_sigma(self):
+        """With IQR filtering, sigma should be lower when outliers are present."""
+        clean = [{"error": e} for e in [1, -1, 2, -2, 1.5, -1.5] * 10]
+        dirty = clean + [{"error": 50.0}, {"error": -50.0},
+                         {"error": 40.0}, {"error": -40.0}]
+        sigma_clean = _compute_base_sigma(clean)
+        sigma_dirty = _compute_base_sigma(dirty)
+        # With IQR, dirty should be close to clean (outliers removed)
+        self.assertAlmostEqual(sigma_clean, sigma_dirty, delta=0.5)
+
+    def test_identical_errors_returns_floor(self):
+        """All identical errors after IQR filtering → sigma floored at 0.1."""
+        errors = [{"error": 1.0}] * 10 + [{"error": 100.0}]
+        sigma = _compute_base_sigma(errors)
+        self.assertGreaterEqual(sigma, 0.1)
+
+    def test_without_outliers_unchanged(self):
+        errors = [{"error": 2.0}, {"error": -2.0},
+                  {"error": 1.0}, {"error": -1.0}]
+        sigma = _compute_base_sigma(errors)
+        self.assertGreater(sigma, 0)
+        self.assertLess(sigma, 3)
+
+
+class TestSigmaByHorizonIQR(unittest.TestCase):
+
+    def test_outliers_filtered_from_rmse(self):
+        """Horizon RMSE should not be inflated by outliers."""
+        errors = []
+        for _ in range(40):
+            errors.append({"horizon": 0, "error": 1.0})
+            errors.append({"horizon": 0, "error": -1.0})
+        # Add extreme outliers
+        errors.append({"horizon": 0, "error": 50.0})
+        errors.append({"horizon": 0, "error": -50.0})
+        result = _compute_sigma_by_horizon(errors)
+        # Should be close to 1.0, not inflated by outliers
+        self.assertAlmostEqual(result["0"], 1.0, delta=0.3)
+
+
+class TestPlattForcedIdentity(unittest.TestCase):
+
+    def test_build_tables_platt_identity(self):
+        """build_calibration_tables should always return Platt identity."""
+        import random
+        random.seed(42)
+        errors = []
+        for day in range(1, 20):
+            for model in ["gfs", "ecmwf"]:
+                err = random.gauss(0, 2.5)
+                errors.append({
+                    "location": "NYC",
+                    "target_date": f"2025-01-{day:02d}",
+                    "month": 1,
+                    "metric": "high",
+                    "model": model,
+                    "forecast": 50.0 + err,
+                    "actual": 50.0,
+                    "error": err,
+                    "model_spread": 1.0,
+                })
+        result = build_calibration_tables(errors, ["NYC"])
+        platt = result["platt_scaling"]
+        self.assertAlmostEqual(platt["a"], 1.0)
+        self.assertAlmostEqual(platt["b"], 0.0)
+
+    def test_build_weighted_tables_platt_identity(self):
+        """build_weighted_calibration_tables should also return Platt identity."""
+        from datetime import datetime, timedelta
+        errors = []
+        today = datetime.now()
+        for day_offset in range(60):
+            date = (today - timedelta(days=day_offset)).strftime("%Y-%m-%d")
+            month = (today - timedelta(days=day_offset)).month
+            for model in ["gfs", "ecmwf"]:
+                errors.append({
+                    "location": "NYC",
+                    "target_date": date,
+                    "month": month,
+                    "metric": "high",
+                    "model": model,
+                    "forecast": 52.0,
+                    "actual": 50.0,
+                    "error": 2.0,
+                    "model_spread": 1.0,
+                })
+        result = build_weighted_calibration_tables(errors, locations=["NYC"])
+        platt = result["platt_scaling"]
+        self.assertAlmostEqual(platt["a"], 1.0)
+        self.assertAlmostEqual(platt["b"], 0.0)
 
 
 if __name__ == "__main__":

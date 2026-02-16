@@ -282,20 +282,20 @@ class TestPrewarm:
             assert entry.is_warmed_up
 
     def test_prewarm_sigma_values(self):
-        """NYC short should be ~2.15 * 1.165 ≈ 2.50."""
+        """NYC short should be ~2.38 * 1.165 ≈ 2.77."""
         ks = KalmanState()
         ks.prewarm()
         nyc_short = ks.entries.get("NYC|short")
         assert nyc_short is not None
-        assert nyc_short.x == pytest.approx(2.15 * (1.0 + 1.33) / 2, abs=0.01)
+        assert nyc_short.x == pytest.approx(2.38 * (1.0 + 1.33) / 2, abs=0.01)
 
     def test_prewarm_extended_sigma(self):
-        """Seattle extended should be ~1.73 * 5.333 ≈ 9.23."""
+        """Seattle extended should be ~1.04 * 5.333 ≈ 5.55."""
         ks = KalmanState()
         ks.prewarm()
         sea_ext = ks.entries.get("Seattle|extended")
         assert sea_ext is not None
-        assert sea_ext.x == pytest.approx(1.73 * (4.67 + 5.33 + 6.0) / 3, abs=0.01)
+        assert sea_ext.x == pytest.approx(1.04 * (4.67 + 5.33 + 6.0) / 3, abs=0.01)
 
     def test_prewarm_reduced_uncertainty(self):
         """P should be 1.0, not default 4.0."""
