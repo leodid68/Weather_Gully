@@ -589,6 +589,71 @@ class TestStudentTCDFEdgeCases(unittest.TestCase):
         self.assertAlmostEqual(result, 0.5, places=4)
 
 
+class TestNumericalRobustnessExtended(unittest.TestCase):
+    """Extended numerical robustness tests for beta function and Student's t."""
+
+    def test_beta_a_near_zero(self):
+        from weather.probability import _regularized_incomplete_beta
+        result = _regularized_incomplete_beta(0.5, 1e-10, 1.0)
+        self.assertTrue(0.0 <= result <= 1.0)
+
+    def test_beta_b_near_zero(self):
+        from weather.probability import _regularized_incomplete_beta
+        result = _regularized_incomplete_beta(0.5, 1.0, 1e-10)
+        self.assertTrue(0.0 <= result <= 1.0)
+
+    def test_beta_x_near_zero(self):
+        from weather.probability import _regularized_incomplete_beta
+        result = _regularized_incomplete_beta(1e-300, 5.0, 5.0)
+        self.assertAlmostEqual(result, 0.0, places=2)
+
+    def test_beta_x_near_one(self):
+        from weather.probability import _regularized_incomplete_beta
+        result = _regularized_incomplete_beta(1.0 - 1e-15, 5.0, 5.0)
+        self.assertAlmostEqual(result, 1.0, places=2)
+
+    def test_beta_both_params_tiny(self):
+        from weather.probability import _regularized_incomplete_beta
+        result = _regularized_incomplete_beta(0.5, 1e-8, 1e-8)
+        self.assertTrue(0.0 <= result <= 1.0)
+
+    def test_student_t_df_half(self):
+        from weather.probability import _student_t_cdf
+        result = _student_t_cdf(0.0, 0.5)
+        self.assertAlmostEqual(result, 0.5, places=3)
+
+    def test_student_t_df_1000_converges_to_normal(self):
+        from weather.probability import _student_t_cdf, _normal_cdf
+        result = _student_t_cdf(1.96, 1000)
+        normal = _normal_cdf(1.96)
+        self.assertAlmostEqual(result, normal, places=3)
+
+    def test_student_t_extreme_1e10(self):
+        from weather.probability import _student_t_cdf
+        result = _student_t_cdf(1e10, 10)
+        self.assertAlmostEqual(result, 1.0, places=6)
+
+    def test_student_t_extreme_neg_1e10(self):
+        from weather.probability import _student_t_cdf
+        result = _student_t_cdf(-1e10, 10)
+        self.assertAlmostEqual(result, 0.0, places=6)
+
+    def test_beta_non_convergence_logs_warning(self):
+        from weather.probability import _regularized_incomplete_beta
+        result = _regularized_incomplete_beta(0.3, 5.0, 5.0, max_iter=1)
+        self.assertTrue(0.0 <= result <= 1.0)
+
+    def test_bucket_probability_with_extreme_forecast(self):
+        from weather.probability import estimate_bucket_probability
+        prob = estimate_bucket_probability(200.0, 40, 44, "2026-02-20", apply_seasonal=False, horizon_override=0)
+        self.assertAlmostEqual(prob, 0.0, places=2)
+
+    def test_bucket_probability_with_zero_sigma(self):
+        from weather.probability import estimate_bucket_probability
+        prob = estimate_bucket_probability(42.0, 40, 44, "2026-02-20", sigma_override=0.0)
+        self.assertTrue(0.0 <= prob <= 1.0)
+
+
 class TestCalibrationLogging(unittest.TestCase):
     """Test that the calibration fallback chain emits appropriate log messages."""
 
