@@ -439,6 +439,37 @@ class TestPlattCalibrate(unittest.TestCase):
             self.assertLessEqual(calibrated[i], calibrated[i + 1])
 
 
+class TestRegularizedIncompleteBeta(unittest.TestCase):
+    """Direct tests for _regularized_incomplete_beta edge cases."""
+
+    def test_invalid_a_zero(self):
+        from weather.probability import _regularized_incomplete_beta
+        result = _regularized_incomplete_beta(0.5, 0, 1)
+        self.assertIsInstance(result, float)
+
+    def test_invalid_b_zero(self):
+        from weather.probability import _regularized_incomplete_beta
+        result = _regularized_incomplete_beta(0.5, 1, 0)
+        self.assertIsInstance(result, float)
+
+    def test_invalid_a_negative(self):
+        from weather.probability import _regularized_incomplete_beta
+        result = _regularized_incomplete_beta(0.5, -1, 1)
+        self.assertEqual(result, 0.0)
+
+    def test_x_near_zero(self):
+        from weather.probability import _regularized_incomplete_beta
+        result = _regularized_incomplete_beta(1e-20, 5, 0.5)
+        self.assertGreaterEqual(result, 0.0)
+        self.assertLessEqual(result, 1.0)
+
+    def test_x_near_one(self):
+        from weather.probability import _regularized_incomplete_beta
+        result = _regularized_incomplete_beta(1 - 1e-20, 5, 0.5)
+        self.assertGreaterEqual(result, 0.0)
+        self.assertLessEqual(result, 1.0)
+
+
 class TestStudentTCDF(unittest.TestCase):
     def test_symmetry(self):
         """Student's t CDF should be symmetric: F(-x) = 1 - F(x)."""

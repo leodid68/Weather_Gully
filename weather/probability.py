@@ -110,6 +110,14 @@ def _regularized_incomplete_beta(x: float, a: float, b: float, max_iter: int = 2
     if x >= 1:
         return 1.0
 
+    # Guard: a and b must be positive for lgamma / beta function
+    if a <= 0 or b <= 0:
+        logger.warning("_regularized_incomplete_beta: invalid a=%.4g b=%.4g, returning 0.0", a, b)
+        return 0.0
+
+    # Clamp x away from exact 0/1 to avoid log(0) in prefactor
+    x = max(1e-15, min(1 - 1e-15, x))
+
     # Use the symmetry relation if x > (a+1)/(a+b+2)
     if x > (a + 1) / (a + b + 2):
         return 1.0 - _regularized_incomplete_beta(1.0 - x, b, a, max_iter)
@@ -153,6 +161,8 @@ def _regularized_incomplete_beta(x: float, a: float, b: float, max_iter: int = 2
 
         if abs(delta - 1.0) < 1e-10:
             break
+    else:
+        logger.warning("_regularized_incomplete_beta: continued fraction did not converge after %d iterations (x=%.4g, a=%.4g, b=%.4g)", max_iter, x, a, b)
 
     return front * f
 
