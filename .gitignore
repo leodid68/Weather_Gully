@@ -16,3 +16,17 @@ weather/sigma_log.json
 weather/trade_log.json
 weather/error_history.json
 weather/recalibration_log/
+
+# Runtime state (regenerated at runtime)
+weather/feedback_state.json
+weather/paper_state.json
+weather/price_snapshots.json
+weather/calibration_era5_backup.json
+
+# Backtest results (large, regenerated)
+backtest_*.json
+backtest_report.json
+
+# One-off audit/ops docs
+WEATHER_GULLY_AUDIT.md
+WEATHER_GULLY_OPS_FIXES.md
