@@ -1294,12 +1294,17 @@ def main() -> None:
         help="Comma-separated location keys (default: NYC)",
     )
     parser.add_argument(
-        "--start-date", type=str, required=True,
-        help="Start date (YYYY-MM-DD)",
+        "--start-date", type=str, default=None,
+        help="Start date (YYYY-MM-DD). Required unless --rolling-days is set.",
     )
     parser.add_argument(
-        "--end-date", type=str, required=True,
-        help="End date (YYYY-MM-DD)",
+        "--end-date", type=str, default=None,
+        help="End date (YYYY-MM-DD). Defaults to yesterday.",
+    )
+    parser.add_argument(
+        "--rolling-days", type=int, default=None,
+        help="Use a rolling window of N days ending yesterday (e.g. 90). "
+             "Overrides --start-date/--end-date.",
     )
     parser.add_argument(
         "--output", type=str, default=_DEFAULT_OUTPUT,
@@ -1313,6 +1318,23 @@ def main() -> None:
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
+
+    # Resolve date range
+    from datetime import timedelta
+    yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+
+    if args.rolling_days:
+        end_date = yesterday
+        start_dt = datetime.now() - timedelta(days=args.rolling_days)
+        start_date = start_dt.strftime("%Y-%m-%d")
+        logger.info("Rolling window: last %d days (%s to %s)",
+                     args.rolling_days, start_date, end_date)
+    elif args.start_date:
+        start_date = args.start_date
+        end_date = args.end_date or yesterday
+    else:
+        logger.error("Either --start-date or --rolling-days is required")
+        sys.exit(1)
 
     loc_keys = [l.strip() for l in args.locations.split(",")]
     all_errors: list[dict] = []
@@ -1330,8 +1352,8 @@ def main() -> None:
                 lat=loc_data["lat"],
                 lon=loc_data["lon"],
                 station=station,
-                start_date=args.start_date,
-                end_date=args.end_date,
+                start_date=start_date,
+                end_date=end_date,
                 tz_name=loc_data.get("tz", "America/New_York"),
             )
         else:
@@ -1341,8 +1363,8 @@ def main() -> None:
                 location=loc,
                 lat=loc_data["lat"],
                 lon=loc_data["lon"],
-                start_date=args.start_date,
-                end_date=args.end_date,
+                start_date=start_date,
+                end_date=end_date,
                 tz_name=loc_data.get("tz", "America/New_York"),
             )
         all_errors.extend(errors)
