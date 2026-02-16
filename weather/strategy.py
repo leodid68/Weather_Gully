@@ -17,6 +17,7 @@ from .probability import (
     compute_adaptive_sigma,
     estimate_bucket_probability,
     estimate_bucket_probability_with_obs,
+    get_correlation,
     get_horizon_days,
     get_noaa_probability,
     platt_calibrate,
@@ -525,6 +526,39 @@ def _check_stop_loss_reversals(
 
 
 # --------------------------------------------------------------------------
+# Correlation discount
+# --------------------------------------------------------------------------
+
+def _apply_correlation_discount(
+    base_size: float,
+    location: str,
+    month: int,
+    open_locations: list[str],
+    config: Config,
+) -> float:
+    """Reduce position size when correlated positions are already open."""
+    if not open_locations:
+        return base_size
+
+    max_corr = 0.0
+    for open_loc in open_locations:
+        if open_loc == location:
+            continue
+        corr = get_correlation(location, open_loc, month)
+        if corr > max_corr:
+            max_corr = corr
+
+    if max_corr < config.correlation_threshold:
+        return base_size
+
+    factor = 1.0 - max_corr * config.correlation_discount
+    adjusted = base_size * max(0.1, factor)
+    logger.info("Correlation discount: %s corr=%.2f → sizing %.2f → %.2f",
+                location, max_corr, base_size, adjusted)
+    return round(adjusted, 2)
+
+
+# --------------------------------------------------------------------------
 # Main strategy
 # --------------------------------------------------------------------------
 
@@ -941,6 +975,13 @@ def run_weather_strategy(
                 balance=balance,
                 max_position_usd=config.max_position_usd,
                 kelly_frac=config.kelly_fraction,
+            )
+
+            # Correlation discount: reduce sizing for correlated open positions
+            open_locations = list({t.location for t in state.trades.values() if t.location})
+            forecast_month = int(date_str.split("-")[1])
+            position_size = _apply_correlation_discount(
+                position_size, location, forecast_month, open_locations, config,
             )
 
             if position_size <= 0:

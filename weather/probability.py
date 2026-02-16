@@ -67,6 +67,25 @@ def _load_calibration() -> dict:
     _calibration_mtime = current_mtime
     return _calibration_cache
 
+_MONTH_TO_SEASON = {
+    12: "DJF", 1: "DJF", 2: "DJF",
+    3: "MAM", 4: "MAM", 5: "MAM",
+    6: "JJA", 7: "JJA", 8: "JJA",
+    9: "SON", 10: "SON", 11: "SON",
+}
+
+
+def get_correlation(loc1: str, loc2: str, month: int) -> float:
+    """Get calibrated correlation between two locations for a given month.
+    Returns 0.0 if no calibration data is available for this pair/season.
+    """
+    cal = _load_calibration()
+    matrix = cal.get("correlation_matrix", {})
+    pair_key = "|".join(sorted([loc1, loc2]))
+    pair_data = matrix.get(pair_key, {})
+    season = _MONTH_TO_SEASON.get(month, "DJF")
+    return pair_data.get(season, 0.0)
+
 # NOAA forecast accuracy curve (days ahead → probability of being correct)
 _HORIZON_ACCURACY = {
     0: 0.97,

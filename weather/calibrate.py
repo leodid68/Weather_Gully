@@ -590,6 +590,82 @@ def _compute_mean_model_spread(errors: list[dict]) -> float:
     return sum(spreads) / len(spreads) if spreads else 0.0
 
 
+_MONTH_TO_SEASON = {
+    12: "DJF", 1: "DJF", 2: "DJF",
+    3: "MAM", 4: "MAM", 5: "MAM",
+    6: "JJA", 7: "JJA", 8: "JJA",
+    9: "SON", 10: "SON", 11: "SON",
+}
+
+
+def _pearson_correlation(xs: list[float], ys: list[float]) -> float:
+    """Pearson correlation coefficient between two equal-length lists."""
+    n = len(xs)
+    if n < 3:
+        return 0.0
+    mx = sum(xs) / n
+    my = sum(ys) / n
+    cov = sum((x - mx) * (y - my) for x, y in zip(xs, ys)) / (n - 1)
+    sx = (sum((x - mx) ** 2 for x in xs) / (n - 1)) ** 0.5
+    sy = (sum((y - my) ** 2 for y in ys) / (n - 1)) ** 0.5
+    if sx < 1e-10 or sy < 1e-10:
+        return 0.0
+    return max(-1.0, min(1.0, cov / (sx * sy)))
+
+
+def _compute_correlation_matrix(
+    locations: list[str],
+    errors: list[dict],
+    min_samples: int = 5,
+) -> dict[str, dict[str, float]]:
+    """Compute Pearson correlation of forecast errors between location pairs by season.
+
+    Args:
+        locations: List of location keys.
+        errors: Error records with "location", "target_date", "month", "error".
+        min_samples: Minimum shared dates per season to include (default 5).
+
+    Returns:
+        {"LocA|LocB": {"DJF": 0.72, "MAM": 0.45, ...}, ...}
+        Location pair keys are alphabetically sorted.
+    """
+    by_loc_date: dict[tuple[str, str], float] = {}
+    date_months: dict[str, int] = {}
+    for e in errors:
+        loc = e["location"]
+        date = e["target_date"]
+        by_loc_date[(loc, date)] = e["error"]
+        date_months[date] = e["month"]
+
+    result: dict[str, dict[str, float]] = {}
+
+    for i, loc_a in enumerate(locations):
+        for loc_b in locations[i + 1:]:
+            pair_key = "|".join(sorted([loc_a, loc_b]))
+            dates_a = {d for (l, d) in by_loc_date if l == loc_a}
+            dates_b = {d for (l, d) in by_loc_date if l == loc_b}
+            shared = dates_a & dates_b
+
+            season_dates: dict[str, list[str]] = {}
+            for d in shared:
+                season = _MONTH_TO_SEASON.get(date_months.get(d, 1), "DJF")
+                season_dates.setdefault(season, []).append(d)
+
+            pair_seasons: dict[str, float] = {}
+            for season, dates in season_dates.items():
+                if len(dates) < min_samples:
+                    continue
+                xs = [by_loc_date[(loc_a, d)] for d in dates]
+                ys = [by_loc_date[(loc_b, d)] for d in dates]
+                corr = _pearson_correlation(xs, ys)
+                pair_seasons[season] = round(corr, 3)
+
+            if pair_seasons:
+                result[pair_key] = pair_seasons
+
+    return result
+
+
 def _compute_adaptive_factors(errors: list[dict]) -> dict:
     """Compute calibrated adaptive sigma conversion factors from historical data.
 
@@ -843,6 +919,9 @@ def build_calibration_tables(
         logger.info("Non-normal errors detected (JB=%.1f, skew=%.3f, kurt=%.3f). Using Student's t (df=%.0f)",
                     normality["jb_statistic"], normality["skewness"], normality["kurtosis"], student_t_df)
 
+    # Inter-location correlation matrix
+    correlation_matrix = _compute_correlation_matrix(locations, all_errors)
+
     # Metadata
     dates = [e["target_date"] for e in all_errors]
     date_range = [min(dates), max(dates)] if dates else []
@@ -855,6 +934,7 @@ def build_calibration_tables(
         "model_weights": model_weights,
         "adaptive_sigma": adaptive_factors,
         "platt_scaling": platt_params,
+        "correlation_matrix": correlation_matrix,
         "distribution": distribution,
         "normality_test": normality,
         "horizon_growth": {str(h): round(_horizon_growth_factor(h), 2) for h in range(11)},
@@ -1115,6 +1195,9 @@ def build_weighted_calibration_tables(
     # Effective sample count = sum of all weights
     sum_all_weights = sum(weights.get(e["target_date"], 0.0) for e in all_errors)
 
+    # Inter-location correlation matrix
+    correlation_matrix = _compute_correlation_matrix(locations, all_errors)
+
     # Metadata
     dates = [e["target_date"] for e in all_errors]
     date_range = [min(dates), max(dates)] if dates else []
@@ -1127,6 +1210,7 @@ def build_weighted_calibration_tables(
         "model_weights": model_weights,
         "adaptive_sigma": adaptive_factors,
         "platt_scaling": platt_params,
+        "correlation_matrix": correlation_matrix,
         "distribution": distribution,
         "normality_test": normality,
         "horizon_growth": {str(h): round(_horizon_growth_factor(h), 2) for h in range(11)},

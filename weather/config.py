@@ -115,6 +115,10 @@ class Config:
     cooldown_hours_after_max_loss: float = 24.0  # Hours to wait after circuit break
     max_open_positions: int = 15              # Max simultaneous open positions
 
+    # Inter-location correlation (sizing reduction)
+    correlation_threshold: float = 0.5    # Ignore correlations below this
+    correlation_discount: float = 0.5     # How much to reduce sizing (0=ignore, 1=full)
+
     @property
     def active_locations(self) -> list[str]:
         """Return canonical location keys matching LOCATIONS dict keys.

@@ -784,5 +784,51 @@ class TestCalibrationAge(unittest.TestCase):
             os.unlink(tmp_path)
 
 
+class TestGetCorrelation(unittest.TestCase):
+    def test_returns_correlation_for_season(self):
+        import weather.probability as prob
+        cal_data = {
+            "correlation_matrix": {
+                "Chicago|NYC": {"DJF": 0.72, "JJA": 0.45},
+            }
+        }
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+            json.dump(cal_data, f)
+            tmp_path = f.name
+        try:
+            orig = prob._CALIBRATION_PATH
+            prob._CALIBRATION_PATH = Path(tmp_path)
+            prob._calibration_cache = None
+            prob._calibration_mtime = 0.0
+            corr = prob.get_correlation("NYC", "Chicago", 1)
+            self.assertAlmostEqual(corr, 0.72, places=2)
+            corr = prob.get_correlation("NYC", "Chicago", 7)
+            self.assertAlmostEqual(corr, 0.45, places=2)
+        finally:
+            prob._CALIBRATION_PATH = orig
+            prob._calibration_cache = None
+            prob._calibration_mtime = 0.0
+            os.unlink(tmp_path)
+
+    def test_returns_zero_for_unknown_pair(self):
+        import weather.probability as prob
+        cal_data = {"correlation_matrix": {}}
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+            json.dump(cal_data, f)
+            tmp_path = f.name
+        try:
+            orig = prob._CALIBRATION_PATH
+            prob._CALIBRATION_PATH = Path(tmp_path)
+            prob._calibration_cache = None
+            prob._calibration_mtime = 0.0
+            corr = prob.get_correlation("NYC", "Timbuktu", 1)
+            self.assertEqual(corr, 0.0)
+        finally:
+            prob._CALIBRATION_PATH = orig
+            prob._calibration_cache = None
+            prob._calibration_mtime = 0.0
+            os.unlink(tmp_path)
+
+
 if __name__ == "__main__":
     unittest.main()
