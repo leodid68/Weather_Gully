@@ -406,10 +406,14 @@ def check_exit_opportunities(
                     exits_executed += 1
                     logger.info("Sold %.1f %s shares @ $%.2f", shares, trade.side.upper(), current_price)
                     state.remove_trade(market_id)
-                    for eid, mid in list(state.event_positions.items()):
-                        if mid == market_id:
-                            state.remove_event_position(eid)
-                            break
+                    if trade.event_id:
+                        state.remove_event_position_market(trade.event_id, market_id)
+                    else:
+                        # Legacy: scan for market_id in event_positions
+                        for eid, mids in list(state.event_positions.items()):
+                            if market_id in (mids if isinstance(mids, list) else [mids]):
+                                state.remove_event_position_market(eid, market_id)
+                                break
                 else:
                     logger.error("Sell failed: %s", result.get("error", "Unknown"))
         else:
@@ -581,10 +585,13 @@ def _check_stop_loss_reversals(
                     exits += 1
                     state.remove_trade(market_id)
                     # Clean up correlation guard
-                    for eid, mid in list(state.event_positions.items()):
-                        if mid == market_id:
-                            state.remove_event_position(eid)
-                            break
+                    if fresh_trade.event_id:
+                        state.remove_event_position_market(fresh_trade.event_id, market_id)
+                    else:
+                        for eid, mids in list(state.event_positions.items()):
+                            if market_id in (mids if isinstance(mids, list) else [mids]):
+                                state.remove_event_position_market(eid, market_id)
+                                break
                     logger.info("Stop-loss executed for %s", fresh_trade.outcome_name)
                 else:
                     logger.error("Stop-loss sell failed: %s", result.get("error", "Unknown"))
@@ -698,10 +705,13 @@ def _emergency_exit_losers(
             if result.get("success"):
                 exits += 1
                 state.remove_trade(market_id)
-                for eid, mid in list(state.event_positions.items()):
-                    if mid == market_id:
-                        state.remove_event_position(eid)
-                        break
+                if trade.event_id:
+                    state.remove_event_position_market(trade.event_id, market_id)
+                else:
+                    for eid, mids in list(state.event_positions.items()):
+                        if market_id in (mids if isinstance(mids, list) else [mids]):
+                            state.remove_event_position_market(eid, market_id)
+                            break
                 logger.info("[EMERGENCY EXIT] Sold %.1f %s shares of %s", trade.shares, trade.side.upper(), outcome_name)
             else:
                 logger.error("[EMERGENCY EXIT] Sell failed for %s: %s", outcome_name, result.get("error", "Unknown"))
@@ -1145,7 +1155,10 @@ def run_weather_strategy(
             logger.info("No tradeable buckets above EV threshold (%.2f)", config.min_ev_threshold)
             continue
 
+        traded_this_event = False
         for entry in tradeable:
+            if traded_this_event and config.correlation_guard:
+                break  # Max 1 position per event
             market = entry["market"]
             market_id = market.get("id")
             outcome_name = entry["outcome_name"]
@@ -1295,11 +1308,15 @@ def run_weather_strategy(
                         forecast_date=date_str,
                         forecast_temp=forecast_temp,
                         metric=metric,
+                        event_id=event_id,
                     )
 
                     # Correlation guard: record event → market mapping
                     if config.correlation_guard:
                         state.record_event_position(event_id, market_id)
+
+                    # Break: max 1 position per event per run
+                    traded_this_event = True
 
                     # Trade log: record for model improvement
                     bucket = entry["bucket"]

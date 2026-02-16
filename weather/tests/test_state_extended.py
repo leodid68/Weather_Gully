@@ -135,6 +135,38 @@ class TestCorrelationGuard(unittest.TestCase):
         state = TradingState()
         state.remove_event_position("evt-999")  # Should not raise
 
+    def test_multiple_markets_per_event(self):
+        """event_positions stores a list of market_ids per event."""
+        state = TradingState()
+        state.record_event_position("evt-1", "m-1")
+        state.record_event_position("evt-1", "m-2")
+        self.assertTrue(state.has_event_position("evt-1"))
+        self.assertEqual(state.event_positions["evt-1"], ["m-1", "m-2"])
+
+    def test_remove_single_market_from_event(self):
+        """Removing one market leaves the other intact."""
+        state = TradingState()
+        state.record_event_position("evt-1", "m-1")
+        state.record_event_position("evt-1", "m-2")
+        state.remove_event_position_market("evt-1", "m-1")
+        self.assertTrue(state.has_event_position("evt-1"))
+        self.assertEqual(state.event_positions["evt-1"], ["m-2"])
+
+    def test_remove_last_market_cleans_event(self):
+        """Removing the last market removes the event entry entirely."""
+        state = TradingState()
+        state.record_event_position("evt-1", "m-1")
+        state.remove_event_position_market("evt-1", "m-1")
+        self.assertFalse(state.has_event_position("evt-1"))
+        self.assertNotIn("evt-1", state.event_positions)
+
+    def test_no_duplicate_market_ids(self):
+        """Recording the same market twice doesn't create duplicates."""
+        state = TradingState()
+        state.record_event_position("evt-1", "m-1")
+        state.record_event_position("evt-1", "m-1")
+        self.assertEqual(state.event_positions["evt-1"], ["m-1"])
+
 
 class TestExtendedStateRoundtrip(unittest.TestCase):
     """Verify new fields survive save/load cycle."""
@@ -175,9 +207,9 @@ class TestExtendedStateRoundtrip(unittest.TestCase):
         self.assertAlmostEqual(pred.our_probability, 0.75)
         self.assertEqual(pred.bucket_low, 50)
 
-        # Event positions
+        # Event positions (now a list of market_ids per event)
         self.assertIn("evt-1", loaded.event_positions)
-        self.assertEqual(loaded.event_positions["evt-1"], "m-1")
+        self.assertEqual(loaded.event_positions["evt-1"], ["m-1"])
 
         Path(path).unlink()
 
@@ -197,6 +229,58 @@ class TestExtendedStateRoundtrip(unittest.TestCase):
         self.assertEqual(len(loaded.previous_forecasts), 0)
         self.assertEqual(len(loaded.predictions), 0)
         self.assertEqual(len(loaded.event_positions), 0)
+
+        Path(path).unlink()
+
+    def test_migrate_old_str_event_positions(self):
+        """Old format (event_id → str) migrates to new (event_id → list)."""
+        import json
+
+        old_data = {
+            "trades": {
+                "m-1": {
+                    "market_id": "m-1", "outcome_name": "50-54", "side": "yes",
+                    "cost_basis": 0.10, "shares": 20.0, "timestamp": "2025-03-14T12:00:00+00:00",
+                    "event_id": "evt-1",
+                },
+            },
+            "last_run": "2025-03-14T12:00:00+00:00",
+            "event_positions": {"evt-1": "m-1"},  # Old str format
+        }
+        with tempfile.NamedTemporaryFile(suffix=".json", mode="w", delete=False) as f:
+            json.dump(old_data, f)
+            path = f.name
+
+        loaded = TradingState.load(path)
+        # Should be migrated to list format
+        self.assertEqual(loaded.event_positions["evt-1"], ["m-1"])
+        self.assertTrue(loaded.has_event_position("evt-1"))
+
+        Path(path).unlink()
+
+    def test_rebuild_event_positions_from_trades(self):
+        """event_positions rebuilt from trades when missing."""
+        import json
+
+        old_data = {
+            "trades": {
+                "m-1": {
+                    "market_id": "m-1", "outcome_name": "50-54", "side": "yes",
+                    "cost_basis": 0.10, "shares": 20.0, "timestamp": "2025-03-14T12:00:00+00:00",
+                    "event_id": "evt-1",
+                },
+            },
+            "last_run": "2025-03-14T12:00:00+00:00",
+            "event_positions": {},  # Missing/empty
+        }
+        with tempfile.NamedTemporaryFile(suffix=".json", mode="w", delete=False) as f:
+            json.dump(old_data, f)
+            path = f.name
+
+        loaded = TradingState.load(path)
+        # Should be rebuilt from trades
+        self.assertTrue(loaded.has_event_position("evt-1"))
+        self.assertEqual(loaded.event_positions["evt-1"], ["m-1"])
 
         Path(path).unlink()
 

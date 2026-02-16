@@ -25,6 +25,7 @@ class TradeRecord:
     forecast_date: str = ""
     forecast_temp: float | None = None
     metric: str = "high"  # "high" or "low"
+    event_id: str = ""
 
     def to_dict(self) -> dict:
         return {
@@ -38,6 +39,7 @@ class TradeRecord:
             "forecast_date": self.forecast_date,
             "forecast_temp": self.forecast_temp,
             "metric": self.metric,
+            "event_id": self.event_id,
         }
 
     @classmethod
@@ -53,6 +55,7 @@ class TradeRecord:
             forecast_date=d.get("forecast_date", ""),
             forecast_temp=d.get("forecast_temp"),
             metric=d.get("metric", "high"),
+            event_id=d.get("event_id", ""),
         )
 
 
@@ -105,8 +108,8 @@ class TradingState:
     previous_forecasts: dict[str, float] = field(default_factory=dict)
     # Calibration: market_id → PredictionRecord
     predictions: dict[str, PredictionRecord] = field(default_factory=dict)
-    # Event tracking for correlation guard: event_id → market_id
-    event_positions: dict[str, str] = field(default_factory=dict)
+    # Event tracking for correlation guard: event_id → set of market_ids
+    event_positions: dict[str, list[str]] = field(default_factory=dict)
     # Daily METAR observations: "location|date" → obs_data dict
     daily_observations: dict[str, dict] = field(default_factory=dict)
     # Circuit breaker
@@ -125,6 +128,7 @@ class TradingState:
         forecast_date: str = "",
         forecast_temp: float | None = None,
         metric: str = "high",
+        event_id: str = "",
     ) -> None:
         self.trades[market_id] = TradeRecord(
             market_id=market_id,
@@ -136,6 +140,7 @@ class TradingState:
             location=location,
             forecast_date=forecast_date,
             forecast_temp=forecast_temp,
+            event_id=event_id,
             metric=metric,
         )
 
@@ -183,12 +188,24 @@ class TradingState:
 
     def has_event_position(self, event_id: str) -> bool:
         """Check if we already hold a position in this event."""
-        return event_id in self.event_positions
+        markets = self.event_positions.get(event_id)
+        return bool(markets)
 
     def record_event_position(self, event_id: str, market_id: str) -> None:
-        self.event_positions[event_id] = market_id
+        markets = self.event_positions.setdefault(event_id, [])
+        if market_id not in markets:
+            markets.append(market_id)
+
+    def remove_event_position_market(self, event_id: str, market_id: str) -> None:
+        """Remove a single market from an event's position set."""
+        markets = self.event_positions.get(event_id)
+        if markets and market_id in markets:
+            markets.remove(market_id)
+            if not markets:
+                del self.event_positions[event_id]
 
     def remove_event_position(self, event_id: str) -> None:
+        """Remove all positions for an event (legacy compat)."""
         self.event_positions.pop(event_id, None)
 
     # -- Daily observations (METAR) --
@@ -297,7 +314,20 @@ class TradingState:
                 mid: PredictionRecord.from_dict(rec)
                 for mid, rec in data.get("predictions", {}).items()
             }
-            event_positions = data.get("event_positions", {})
+            raw_ep = data.get("event_positions", {})
+            # Migrate old format (event_id → str) to new (event_id → list)
+            event_positions: dict[str, list[str]] = {}
+            for eid, val in raw_ep.items():
+                if isinstance(val, list):
+                    event_positions[eid] = val
+                elif isinstance(val, str):
+                    event_positions[eid] = [val]
+            # Rebuild from trades for any missing mappings (robustness)
+            for mid, rec in trades.items():
+                if rec.event_id and rec.event_id not in event_positions:
+                    event_positions.setdefault(rec.event_id, []).append(mid)
+                elif rec.event_id and mid not in event_positions.get(rec.event_id, []):
+                    event_positions.setdefault(rec.event_id, []).append(mid)
             daily_observations = data.get("daily_observations", {})
             daily_pnl = data.get("daily_pnl", {})
             daily_positions_count = data.get("daily_positions_count", {})
