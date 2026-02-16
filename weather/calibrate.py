@@ -690,7 +690,7 @@ def _fit_skew_t_params(errors: list[float]) -> tuple[float, float]:
     best_ll = float("-inf")
 
     for df in [2, 3, 4, 5, 7, 10, 15, 20, 30, 50]:
-        for gamma_int in [5, 6, 7, 8, 9, 10, 11, 12, 13, 15]:
+        for gamma_int in [5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]:
             gamma = gamma_int / 10.0
             ll = sum(_skew_t_logpdf(z, df, gamma) for z in standardized)
             if ll > best_ll:
