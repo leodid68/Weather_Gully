@@ -10,13 +10,25 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 # Supported locations (matching Polymarket resolution sources)
+# US cities: resolve via NOAA/Weather Underground in °F
+# International cities: resolve via Weather Underground in °C
 LOCATIONS = {
-    "NYC": {"lat": 40.7769, "lon": -73.8740, "name": "New York City (LaGuardia)", "tz": "America/New_York", "station": "KLGA"},
-    "Chicago": {"lat": 41.9742, "lon": -87.9073, "name": "Chicago (O'Hare)", "tz": "America/Chicago", "station": "KORD"},
-    "Seattle": {"lat": 47.4502, "lon": -122.3088, "name": "Seattle (Sea-Tac)", "tz": "America/Los_Angeles", "station": "KSEA"},
-    "Atlanta": {"lat": 33.6407, "lon": -84.4277, "name": "Atlanta (Hartsfield)", "tz": "America/New_York", "station": "KATL"},
-    "Dallas": {"lat": 32.8998, "lon": -97.0403, "name": "Dallas (DFW)", "tz": "America/Chicago", "station": "KDFW"},
-    "Miami": {"lat": 25.7959, "lon": -80.2870, "name": "Miami (MIA)", "tz": "America/New_York", "station": "KMIA"},
+    # --- US (°F, NOAA available) ---
+    "NYC": {"lat": 40.7769, "lon": -73.8740, "name": "New York City (LaGuardia)", "tz": "America/New_York", "station": "KLGA", "unit": "F"},
+    "Chicago": {"lat": 41.9742, "lon": -87.9073, "name": "Chicago (O'Hare)", "tz": "America/Chicago", "station": "KORD", "unit": "F"},
+    "Seattle": {"lat": 47.4502, "lon": -122.3088, "name": "Seattle (Sea-Tac)", "tz": "America/Los_Angeles", "station": "KSEA", "unit": "F"},
+    "Atlanta": {"lat": 33.6407, "lon": -84.4277, "name": "Atlanta (Hartsfield)", "tz": "America/New_York", "station": "KATL", "unit": "F"},
+    "Dallas": {"lat": 32.8998, "lon": -97.0403, "name": "Dallas (DFW)", "tz": "America/Chicago", "station": "KDFW", "unit": "F"},
+    "Miami": {"lat": 25.7959, "lon": -80.2870, "name": "Miami (MIA)", "tz": "America/New_York", "station": "KMIA", "unit": "F"},
+    # --- International (°C, no NOAA) ---
+    "London": {"lat": 51.5053, "lon": 0.0553, "name": "London (City Airport)", "tz": "Europe/London", "station": "EGLC", "unit": "C"},
+    "Paris": {"lat": 49.0097, "lon": 2.5479, "name": "Paris (CDG)", "tz": "Europe/Paris", "station": "LFPG", "unit": "C"},
+    "Seoul": {"lat": 37.4602, "lon": 126.4407, "name": "Seoul (Incheon)", "tz": "Asia/Seoul", "station": "RKSI", "unit": "C"},
+    "Toronto": {"lat": 43.6777, "lon": -79.6248, "name": "Toronto (Pearson)", "tz": "America/Toronto", "station": "CYYZ", "unit": "C"},
+    "BuenosAires": {"lat": -34.8222, "lon": -58.5358, "name": "Buenos Aires (Ezeiza)", "tz": "America/Argentina/Buenos_Aires", "station": "SAEZ", "unit": "C"},
+    "SaoPaulo": {"lat": -23.4356, "lon": -46.4731, "name": "São Paulo (Guarulhos)", "tz": "America/Sao_Paulo", "station": "SBGR", "unit": "C"},
+    "Ankara": {"lat": 40.1281, "lon": 32.9951, "name": "Ankara (Esenboğa)", "tz": "Europe/Istanbul", "station": "LTAC", "unit": "C"},
+    "Wellington": {"lat": -41.3272, "lon": 174.8053, "name": "Wellington (Intl)", "tz": "Pacific/Auckland", "station": "NZWN", "unit": "C"},
 }
 
 # Polymarket constraints
