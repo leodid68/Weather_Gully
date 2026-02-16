@@ -721,6 +721,7 @@ def _fit_platt_from_errors(errors: list[dict]) -> dict:
             err.get("target_date", "2025-06-15"),
             apply_seasonal=False,
             location=err.get("location", ""),
+            horizon_override=err.get("horizon"),
         )
         outcome = 1 if bucket_low <= actual <= bucket_high else 0
         bin_idx = min(9, int(prob * 10))

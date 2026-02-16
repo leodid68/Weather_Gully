@@ -17,7 +17,7 @@ from .config import LOCATIONS
 from .historical import get_historical_actuals
 from .open_meteo import compute_ensemble_forecast
 from .previous_runs import fetch_previous_runs
-from .probability import estimate_bucket_probability
+from .probability import estimate_bucket_probability, platt_calibrate
 
 logger = logging.getLogger(__name__)
 
@@ -206,15 +206,19 @@ def run_backtest(
                         target_date_str, apply_seasonal=True,
                         location=loc,
                         metric=metric,
+                        horizon_override=horizon,
                     )
 
-                    # Simulate market price: use real snapshot if available,
-                    # otherwise model a semi-efficient market (prob + noise)
+                    # When real price snapshots are available, apply Platt
+                    # scaling (same as live strategy) for realistic EV.
+                    # With simulated prices, skip Platt — the simulated market
+                    # uses the same model, so Platt would create phantom edge.
                     n_buckets = len(buckets)
                     snap_key = f"{target_date_str}|{loc}|{metric}|{bucket_lo},{bucket_hi}"
                     snapshot = price_snapshots.get(snap_key)
                     if snapshot and snapshot["best_ask"] > 0:
                         simulated_price = snapshot["best_ask"]
+                        prob = platt_calibrate(prob)
                     else:
                         # Use hashlib for deterministic seed (hash() is randomized per-process)
                         seed = int.from_bytes(

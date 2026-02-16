@@ -209,12 +209,17 @@ def get_noaa_probability(forecast_date: str, apply_seasonal: bool = True) -> flo
     return round(max(0.01, min(base_prob, 0.99)), 4)
 
 
-def _get_stddev(forecast_date: str, location: str = "") -> float:
+def _get_stddev(forecast_date: str, location: str = "", horizon_override: int | None = None) -> float:
     """Forecast error standard deviation for the given horizon.
 
     Lookup chain: location_sigma → global_sigma → hardcoded _HORIZON_STDDEV.
+
+    Args:
+        horizon_override: If provided, use this horizon instead of computing
+            from ``forecast_date`` vs today.  Essential for backtesting where
+            ``forecast_date`` is in the past.
     """
-    days_ahead = get_horizon_days(forecast_date)
+    days_ahead = horizon_override if horizon_override is not None else get_horizon_days(forecast_date)
     cal = _load_calibration()
     horizon_key = str(days_ahead)
 
@@ -420,6 +425,7 @@ def estimate_bucket_probability(
     weather_data: dict | None = None,
     metric: str = "high",
     sigma_override: float | None = None,
+    horizon_override: int | None = None,
 ) -> float:
     """Estimate P(actual temperature ∈ [bucket_low, bucket_high]).
 
@@ -441,7 +447,7 @@ def estimate_bucket_probability(
     if sigma_override is not None:
         sigma = sigma_override
     else:
-        sigma = _get_stddev(forecast_date, location=location)
+        sigma = _get_stddev(forecast_date, location=location, horizon_override=horizon_override)
         if apply_seasonal:
             try:
                 month = int(forecast_date.split("-")[1])

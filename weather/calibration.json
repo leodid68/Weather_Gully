@@ -175,8 +175,8 @@
     "samples": 176
   },
   "platt_scaling": {
-    "a": 0.5788,
-    "b": 0.5896
+    "a": 0.6205,
+    "b": 0.6942
   },
   "distribution": "student_t",
   "normality_test": {
@@ -186,7 +186,7 @@
     "kurtosis": 4.434
   },
   "metadata": {
-    "generated": "2026-02-16T10:37:26.045626+00:00",
+    "generated": "2026-02-16T11:06:35.823210+00:00",
     "samples": 2112,
     "samples_effective": 852.1,
     "weighting": "exponential half-life 30.0d",
