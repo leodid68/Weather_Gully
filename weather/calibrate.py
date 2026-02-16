@@ -295,6 +295,155 @@ def _compute_mean_model_spread(errors: list[dict]) -> float:
     return sum(spreads) / len(spreads) if spreads else 0.0
 
 
+def _compute_adaptive_factors(errors: list[dict]) -> dict:
+    """Compute calibrated adaptive sigma conversion factors from historical data.
+
+    Derives ``spread_to_sigma_factor`` and ``ema_to_sigma_factor`` empirically
+    from the relationship between model spread / EMA of errors and the actual
+    observed forecast errors.
+
+    Args:
+        errors: List of error records from ``compute_forecast_errors``.
+
+    Returns:
+        Dict with ``underdispersion_factor`` (literature default),
+        ``spread_to_sigma_factor``, ``ema_to_sigma_factor``, and ``samples``.
+    """
+    # Group by (target_date, metric) to get one weighted error + one spread per day
+    day_groups: dict[tuple[str, str], dict] = {}
+    for err in errors:
+        key = (err["target_date"], err["metric"])
+        if key not in day_groups:
+            day_groups[key] = {"errors": [], "spread": err.get("model_spread", 0.0)}
+        day_groups[key]["errors"].append(err)
+
+    if not day_groups:
+        return {
+            "underdispersion_factor": 1.3,
+            "spread_to_sigma_factor": 0.7,
+            "ema_to_sigma_factor": 1.25,
+            "samples": 0,
+        }
+
+    # Compute weighted ensemble error per day (weighted by inverse-RMSE style)
+    # For simplicity: average the absolute errors across models for each day
+    day_records: list[dict] = []
+    for (target_date, metric), group in sorted(day_groups.items()):
+        abs_errors = [abs(e["error"]) for e in group["errors"]]
+        weighted_abs_error = sum(abs_errors) / len(abs_errors)
+        day_records.append({
+            "target_date": target_date,
+            "metric": metric,
+            "abs_error": weighted_abs_error,
+            "spread": group["spread"],
+        })
+
+    # --- spread_to_sigma_factor ---
+    # sqrt(mean(error²) / mean(spread²))
+    sum_err_sq = sum(r["abs_error"] ** 2 for r in day_records)
+    sum_spread_sq = sum(r["spread"] ** 2 for r in day_records)
+    n = len(day_records)
+
+    if sum_spread_sq > 0:
+        spread_to_sigma = math.sqrt(sum_err_sq / sum_spread_sq)
+    else:
+        spread_to_sigma = 0.7  # Fallback
+
+    # --- ema_to_sigma_factor ---
+    # Simulate EMA of absolute errors over sorted time series, then compare
+    alpha = 0.15
+    sorted_records = sorted(day_records, key=lambda r: (r["target_date"], r["metric"]))
+
+    sum_ema_sq = 0.0
+    ema = sorted_records[0]["abs_error"] if sorted_records else 1.0
+    for rec in sorted_records:
+        sum_ema_sq += ema ** 2
+        ema = alpha * rec["abs_error"] + (1 - alpha) * ema
+
+    if sum_ema_sq > 0:
+        ema_to_sigma = math.sqrt(sum_err_sq / sum_ema_sq)
+    else:
+        ema_to_sigma = 1.25  # Fallback
+
+    logger.info("Adaptive factors: spread_to_sigma=%.3f, ema_to_sigma=%.3f (n=%d)",
+                spread_to_sigma, ema_to_sigma, n)
+
+    return {
+        "underdispersion_factor": 1.3,
+        "spread_to_sigma_factor": round(spread_to_sigma, 3),
+        "ema_to_sigma_factor": round(ema_to_sigma, 3),
+        "samples": n,
+    }
+
+
+def _compute_platt_params(predictions: list[float], actuals: list[float]) -> dict:
+    """Fit Platt scaling parameters (a, b) via gradient descent on log-loss.
+    Platt scaling: calibrated = sigmoid(a * logit(pred) + b)
+    """
+    if len(predictions) < 2 or len(actuals) < 2:
+        return {"a": 1.0, "b": 0.0}
+
+    a, b = 1.0, 0.0
+    lr = 0.1
+    eps = 1e-6
+
+    for _ in range(500):
+        grad_a, grad_b = 0.0, 0.0
+        n = len(predictions)
+        for pred, actual in zip(predictions, actuals):
+            p = max(eps, min(1 - eps, pred))
+            y = max(eps, min(1 - eps, actual))
+            logit_p = math.log(p / (1 - p))
+            z = a * logit_p + b
+            sigmoid_z = 1.0 / (1.0 + math.exp(-z))
+            err = sigmoid_z - y
+            grad_a += err * logit_p / n
+            grad_b += err / n
+        a -= lr * grad_a
+        b -= lr * grad_b
+
+    return {"a": round(a, 4), "b": round(b, 4)}
+
+
+def _fit_platt_from_errors(errors: list[dict]) -> dict:
+    """Fit Platt params by simulating bucket probabilities vs actual outcomes.
+    Groups errors into probability bins and computes actual hit rates,
+    then fits Platt scaling on the resulting calibration curve.
+    """
+    if not errors:
+        return {"a": 1.0, "b": 0.0}
+
+    from .probability import estimate_bucket_probability
+
+    bins: dict[int, list[int]] = {}
+    for err in errors:
+        forecast = err.get("forecast", 0)
+        actual = err.get("actual", 0)
+        bucket_low = round(forecast) - 2
+        bucket_high = round(forecast) + 2
+        prob = estimate_bucket_probability(
+            forecast, bucket_low, bucket_high,
+            err.get("target_date", "2025-06-15"),
+            apply_seasonal=False,
+            location=err.get("location", ""),
+        )
+        outcome = 1 if bucket_low <= actual <= bucket_high else 0
+        bin_idx = min(9, int(prob * 10))
+        bins.setdefault(bin_idx, []).append(outcome)
+
+    predictions = []
+    actuals_list = []
+    for bin_idx in sorted(bins):
+        outcomes = bins[bin_idx]
+        if len(outcomes) >= 5:
+            pred = (bin_idx + 0.5) / 10.0
+            actual_rate = sum(outcomes) / len(outcomes)
+            predictions.append(pred)
+            actuals_list.append(actual_rate)
+
+    return _compute_platt_params(predictions, actuals_list)
+
+
 def build_calibration_tables(
     all_errors: list[dict],
     locations: list[str],
@@ -359,6 +508,12 @@ def build_calibration_tables(
     mean_spread = _compute_mean_model_spread(all_errors)
     logger.info("Mean model spread (|GFS - ECMWF|): %.2f°F", mean_spread)
 
+    # Adaptive sigma factors
+    adaptive_factors = _compute_adaptive_factors(all_errors)
+
+    # Platt scaling
+    platt_params = _fit_platt_from_errors(all_errors)
+
     # Metadata
     dates = [e["target_date"] for e in all_errors]
     date_range = [min(dates), max(dates)] if dates else []
@@ -369,6 +524,8 @@ def build_calibration_tables(
         "seasonal_factors": seasonal_factors,
         "location_seasonal": location_seasonal,
         "model_weights": model_weights,
+        "adaptive_sigma": adaptive_factors,
+        "platt_scaling": platt_params,
         "metadata": {
             "generated": datetime.now(timezone.utc).isoformat(),
             "samples": len(all_errors),

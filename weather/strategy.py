@@ -19,6 +19,7 @@ from .probability import (
     estimate_bucket_probability_with_obs,
     get_horizon_days,
     get_noaa_probability,
+    platt_calibrate,
 )
 from .bridge import CLOBWeatherBridge
 from .feedback import FeedbackState
@@ -184,6 +185,7 @@ def score_buckets(
                 sigma_override=sigma_override,
             )
 
+        prob = platt_calibrate(prob)
         ev = prob - price  # Expected value above break-even
 
         # Skip low-probability buckets (value traps at $0.01-0.03)

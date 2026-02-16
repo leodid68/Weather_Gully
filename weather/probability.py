@@ -207,6 +207,36 @@ def _load_adaptive_factors() -> dict:
     return cal.get("adaptive_sigma", {})
 
 
+def _load_platt_params() -> dict:
+    """Load Platt scaling parameters from calibration.json.
+    Returns dict with 'a' and 'b' keys, or empty dict if unavailable.
+    """
+    cal = _load_calibration()
+    return cal.get("platt_scaling", {})
+
+
+def platt_calibrate(prob: float) -> float:
+    """Apply Platt scaling to a raw probability.
+    Transforms: calibrated = sigmoid(a * logit(prob) + b)
+    Falls back to identity if no calibration params available.
+    Output bounded to [0.01, 0.99].
+    """
+    params = _load_platt_params()
+    a = params.get("a", 1.0)
+    b = params.get("b", 0.0)
+
+    # Identity shortcut
+    if a == 1.0 and b == 0.0:
+        return max(0.01, min(0.99, prob))
+
+    # Clamp input to avoid log(0)
+    p = max(1e-6, min(1 - 1e-6, prob))
+    logit_p = math.log(p / (1 - p))
+    calibrated = 1.0 / (1.0 + math.exp(-(a * logit_p + b)))
+
+    return max(0.01, min(0.99, round(calibrated, 4)))
+
+
 def compute_adaptive_sigma(
     ensemble_result: EnsembleResult | None,
     model_spread: float,

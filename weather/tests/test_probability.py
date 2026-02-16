@@ -17,6 +17,7 @@ from weather.probability import (
     estimate_bucket_probability,
     get_horizon_days,
     get_noaa_probability,
+    platt_calibrate,
 )
 
 
@@ -376,6 +377,25 @@ class TestSigmaOverride(unittest.TestCase):
         prob_with = estimate_bucket_probability(50.0, 49, 51, today, sigma_override=3.0, weather_data=weather)
         prob_without = estimate_bucket_probability(50.0, 49, 51, today, sigma_override=3.0)
         self.assertAlmostEqual(prob_with, prob_without, places=4)
+
+
+class TestPlattCalibrate(unittest.TestCase):
+    def test_identity_when_no_params(self):
+        """Without calibration params, returns raw probability."""
+        self.assertAlmostEqual(platt_calibrate(0.5), 0.5)
+        self.assertAlmostEqual(platt_calibrate(0.3), 0.3)
+
+    def test_bounded_output(self):
+        result = platt_calibrate(0.001)
+        self.assertGreaterEqual(result, 0.01)
+        result = platt_calibrate(0.999)
+        self.assertLessEqual(result, 0.99)
+
+    def test_monotonic(self):
+        probs = [0.1, 0.3, 0.5, 0.7, 0.9]
+        calibrated = [platt_calibrate(p) for p in probs]
+        for i in range(len(calibrated) - 1):
+            self.assertLessEqual(calibrated[i], calibrated[i + 1])
 
 
 if __name__ == "__main__":

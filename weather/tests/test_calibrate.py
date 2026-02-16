@@ -6,7 +6,9 @@ from pathlib import Path
 from unittest.mock import patch
 
 from weather.calibrate import (
+    _compute_adaptive_factors,
     _compute_base_sigma,
+    _compute_platt_params,
     _expand_sigma_by_horizon,
     _HORIZON_GROWTH,
     build_calibration_tables,
@@ -229,6 +231,108 @@ class TestHorizonGrowthModel(unittest.TestCase):
     def test_fallback_on_empty_errors(self):
         sigma = _compute_base_sigma([])
         self.assertAlmostEqual(sigma, 1.5, places=1)
+
+
+class TestComputeAdaptiveFactors(unittest.TestCase):
+
+    def _make_errors(self, n_days=30, base_spread=2.0, base_error=1.5):
+        """Generate synthetic error records for n_days."""
+        errors = []
+        for day in range(1, n_days + 1):
+            date_str = f"2025-01-{day:02d}" if day <= 28 else f"2025-02-{day - 28:02d}"
+            for metric in ["high", "low"]:
+                spread = base_spread + (day % 5) * 0.2
+                for model in ["gfs", "ecmwf"]:
+                    err = base_error * (1 if model == "gfs" else -0.8)
+                    errors.append({
+                        "location": "NYC",
+                        "target_date": date_str,
+                        "month": 1 if day <= 28 else 2,
+                        "metric": metric,
+                        "model": model,
+                        "forecast": 50.0 + err,
+                        "actual": 50.0,
+                        "error": err,
+                        "model_spread": spread,
+                    })
+        return errors
+
+    def test_returns_all_keys(self):
+        errors = self._make_errors()
+        result = _compute_adaptive_factors(errors)
+        self.assertIn("underdispersion_factor", result)
+        self.assertIn("spread_to_sigma_factor", result)
+        self.assertIn("ema_to_sigma_factor", result)
+        self.assertIn("samples", result)
+
+    def test_underdispersion_is_literature_default(self):
+        errors = self._make_errors()
+        result = _compute_adaptive_factors(errors)
+        self.assertAlmostEqual(result["underdispersion_factor"], 1.3)
+
+    def test_spread_factor_positive(self):
+        errors = self._make_errors()
+        result = _compute_adaptive_factors(errors)
+        self.assertGreater(result["spread_to_sigma_factor"], 0)
+
+    def test_ema_factor_positive(self):
+        errors = self._make_errors()
+        result = _compute_adaptive_factors(errors)
+        self.assertGreater(result["ema_to_sigma_factor"], 0)
+
+    def test_sample_count(self):
+        errors = self._make_errors(n_days=10)
+        result = _compute_adaptive_factors(errors)
+        # 10 days × 2 metrics = 20 day-metric groups
+        self.assertEqual(result["samples"], 20)
+
+    def test_empty_errors_returns_defaults(self):
+        result = _compute_adaptive_factors([])
+        self.assertAlmostEqual(result["spread_to_sigma_factor"], 0.7)
+        self.assertAlmostEqual(result["ema_to_sigma_factor"], 1.25)
+        self.assertEqual(result["samples"], 0)
+
+    def test_zero_spread_returns_fallback(self):
+        errors = self._make_errors(n_days=5, base_spread=0.0)
+        # Override all spreads to exactly 0
+        for e in errors:
+            e["model_spread"] = 0.0
+        result = _compute_adaptive_factors(errors)
+        # Should fall back to default spread factor
+        self.assertAlmostEqual(result["spread_to_sigma_factor"], 0.7)
+
+    def test_larger_spread_gives_smaller_factor(self):
+        """If model spread is large relative to errors, the factor should be smaller."""
+        small_spread = self._make_errors(n_days=20, base_spread=1.0, base_error=1.5)
+        large_spread = self._make_errors(n_days=20, base_spread=5.0, base_error=1.5)
+        r_small = _compute_adaptive_factors(small_spread)
+        r_large = _compute_adaptive_factors(large_spread)
+        self.assertGreater(r_small["spread_to_sigma_factor"],
+                           r_large["spread_to_sigma_factor"])
+
+    def test_integrated_in_build_calibration_tables(self):
+        """build_calibration_tables should include adaptive_sigma key."""
+        errors = self._make_errors(n_days=10)
+        result = build_calibration_tables(errors, locations=["NYC"])
+        self.assertIn("adaptive_sigma", result)
+        self.assertIn("spread_to_sigma_factor", result["adaptive_sigma"])
+        self.assertIn("ema_to_sigma_factor", result["adaptive_sigma"])
+
+
+class TestComputePlattParams(unittest.TestCase):
+    def test_perfect_calibration_gives_identity(self):
+        predictions = [0.2, 0.4, 0.6, 0.8]
+        actuals = [0.2, 0.4, 0.6, 0.8]
+        params = _compute_platt_params(predictions, actuals)
+        self.assertIn("a", params)
+        self.assertIn("b", params)
+        self.assertAlmostEqual(params["a"], 1.0, delta=0.3)
+        self.assertAlmostEqual(params["b"], 0.0, delta=0.3)
+
+    def test_empty_data_returns_identity(self):
+        params = _compute_platt_params([], [])
+        self.assertAlmostEqual(params["a"], 1.0)
+        self.assertAlmostEqual(params["b"], 0.0)
 
 
 if __name__ == "__main__":
