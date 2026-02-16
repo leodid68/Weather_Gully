@@ -96,12 +96,20 @@ def check_context_safeguards(
         if hours is not None and hours < config.time_to_resolution_min_hours:
             return False, [f"Resolves in {hours}h — too soon"]
 
-    # Slippage
+    # Slippage (adaptive: edge-proportional tolerance)
     estimates = slippage.get("estimates", []) if slippage else []
     if estimates:
         slippage_pct = estimates[0].get("slippage_pct", 0)
-        if slippage_pct > config.slippage_max_pct:
-            return False, [f"Slippage too high: {slippage_pct:.1%}"]
+        # Edge-proportional threshold: high-EV trades tolerate worse liquidity
+        user_edge_val = edge.get("user_edge", 0) if edge else 0
+        if user_edge_val and config.slippage_edge_ratio > 0:
+            adaptive_threshold = min(config.slippage_max_pct,
+                                     abs(user_edge_val) * config.slippage_edge_ratio)
+            effective_threshold = max(adaptive_threshold, 0.01)  # Floor at 1%
+        else:
+            effective_threshold = config.slippage_max_pct
+        if slippage_pct > effective_threshold:
+            return False, [f"Slippage too high: {slippage_pct:.1%} (threshold {effective_threshold:.1%})"]
 
     # Edge recommendation
     if use_edge and edge:
@@ -948,6 +956,12 @@ def run_weather_strategy(
         location = event_info["location"]
         date_str = event_info["date"]
         metric = event_info["metric"]
+
+        # Filter by configured trade metrics
+        if metric not in config.active_metrics:
+            logger.debug("Skipping %s %s — metric '%s' not in trade_metrics %s",
+                         location, date_str, metric, config.active_metrics)
+            continue
 
         if location not in config.active_locations:
             continue

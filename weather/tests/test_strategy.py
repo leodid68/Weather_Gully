@@ -976,5 +976,82 @@ class TestNoSideExits(unittest.TestCase):
         client.execute_sell.assert_called_once_with("m-no", 20.0, side="no")
 
 
+class TestAdaptiveSlippage(unittest.TestCase):
+
+    def test_adaptive_slippage_high_edge_passes(self):
+        """High-edge trade tolerates higher slippage."""
+        from weather.strategy import check_context_safeguards
+        from weather.config import Config
+        config = Config(slippage_max_pct=0.15, slippage_edge_ratio=0.5)
+        context = {
+            "slippage": {"estimates": [{"slippage_pct": 0.10}]},
+            "edge": {"user_edge": 0.25},  # 25% edge → threshold = 12.5%
+        }
+        ok, reasons = check_context_safeguards(context, config)
+        assert ok  # 10% < 12.5%
+
+    def test_adaptive_slippage_low_edge_blocked(self):
+        """Low-edge trade has low slippage tolerance."""
+        from weather.strategy import check_context_safeguards
+        from weather.config import Config
+        config = Config(slippage_max_pct=0.15, slippage_edge_ratio=0.5)
+        context = {
+            "slippage": {"estimates": [{"slippage_pct": 0.10}]},
+            "edge": {"user_edge": 0.05},  # 5% edge → threshold = 2.5%
+        }
+        ok, reasons = check_context_safeguards(context, config)
+        assert not ok  # 10% > 2.5%
+
+    def test_adaptive_slippage_capped_at_max(self):
+        """Adaptive threshold never exceeds slippage_max_pct."""
+        from weather.strategy import check_context_safeguards
+        from weather.config import Config
+        config = Config(slippage_max_pct=0.15, slippage_edge_ratio=0.5)
+        context = {
+            "slippage": {"estimates": [{"slippage_pct": 0.14}]},
+            "edge": {"user_edge": 0.50},  # 50% edge → 25%, capped at 15%
+        }
+        ok, reasons = check_context_safeguards(context, config)
+        assert ok  # 14% < 15%
+
+    def test_adaptive_slippage_no_edge_uses_fixed(self):
+        """Without edge data, falls back to fixed threshold."""
+        from weather.strategy import check_context_safeguards
+        from weather.config import Config
+        config = Config(slippage_max_pct=0.15, slippage_edge_ratio=0.5)
+        context = {
+            "slippage": {"estimates": [{"slippage_pct": 0.10}]},
+        }
+        ok, reasons = check_context_safeguards(context, config)
+        assert ok  # 10% < 15% (fixed)
+
+    def test_adaptive_slippage_zero_ratio_uses_fixed(self):
+        """With slippage_edge_ratio=0, uses fixed threshold."""
+        from weather.strategy import check_context_safeguards
+        from weather.config import Config
+        config = Config(slippage_max_pct=0.15, slippage_edge_ratio=0.0)
+        context = {
+            "slippage": {"estimates": [{"slippage_pct": 0.10}]},
+            "edge": {"user_edge": 0.05},
+        }
+        ok, reasons = check_context_safeguards(context, config)
+        assert ok  # 10% < 15% (fixed, ratio=0 disabled)
+
+
+def test_trade_metrics_filters_low_temp():
+    """Config with trade_metrics='high' excludes low from active_metrics."""
+    from weather.config import Config
+    config = Config(trade_metrics="high")
+    assert "low" not in config.active_metrics
+    assert "high" in config.active_metrics
+
+def test_trade_metrics_allows_both():
+    """Config with trade_metrics='high,low' includes both."""
+    from weather.config import Config
+    config = Config(trade_metrics="high,low")
+    assert "high" in config.active_metrics
+    assert "low" in config.active_metrics
+
+
 if __name__ == "__main__":
     unittest.main()
