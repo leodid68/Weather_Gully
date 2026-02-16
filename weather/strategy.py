@@ -946,6 +946,13 @@ def run_weather_strategy(
         missing = "NOAA" if noaa_ok == 0 else "Open-Meteo"
         logger.warning("HEALTH CHECK: %s returned no data — trading with reduced sources", missing)
 
+    # Compute current exposure for budget-aware sizing
+    current_exposure = sum(
+        t.shares * (t.cost_basis or 0)
+        for t in state.trades.values()
+        if t.shares >= MIN_SHARES_PER_ORDER
+    )
+
     for event_id, event_markets in events.items():
         event_name = event_markets[0].get("event_name", "") if event_markets else ""
         event_info = parse_weather_event(event_name)
@@ -1223,6 +1230,7 @@ def run_weather_strategy(
                 balance=balance,
                 max_position_usd=config.max_position_usd,
                 kelly_frac=config.kelly_fraction,
+                current_exposure=current_exposure,
             )
 
             if explain:
