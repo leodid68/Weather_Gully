@@ -171,12 +171,13 @@ def test_save_load_roundtrip():
 # --------------------------------------------------------------------------
 
 def test_window_trimming():
-    """Adding 50 prices should keep only last 40 (2 * _WINDOW_SIZE)."""
+    """Adding more than 2*_WINDOW_SIZE prices trims to 2*_WINDOW_SIZE."""
     ph = PriceHistory()
-    for i in range(50):
-        ph.add(0.50 + i * 0.001, f"2026-01-01T00:{i % 60:02d}:{i % 60:02d}Z")
-    expected_len = 2 * _WINDOW_SIZE  # 40
+    overflow = 2 * _WINDOW_SIZE + 10
+    for i in range(overflow):
+        ph.add(0.50 + i * 0.001, f"2026-01-01T{i // 3600:02d}:{(i % 3600) // 60:02d}:{i % 60:02d}Z")
+    expected_len = 2 * _WINDOW_SIZE
     assert len(ph.prices) == expected_len
     assert len(ph.timestamps) == expected_len
-    # Should be the last 40 prices
+    # Should be the last 2*_WINDOW_SIZE prices (first 10 trimmed)
     assert ph.prices[0] == pytest.approx(0.50 + 10 * 0.001)

@@ -590,6 +590,87 @@ def _apply_correlation_discount(
 
 
 # --------------------------------------------------------------------------
+# Emergency exit (circuit breaker)
+# --------------------------------------------------------------------------
+
+def _emergency_exit_losers(
+    client: CLOBWeatherBridge,
+    state: TradingState,
+    dry_run: bool,
+) -> int:
+    """Sell losing positions when the circuit breaker triggers.
+
+    Only sells positions where the current best bid is below cost basis.
+    Returns the number of exits executed.
+    """
+    if not state.trades:
+        return 0
+
+    # Pre-fetch orderbooks in parallel (same pattern as check_exit_opportunities)
+    orderbook_targets: list[tuple[str, str]] = []
+    for market_id, trade in state.trades.items():
+        if trade.shares < MIN_SHARES_PER_ORDER:
+            continue
+        gm = client._market_cache.get(market_id)
+        if gm and gm.clob_token_ids:
+            orderbook_targets.append((market_id, gm.clob_token_ids[0]))
+
+    if not orderbook_targets:
+        return 0
+
+    orderbooks: dict[str, dict] = {}
+    with ThreadPoolExecutor(max_workers=min(len(orderbook_targets), 8)) as pool:
+        futures = {
+            pool.submit(client.clob.get_orderbook, tid): mid
+            for mid, tid in orderbook_targets
+        }
+        for fut in as_completed(futures):
+            mid = futures[fut]
+            try:
+                orderbooks[mid] = fut.result()
+            except Exception:
+                logger.debug("Emergency exit: orderbook fetch failed for %s", mid, exc_info=True)
+
+    exits = 0
+    for market_id, trade in list(state.trades.items()):
+        book = orderbooks.get(market_id)
+        if not book:
+            continue
+        bids = book.get("bids") or []
+        current_price = float(bids[0]["price"]) if bids else 0.0
+        if current_price <= 0:
+            continue
+
+        cost_basis = trade.cost_basis or 0.0
+        if current_price >= cost_basis:
+            continue  # Winning position — keep it
+
+        outcome_name = trade.outcome_name[:50]
+        logger.warning(
+            "[EMERGENCY EXIT] %s — price $%.2f < cost $%.2f (loss $%.2f)",
+            outcome_name, current_price, cost_basis,
+            (cost_basis - current_price) * trade.shares,
+        )
+
+        if dry_run:
+            logger.info("[DRY RUN] Would emergency sell %.1f shares of %s", trade.shares, outcome_name)
+        else:
+            result = client.execute_sell(market_id, trade.shares)
+            if result.get("success"):
+                exits += 1
+                state.remove_trade(market_id)
+                for eid, mid in list(state.event_positions.items()):
+                    if mid == market_id:
+                        state.remove_event_position(eid)
+                        break
+                logger.info("[EMERGENCY EXIT] Sold %.1f shares of %s", trade.shares, outcome_name)
+            else:
+                logger.error("[EMERGENCY EXIT] Sell failed for %s: %s", outcome_name, result.get("error", "Unknown"))
+
+    return exits
+
+
+# --------------------------------------------------------------------------
 # Main strategy
 # --------------------------------------------------------------------------
 
@@ -670,6 +751,10 @@ def run_weather_strategy(
     if blocked:
         logger.warning("CIRCUIT BREAKER: %s", reason)
         state.last_circuit_break = datetime.now(timezone.utc).isoformat()
+        # Emergency exit: sell losing positions to limit drawdown
+        emergency_exits = _emergency_exit_losers(client, state, dry_run)
+        if emergency_exits:
+            logger.warning("Emergency exited %d losing position(s)", emergency_exits)
         save_path = state_path or config.state_file
         state.save(save_path)
         return

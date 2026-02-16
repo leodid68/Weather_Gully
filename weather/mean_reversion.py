@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 
 _DEFAULT_PATH = Path(__file__).parent / "price_snapshots_mr.json"
 
-_WINDOW_SIZE = 20
+_WINDOW_SIZE = 150
 _MIN_SNAPSHOTS = 5
 
 

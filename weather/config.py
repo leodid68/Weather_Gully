@@ -116,7 +116,7 @@ class Config:
     max_open_positions: int = 15              # Max simultaneous open positions
 
     # Inter-location correlation (sizing reduction)
-    correlation_threshold: float = 0.5    # Ignore correlations below this
+    correlation_threshold: float = 0.7    # Ignore correlations below this
     correlation_discount: float = 0.5     # How much to reduce sizing (0=ignore, 1=full)
 
     # AR(1) autocorrelation correction in feedback bias

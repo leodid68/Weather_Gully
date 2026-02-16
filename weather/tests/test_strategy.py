@@ -11,6 +11,7 @@ from weather.config import Config
 from weather.bridge import CLOBWeatherBridge
 from weather.state import TradingState
 from weather.strategy import (
+    _emergency_exit_losers,
     check_circuit_breaker,
     check_context_safeguards,
     check_exit_opportunities,
@@ -636,6 +637,67 @@ class TestExitParallelFetch(unittest.TestCase):
         self.assertEqual(found, 1)
         # Both fetches were attempted
         self.assertEqual(client.clob.get_orderbook.call_count, 2)
+
+
+class TestEmergencyExitLosers(unittest.TestCase):
+    """Test _emergency_exit_losers sells only losing positions."""
+
+    def _make_mock_client(self, market_ids: list[str]) -> MagicMock:
+        client = MagicMock()
+        client._market_cache = {}
+        for mid in market_ids:
+            gm = MagicMock()
+            gm.clob_token_ids = [f"token_{mid}"]
+            gm.end_date = None
+            client._market_cache[mid] = gm
+        return client
+
+    def test_sells_losing_positions_only(self):
+        """Positions below cost basis should be sold, winners kept."""
+        market_ids = ["m-loser", "m-winner"]
+        client = self._make_mock_client(market_ids)
+
+        def mock_get_orderbook(token_id: str) -> dict:
+            if token_id == "token_m-loser":
+                return {"bids": [{"price": "0.05"}]}  # Below cost basis 0.10
+            return {"bids": [{"price": "0.20"}]}  # Above cost basis 0.10
+
+        client.clob.get_orderbook.side_effect = mock_get_orderbook
+        client.execute_sell.return_value = {"success": True}
+
+        state = TradingState()
+        state.record_trade("m-loser", "losing_bucket", "yes", 0.10, 20.0, location="NYC")
+        state.record_trade("m-winner", "winning_bucket", "yes", 0.10, 20.0, location="NYC")
+
+        exits = _emergency_exit_losers(client, state, dry_run=False)
+
+        self.assertEqual(exits, 1)
+        # Only the loser should have been sold
+        client.execute_sell.assert_called_once_with("m-loser", 20.0)
+        # Winner still in state
+        self.assertIn("m-winner", state.trades)
+
+    def test_dry_run_does_not_sell(self):
+        """In dry_run mode, no sells should be executed."""
+        client = self._make_mock_client(["m-loser"])
+        client.clob.get_orderbook.return_value = {"bids": [{"price": "0.05"}]}
+
+        state = TradingState()
+        state.record_trade("m-loser", "losing_bucket", "yes", 0.10, 20.0, location="NYC")
+
+        exits = _emergency_exit_losers(client, state, dry_run=True)
+
+        self.assertEqual(exits, 0)
+        client.execute_sell.assert_not_called()
+        # Position should still be in state
+        self.assertIn("m-loser", state.trades)
+
+    def test_no_trades_returns_zero(self):
+        """With no open trades, should return 0."""
+        client = self._make_mock_client([])
+        state = TradingState()
+        exits = _emergency_exit_losers(client, state, dry_run=False)
+        self.assertEqual(exits, 0)
 
 
 if __name__ == "__main__":
