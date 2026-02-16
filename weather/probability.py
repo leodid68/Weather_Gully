@@ -44,6 +44,20 @@ def _load_calibration() -> dict:
             logger.info("Loaded calibration data from %s (%d samples)",
                         _CALIBRATION_PATH,
                         _calibration_cache.get("metadata", {}).get("samples", 0))
+            # Check calibration age
+            generated_at = _calibration_cache.get("_metadata", {}).get("generated_at")
+            if not generated_at:
+                generated_at = _calibration_cache.get("metadata", {}).get("generated_at")
+            if generated_at:
+                try:
+                    gen_dt = datetime.fromisoformat(generated_at.replace("Z", "+00:00"))
+                    age_days = (datetime.now(timezone.utc) - gen_dt).days
+                    if age_days > 90:
+                        logger.error("Calibration is %d days old — STALE (regenerate with: python3 -m weather.calibrate)", age_days)
+                    elif age_days > 30:
+                        logger.warning("Calibration is %d days old — consider re-running calibrate", age_days)
+                except (ValueError, TypeError):
+                    pass
             return _calibration_cache
         except (json.JSONDecodeError, IOError) as exc:
             logger.warning("Failed to load calibration data: %s — using defaults", exc)

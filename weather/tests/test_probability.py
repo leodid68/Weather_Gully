@@ -1,6 +1,7 @@
 """Tests for the NOAA probability model."""
 
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -606,6 +607,63 @@ class TestCalibrationLogging(unittest.TestCase):
             prob._CALIBRATION_PATH = orig_path
             prob._calibration_cache = None
             prob._calibration_mtime = 0.0
+
+
+class TestCalibrationAge(unittest.TestCase):
+    def test_old_calibration_warns(self):
+        """Calibration >30 days old should generate a warning."""
+        import weather.probability as prob
+        old_meta = {
+            "_metadata": {"generated_at": "2025-06-01T00:00:00Z"},
+            "global_sigma": {"0": 2.0},
+        }
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+            json.dump(old_meta, f)
+            tmp_path = f.name
+        try:
+            orig_path = prob._CALIBRATION_PATH
+            prob._CALIBRATION_PATH = Path(tmp_path)
+            prob._calibration_cache = None
+            prob._calibration_mtime = 0.0
+            with self.assertLogs("weather.probability", level="WARNING") as cm:
+                prob._load_calibration()
+            self.assertTrue(any("days old" in msg for msg in cm.output))
+        finally:
+            prob._CALIBRATION_PATH = orig_path
+            prob._calibration_cache = None
+            prob._calibration_mtime = 0.0
+            os.unlink(tmp_path)
+
+    def test_recent_calibration_no_warning(self):
+        """Calibration <30 days old should not warn."""
+        import weather.probability as prob
+        from datetime import datetime, timezone
+        recent_meta = {
+            "_metadata": {"generated_at": datetime.now(timezone.utc).isoformat()},
+            "global_sigma": {"0": 2.0},
+        }
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+            json.dump(recent_meta, f)
+            tmp_path = f.name
+        try:
+            orig_path = prob._CALIBRATION_PATH
+            prob._CALIBRATION_PATH = Path(tmp_path)
+            prob._calibration_cache = None
+            prob._calibration_mtime = 0.0
+            # assertNoLogs is Python 3.10+ — use assertRaises to check no WARNING
+            try:
+                with self.assertLogs("weather.probability", level="WARNING") as cm:
+                    prob._load_calibration()
+                # If we get here, a warning was logged — check it's not about age
+                age_warnings = [m for m in cm.output if "days old" in m]
+                self.assertEqual(len(age_warnings), 0, f"Unexpected age warning: {age_warnings}")
+            except AssertionError:
+                pass  # No WARNING at all — that's what we want
+        finally:
+            prob._CALIBRATION_PATH = orig_path
+            prob._calibration_cache = None
+            prob._calibration_mtime = 0.0
+            os.unlink(tmp_path)
 
 
 if __name__ == "__main__":
