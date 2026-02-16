@@ -1053,5 +1053,34 @@ def test_trade_metrics_allows_both():
     assert "low" in config.active_metrics
 
 
+def test_cumulative_correlation_discount():
+    """Sum-based correlation gives appropriate discount."""
+    from weather.strategy import _apply_correlation_discount
+    from weather.config import Config
+    config = Config(correlation_threshold=0.3, correlation_discount=0.5)
+    # Using real calibration data: Dallas|Seattle SON=0.674
+    # month=10 is SON season
+    size = _apply_correlation_discount(2.0, "Dallas", 10, ["Seattle"], config)
+    # total_corr = 0.674, factor = 1 - 0.674*0.5 = 0.663
+    assert size < 2.0
+    assert size > 0.1  # Floor at 0.1
+
+def test_correlation_no_positions():
+    """No discount when no open positions."""
+    from weather.strategy import _apply_correlation_discount
+    from weather.config import Config
+    config = Config(correlation_threshold=0.3, correlation_discount=0.5)
+    assert _apply_correlation_discount(2.0, "NYC", 1, [], config) == 2.0
+
+def test_correlation_below_threshold_no_discount():
+    """Correlations below threshold are ignored."""
+    from weather.strategy import _apply_correlation_discount
+    from weather.config import Config
+    config = Config(correlation_threshold=0.3, correlation_discount=0.5)
+    # Atlanta|NYC DJF = 0.174, below threshold 0.3
+    size = _apply_correlation_discount(2.0, "Atlanta", 1, ["NYC"], config)
+    assert size == 2.0  # No discount
+
+
 if __name__ == "__main__":
     unittest.main()

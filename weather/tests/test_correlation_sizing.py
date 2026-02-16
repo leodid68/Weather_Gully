@@ -34,7 +34,7 @@ class TestCorrelationDiscount(unittest.TestCase):
         )
         self.assertEqual(adjusted, 2.0)
 
-    def test_multiple_correlated_uses_max(self):
+    def test_multiple_correlated_cumulative(self):
         def mock_corr(l1, l2, m):
             pair = tuple(sorted([l1, l2]))
             if pair == ("Chicago", "NYC"):
@@ -49,7 +49,8 @@ class TestCorrelationDiscount(unittest.TestCase):
                 open_locations=["Chicago", "Dallas"],
                 config=Config(correlation_threshold=0.5, correlation_discount=0.5),
             )
-        self.assertAlmostEqual(adjusted, 1.2, places=2)
+        # Cumulative: total_corr = 0.8 + 0.6 = 1.4, factor = max(0.1, 1 - 1.4*0.5) = 0.3
+        self.assertAlmostEqual(adjusted, 0.6, places=2)
 
     @patch("weather.strategy.get_correlation", return_value=0.95)
     def test_floor_at_ten_percent(self, mock_corr):
