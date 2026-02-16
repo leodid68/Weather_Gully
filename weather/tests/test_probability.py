@@ -397,6 +397,22 @@ class TestPlattCalibrate(unittest.TestCase):
         for i in range(len(calibrated) - 1):
             self.assertLessEqual(calibrated[i], calibrated[i + 1])
 
+    @patch("weather.probability._load_platt_params", return_value={"a": 1.5, "b": -0.3})
+    def test_sigmoid_transform_applied(self, _mock):
+        """With non-identity params, probability should be shifted."""
+        result = platt_calibrate(0.5)
+        # sigmoid(1.5 * 0 + (-0.3)) = sigmoid(-0.3) ≈ 0.4256
+        self.assertAlmostEqual(result, 0.4256, delta=0.01)
+        self.assertNotAlmostEqual(result, 0.5)
+
+    @patch("weather.probability._load_platt_params", return_value={"a": 1.5, "b": -0.3})
+    def test_sigmoid_preserves_monotonicity(self, _mock):
+        """Non-identity params still preserve ordering."""
+        probs = [0.1, 0.3, 0.5, 0.7, 0.9]
+        calibrated = [platt_calibrate(p) for p in probs]
+        for i in range(len(calibrated) - 1):
+            self.assertLessEqual(calibrated[i], calibrated[i + 1])
+
 
 if __name__ == "__main__":
     unittest.main()

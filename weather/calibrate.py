@@ -394,7 +394,7 @@ def _compute_platt_params(predictions: list[float], actuals: list[float]) -> dic
             p = max(eps, min(1 - eps, pred))
             y = max(eps, min(1 - eps, actual))
             logit_p = math.log(p / (1 - p))
-            z = a * logit_p + b
+            z = max(-500, min(500, a * logit_p + b))
             sigmoid_z = 1.0 / (1.0 + math.exp(-z))
             err = sigmoid_z - y
             grad_a += err * logit_p / n

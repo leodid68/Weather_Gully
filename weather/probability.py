@@ -232,7 +232,8 @@ def platt_calibrate(prob: float) -> float:
     # Clamp input to avoid log(0)
     p = max(1e-6, min(1 - 1e-6, prob))
     logit_p = math.log(p / (1 - p))
-    calibrated = 1.0 / (1.0 + math.exp(-(a * logit_p + b)))
+    z = max(-500, min(500, a * logit_p + b))
+    calibrated = 1.0 / (1.0 + math.exp(-z))
 
     return max(0.01, min(0.99, round(calibrated, 4)))
 
