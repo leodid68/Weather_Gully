@@ -17,6 +17,7 @@ logger = logging.getLogger(__name__)
 
 _FORECAST_ARCHIVE_BASE = "https://previous-runs-api.open-meteo.com/v1/forecast"
 _ACTUALS_ARCHIVE_BASE = "https://archive-api.open-meteo.com/v1/archive"
+_IEM_BASE = "https://mesonet.agron.iastate.edu/cgi-bin/request/asos.py"
 
 _USER_AGENT = "WeatherGully/1.0"
 _MODELS = "gfs_seamless,ecmwf_ifs025"
@@ -200,3 +201,111 @@ def _safe_get(daily: dict, key: str, index: int) -> float | None:
         if val is not None:
             return float(val)
     return None
+
+
+def _fetch_metar_csv(url: str, max_retries: int = 3, base_delay: float = 1.0) -> str | None:
+    """Fetch CSV text from IEM METAR archive with retry and exponential backoff."""
+    for attempt in range(max_retries + 1):
+        try:
+            req = Request(url, headers={
+                "Accept": "text/csv",
+                "User-Agent": _USER_AGENT,
+            })
+            with urlopen(req, timeout=60, context=_SSL_CTX) as resp:
+                return resp.read().decode()
+        except (HTTPError, URLError, TimeoutError) as exc:
+            if attempt < max_retries:
+                delay = base_delay * (2 ** attempt) * (0.5 + random.random())
+                logger.warning("IEM METAR API error — retry %d/%d in %.1fs: %s",
+                               attempt + 1, max_retries, delay, exc)
+                time.sleep(delay)
+                continue
+            logger.error("IEM METAR API failed after %d retries: %s", max_retries, exc)
+            return None
+    return None
+
+
+def get_historical_metar_actuals(
+    station: str,
+    start_date: str,
+    end_date: str,
+    tz_name: str = "America/New_York",
+    max_retries: int = 3,
+    base_delay: float = 1.0,
+) -> dict[str, dict]:
+    """Fetch METAR daily high/low from Iowa Environmental Mesonet (IEM).
+
+    Returns::
+
+        {
+            "2025-01-15": {"high": 41.0, "low": 28.1},
+            ...
+        }
+
+    Observations with temps < -60 or > 140 are rejected as bad readings.
+    Days with fewer than 4 valid observations are skipped.
+    """
+    start_dt = datetime.strptime(start_date, "%Y-%m-%d")
+    end_dt = datetime.strptime(end_date, "%Y-%m-%d")
+
+    tz_encoded = tz_name.replace("/", "%2F")
+    url = (
+        f"{_IEM_BASE}"
+        f"?station={station}"
+        f"&data=tmpf"
+        f"&tz={tz_encoded}"
+        f"&format=onlycomma"
+        f"&latlon=no"
+        f"&elev=no"
+        f"&missing=empty"
+        f"&trace=empty"
+        f"&direct=no"
+        f"&report_type=3"
+        f"&year1={start_dt.year}&month1={start_dt.month}&day1={start_dt.day}"
+        f"&year2={end_dt.year}&month2={end_dt.month}&day2={end_dt.day}"
+    )
+
+    csv_text = _fetch_metar_csv(url, max_retries=max_retries, base_delay=base_delay)
+    if not csv_text:
+        return {}
+
+    # Parse CSV: group temperatures by date
+    daily_temps: dict[str, list[float]] = {}
+    lines = csv_text.strip().split("\n")
+    if len(lines) < 2:
+        return {}
+
+    # First line is the header: station,valid,tmpf
+    for line in lines[1:]:
+        parts = line.split(",")
+        if len(parts) < 3:
+            continue
+
+        date_str = parts[1][:10]  # Extract YYYY-MM-DD from "valid" column
+        temp_str = parts[2].strip()
+        if not temp_str:
+            continue
+
+        try:
+            temp = float(temp_str)
+        except ValueError:
+            continue
+
+        # Reject bad readings
+        if temp < -60 or temp > 140:
+            continue
+
+        daily_temps.setdefault(date_str, []).append(temp)
+
+    # Compute daily high/low, requiring at least 4 observations
+    actuals: dict[str, dict] = {}
+    for date_str, temps in daily_temps.items():
+        if len(temps) < 4:
+            continue
+        actuals[date_str] = {
+            "high": round(max(temps), 1),
+            "low": round(min(temps), 1),
+        }
+
+    logger.info("METAR actuals: %d days loaded for station %s", len(actuals), station)
+    return actuals

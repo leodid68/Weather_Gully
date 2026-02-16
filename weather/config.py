@@ -11,12 +11,12 @@ logger = logging.getLogger(__name__)
 
 # Supported locations (matching Polymarket resolution sources)
 LOCATIONS = {
-    "NYC": {"lat": 40.7769, "lon": -73.8740, "name": "New York City (LaGuardia)", "tz": "America/New_York"},
-    "Chicago": {"lat": 41.9742, "lon": -87.9073, "name": "Chicago (O'Hare)", "tz": "America/Chicago"},
-    "Seattle": {"lat": 47.4502, "lon": -122.3088, "name": "Seattle (Sea-Tac)", "tz": "America/Los_Angeles"},
-    "Atlanta": {"lat": 33.6407, "lon": -84.4277, "name": "Atlanta (Hartsfield)", "tz": "America/New_York"},
-    "Dallas": {"lat": 32.8998, "lon": -97.0403, "name": "Dallas (DFW)", "tz": "America/Chicago"},
-    "Miami": {"lat": 25.7959, "lon": -80.2870, "name": "Miami (MIA)", "tz": "America/New_York"},
+    "NYC": {"lat": 40.7769, "lon": -73.8740, "name": "New York City (LaGuardia)", "tz": "America/New_York", "station": "KLGA"},
+    "Chicago": {"lat": 41.9742, "lon": -87.9073, "name": "Chicago (O'Hare)", "tz": "America/Chicago", "station": "KORD"},
+    "Seattle": {"lat": 47.4502, "lon": -122.3088, "name": "Seattle (Sea-Tac)", "tz": "America/Los_Angeles", "station": "KSEA"},
+    "Atlanta": {"lat": 33.6407, "lon": -84.4277, "name": "Atlanta (Hartsfield)", "tz": "America/New_York", "station": "KATL"},
+    "Dallas": {"lat": 32.8998, "lon": -97.0403, "name": "Dallas (DFW)", "tz": "America/Chicago", "station": "KDFW"},
+    "Miami": {"lat": 25.7959, "lon": -80.2870, "name": "Miami (MIA)", "tz": "America/New_York", "station": "KMIA"},
 }
 
 # Polymarket constraints

@@ -28,7 +28,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .config import LOCATIONS
-from .historical import get_historical_actuals, get_historical_forecasts
+from .historical import get_historical_actuals, get_historical_forecasts, get_historical_metar_actuals
 
 logger = logging.getLogger(__name__)
 
@@ -163,6 +163,80 @@ def compute_forecast_errors(
 
     errors = list(seen.values())
     logger.info("Computed %d deduplicated forecast errors for %s", len(errors), location)
+    return errors
+
+
+def _compute_errors_with_metar(
+    location: str,
+    lat: float,
+    lon: float,
+    station: str,
+    start_date: str,
+    end_date: str,
+    tz_name: str = "America/New_York",
+) -> list[dict]:
+    """Compute deduplicated forecast errors using METAR actuals instead of ERA5.
+
+    Same logic as ``compute_forecast_errors`` but fetches ground truth from
+    Iowa Environmental Mesonet (IEM) ASOS station data, which matches the
+    actual Polymarket resolution source.
+
+    Returns the same error record format as ``compute_forecast_errors``.
+    """
+    logger.info("Fetching historical forecasts for %s (%s to %s)...",
+                location, start_date, end_date)
+    forecasts = get_historical_forecasts(lat, lon, start_date, end_date, tz_name=tz_name)
+
+    logger.info("Fetching METAR actuals for %s (station %s)...", location, station)
+    actuals = get_historical_metar_actuals(station, start_date, end_date, tz_name=tz_name)
+
+    # Deduplicate: one error per (target_date, model, metric)
+    seen: dict[tuple[str, str, str], dict] = {}
+
+    for _run_date_str, targets in forecasts.items():
+        for target_date_str, model_data in targets.items():
+            actual = actuals.get(target_date_str)
+            if not actual:
+                continue
+
+            month = datetime.strptime(target_date_str, "%Y-%m-%d").month
+
+            # Compute model spread for this target date
+            spread: dict[str, float] = {}
+            for metric in ["high", "low"]:
+                gfs_val = model_data.get(f"gfs_{metric}")
+                ecmwf_val = model_data.get(f"ecmwf_{metric}")
+                if gfs_val is not None and ecmwf_val is not None:
+                    spread[metric] = abs(gfs_val - ecmwf_val)
+
+            for model_prefix in ["gfs", "ecmwf"]:
+                for metric in ["high", "low"]:
+                    key = (target_date_str, model_prefix, metric)
+                    if key in seen:
+                        continue
+
+                    forecast_key = f"{model_prefix}_{metric}"
+                    forecast_val = model_data.get(forecast_key)
+                    actual_val = actual.get(metric)
+
+                    if forecast_val is None or actual_val is None:
+                        continue
+
+                    record = {
+                        "location": location,
+                        "target_date": target_date_str,
+                        "month": month,
+                        "metric": metric,
+                        "model": model_prefix,
+                        "forecast": forecast_val,
+                        "actual": actual_val,
+                        "error": forecast_val - actual_val,
+                        "model_spread": spread.get(metric, 0.0),
+                    }
+                    seen[key] = record
+
+    errors = list(seen.values())
+    logger.info("Computed %d deduplicated forecast errors (METAR) for %s", len(errors), location)
     return errors
 
 
@@ -559,6 +633,11 @@ def main() -> None:
         "--output", type=str, default=_DEFAULT_OUTPUT,
         help=f"Output path for calibration.json (default: {_DEFAULT_OUTPUT})",
     )
+    parser.add_argument(
+        "--actuals-source", type=str, default="metar",
+        choices=["metar", "era5"],
+        help="Ground truth source: metar (ASOS stations) or era5 (reanalysis). Default: metar",
+    )
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
@@ -572,14 +651,28 @@ def main() -> None:
             logger.error("Unknown location: %s (available: %s)", loc, ", ".join(LOCATIONS))
             continue
 
-        errors = compute_forecast_errors(
-            location=loc,
-            lat=loc_data["lat"],
-            lon=loc_data["lon"],
-            start_date=args.start_date,
-            end_date=args.end_date,
-            tz_name=loc_data.get("tz", "America/New_York"),
-        )
+        station = loc_data.get("station")
+        if args.actuals_source == "metar" and station:
+            errors = _compute_errors_with_metar(
+                location=loc,
+                lat=loc_data["lat"],
+                lon=loc_data["lon"],
+                station=station,
+                start_date=args.start_date,
+                end_date=args.end_date,
+                tz_name=loc_data.get("tz", "America/New_York"),
+            )
+        else:
+            if args.actuals_source == "metar" and not station:
+                logger.warning("No METAR station for %s — falling back to ERA5", loc)
+            errors = compute_forecast_errors(
+                location=loc,
+                lat=loc_data["lat"],
+                lon=loc_data["lon"],
+                start_date=args.start_date,
+                end_date=args.end_date,
+                tz_name=loc_data.get("tz", "America/New_York"),
+            )
         all_errors.extend(errors)
 
     if not all_errors:

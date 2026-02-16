@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
-from weather.historical import get_historical_actuals, get_historical_forecasts
+from weather.historical import get_historical_actuals, get_historical_forecasts, get_historical_metar_actuals
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -113,6 +113,56 @@ class TestGetHistoricalActuals(unittest.TestCase):
         self.assertIn("2025-01-16", result)
         self.assertNotIn("high", result["2025-01-16"])
         self.assertIn("low", result["2025-01-16"])
+
+
+class TestGetHistoricalMetarActuals(unittest.TestCase):
+
+    @patch("weather.historical._fetch_metar_csv")
+    def test_parses_iem_csv(self, mock_fetch):
+        mock_fetch.return_value = (
+            "station,valid,tmpf\n"
+            "KLGA,2025-01-15 00:54,32.0\n"
+            "KLGA,2025-01-15 06:54,28.1\n"
+            "KLGA,2025-01-15 14:54,41.0\n"
+            "KLGA,2025-01-15 18:54,38.5\n"
+            "KLGA,2025-01-16 00:54,35.0\n"
+        )
+        result = get_historical_metar_actuals("KLGA", "2025-01-15", "2025-01-16")
+        self.assertIn("2025-01-15", result)
+        self.assertAlmostEqual(result["2025-01-15"]["high"], 41.0)
+        self.assertAlmostEqual(result["2025-01-15"]["low"], 28.1)
+
+    @patch("weather.historical._fetch_metar_csv")
+    def test_empty_csv_returns_empty(self, mock_fetch):
+        mock_fetch.return_value = "station,valid,tmpf\n"
+        result = get_historical_metar_actuals("KLGA", "2025-01-15", "2025-01-16")
+        self.assertEqual(result, {})
+
+    @patch("weather.historical._fetch_metar_csv")
+    def test_rejects_bad_readings(self, mock_fetch):
+        mock_fetch.return_value = (
+            "station,valid,tmpf\n"
+            "KLGA,2025-01-15 00:54,200.0\n"  # > 140, rejected
+            "KLGA,2025-01-15 06:54,32.0\n"
+            "KLGA,2025-01-15 10:54,35.0\n"
+            "KLGA,2025-01-15 14:54,38.0\n"
+            "KLGA,2025-01-15 18:54,36.0\n"
+        )
+        result = get_historical_metar_actuals("KLGA", "2025-01-15", "2025-01-16")
+        self.assertIn("2025-01-15", result)
+        # The 200 F reading should be rejected
+        self.assertAlmostEqual(result["2025-01-15"]["high"], 38.0)
+
+    @patch("weather.historical._fetch_metar_csv")
+    def test_skips_days_with_few_obs(self, mock_fetch):
+        mock_fetch.return_value = (
+            "station,valid,tmpf\n"
+            "KLGA,2025-01-15 00:54,32.0\n"
+            "KLGA,2025-01-15 06:54,28.1\n"
+            # Only 2 observations -- should be skipped (need 4+)
+        )
+        result = get_historical_metar_actuals("KLGA", "2025-01-15", "2025-01-16")
+        self.assertNotIn("2025-01-15", result)
 
 
 if __name__ == "__main__":
