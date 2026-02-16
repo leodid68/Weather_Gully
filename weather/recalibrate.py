@@ -42,8 +42,12 @@ MIN_EFFECTIVE_SAMPLES = 100
 WINDOW_DAYS = 90
 HALF_LIFE = 30.0
 
-# Default locations (all 6 cities)
-_ALL_LOCATIONS = ["NYC", "Chicago", "Miami", "Seattle", "Atlanta", "Dallas"]
+# Default locations (all 14 cities)
+_ALL_LOCATIONS = [
+    "NYC", "Chicago", "Miami", "Seattle", "Atlanta", "Dallas",
+    "London", "Paris", "Seoul", "Toronto",
+    "BuenosAires", "SaoPaulo", "Ankara", "Wellington",
+]
 
 
 # ---------------------------------------------------------------------------

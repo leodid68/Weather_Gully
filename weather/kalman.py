@@ -142,6 +142,9 @@ class KalmanState:
     _CALIBRATED_SIGMA = {
         "NYC": 2.38, "Chicago": 1.56, "Miami": 1.50,
         "Seattle": 1.04, "Atlanta": 1.53, "Dallas": 1.57,
+        # International (global base sigma as prior until per-city calibration)
+        "London": 1.64, "Paris": 1.64, "Seoul": 1.64, "Toronto": 1.64,
+        "BuenosAires": 1.64, "SaoPaulo": 1.64, "Ankara": 1.64, "Wellington": 1.64,
     }
 
     def prewarm(self, overwrite: bool = False) -> int:

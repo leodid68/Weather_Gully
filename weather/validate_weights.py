@@ -114,7 +114,11 @@ def main():
     train_start, train_end = "2025-01-01", "2025-09-30"
     test_start, test_end = "2025-10-01", "2025-12-31"
 
-    locations = ["NYC", "Chicago", "Miami", "Seattle", "Atlanta", "Dallas"]
+    locations = [
+        "NYC", "Chicago", "Miami", "Seattle", "Atlanta", "Dallas",
+        "London", "Paris", "Seoul", "Toronto",
+        "BuenosAires", "SaoPaulo", "Ankara", "Wellington",
+    ]
 
     # Fetch data
     logger.info("=" * 70)

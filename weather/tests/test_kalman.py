@@ -267,11 +267,11 @@ class TestSaveLoadRoundtrip:
 class TestPrewarm:
 
     def test_prewarm_creates_all_entries(self):
-        """Should create 6 locations × 4 buckets = 24 entries."""
+        """Should create 14 locations × 4 buckets = 56 entries."""
         ks = KalmanState()
         count = ks.prewarm()
-        assert count == 24
-        assert len(ks.entries) == 24
+        assert count == 56
+        assert len(ks.entries) == 56
 
     def test_prewarm_entries_are_warmed_up(self):
         """Pre-warmed entries should have sample_count=10, past threshold."""
@@ -312,7 +312,7 @@ class TestPrewarm:
             x=5.0, P=0.5, sample_count=50, last_updated="trained",
         )
         count = ks.prewarm()
-        assert count == 23  # 24 - 1 existing
+        assert count == 55  # 56 - 1 existing
         assert ks.entries["NYC|short"].x == 5.0  # Not overwritten
         assert ks.entries["NYC|short"].sample_count == 50
 
@@ -323,7 +323,7 @@ class TestPrewarm:
             x=5.0, P=0.5, sample_count=50,
         )
         count = ks.prewarm(overwrite=True)
-        assert count == 24
+        assert count == 56
         assert ks.entries["NYC|short"].x != 5.0  # Was overwritten
 
     def test_prewarm_blend_weight_positive(self):
@@ -338,7 +338,9 @@ class TestPrewarm:
         """After prewarm, get_sigma should return values."""
         ks = KalmanState()
         ks.prewarm()
-        for loc in ["NYC", "Chicago", "Miami", "Seattle", "Atlanta", "Dallas"]:
+        for loc in ["NYC", "Chicago", "Miami", "Seattle", "Atlanta", "Dallas",
+                    "London", "Paris", "Seoul", "Toronto",
+                    "BuenosAires", "SaoPaulo", "Ankara", "Wellington"]:
             for h in [0, 3, 6, 9]:
                 sigma = ks.get_sigma(loc, h)
                 assert sigma is not None
