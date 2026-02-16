@@ -414,6 +414,57 @@ class TestAdaptiveSigmaConfig(unittest.TestCase):
         self.assertFalse(config.adaptive_sigma)
 
 
+class TestScoreBucketsNO(unittest.TestCase):
+
+    def test_no_side_generated_for_overpriced_bucket(self):
+        """A bucket with prob=0.10 and price=0.80 should have a NO opportunity with positive EV."""
+        markets = [{
+            "id": "m1", "outcome_name": "90°F or higher",
+            "best_ask": 0.80, "external_price_yes": 0.80,
+        }]
+        config = Config()
+        config.min_ev_threshold = 0.03
+        config.min_probability = 0.05
+        with patch("weather.strategy.parse_temperature_bucket", return_value=(90, 999)):
+            with patch("weather.strategy.estimate_bucket_probability", return_value=0.10):
+                with patch("weather.strategy.platt_calibrate", side_effect=lambda p: p):
+                    scored = score_buckets(markets, 70.0, "2026-02-20", config, metric="high")
+        no_entries = [s for s in scored if s.get("side") == "no"]
+        self.assertTrue(len(no_entries) > 0, "Expected NO-side entries")
+        self.assertGreater(no_entries[0]["ev"], 0)
+        self.assertAlmostEqual(no_entries[0]["price"], 0.20, places=2)  # 1 - 0.80
+
+    def test_yes_side_still_generated(self):
+        """YES side should still be scored as before."""
+        markets = [{
+            "id": "m1", "outcome_name": "50-54°F",
+            "best_ask": 0.10, "external_price_yes": 0.10,
+        }]
+        config = Config()
+        config.min_probability = 0.05
+        with patch("weather.strategy.parse_temperature_bucket", return_value=(50, 54)):
+            with patch("weather.strategy.estimate_bucket_probability", return_value=0.40):
+                with patch("weather.strategy.platt_calibrate", side_effect=lambda p: p):
+                    scored = score_buckets(markets, 52.0, "2026-02-20", config, metric="high")
+        yes_entries = [s for s in scored if s.get("side") == "yes"]
+        self.assertTrue(len(yes_entries) > 0, "Expected YES-side entries")
+
+    def test_all_entries_have_side_field(self):
+        """Every scored entry must have a 'side' field."""
+        markets = [{
+            "id": "m1", "outcome_name": "50-54°F",
+            "best_ask": 0.50, "external_price_yes": 0.50,
+        }]
+        config = Config()
+        config.min_probability = 0.05
+        with patch("weather.strategy.parse_temperature_bucket", return_value=(50, 54)):
+            with patch("weather.strategy.estimate_bucket_probability", return_value=0.40):
+                with patch("weather.strategy.platt_calibrate", side_effect=lambda p: p):
+                    scored = score_buckets(markets, 52.0, "2026-02-20", config, metric="high")
+        for entry in scored:
+            self.assertIn("side", entry, f"Entry missing 'side' field: {entry}")
+
+
 class TestCircuitBreaker(unittest.TestCase):
 
     def test_daily_loss_stops_trading(self):

@@ -237,7 +237,25 @@ def score_buckets(
             "prob_raw": prob_raw,
             "price": price,
             "ev": ev,
+            "side": "yes",
         })
+
+        # ---- NO side: if bucket is overpriced, buying NO is profitable ----
+        no_prob = 1.0 - prob    # P(not in this bucket)
+        no_price = 1.0 - price  # Price of NO token (complement)
+        if no_price >= MIN_TICK_SIZE and no_prob >= config.min_probability:
+            ev_no = no_prob * (1.0 - config.trading_fees) - no_price
+            if ev_no > 0:
+                scored.append({
+                    "market": market,
+                    "bucket": bucket,
+                    "outcome_name": outcome_name,
+                    "prob": no_prob,
+                    "prob_raw": 1.0 - prob_raw,
+                    "price": no_price,
+                    "ev": ev_no,
+                    "side": "no",
+                })
 
     scored.sort(key=lambda x: x["ev"], reverse=True)
     return scored
@@ -856,6 +874,7 @@ def run_weather_strategy(
                                 "prob_raw": prob_raw,
                                 "price": price,
                                 "ev": prob * (1.0 - config.trading_fees) - price,
+                                "side": "yes",
                             })
                     break
 
