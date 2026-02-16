@@ -122,6 +122,9 @@ class Config:
     # AR(1) autocorrelation correction in feedback bias
     ar_autocorrelation: bool = True
 
+    # Kalman filter for dynamic sigma estimation
+    kalman_sigma: bool = True
+
     @property
     def active_locations(self) -> list[str]:
         """Return canonical location keys matching LOCATIONS dict keys.

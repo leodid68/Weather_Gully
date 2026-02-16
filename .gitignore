@@ -18,6 +18,7 @@ weather/error_history.json
 weather/recalibration_log/
 
 # Runtime state (regenerated at runtime)
+weather/kalman_state.json
 weather/feedback_state.json
 weather/paper_state.json
 weather/price_snapshots.json

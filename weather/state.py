@@ -72,6 +72,7 @@ class PredictionRecord:
     resolved: bool = False
     actual_outcome: bool | None = None  # True if our bucket won
     fed_to_feedback: bool = False
+    horizon: int = 0  # forecast horizon in days (for Kalman sigma)
 
     def to_dict(self) -> dict:
         return {k: v for k, v in self.__dict__.items()}
@@ -92,6 +93,7 @@ class PredictionRecord:
             resolved=d.get("resolved", False),
             actual_outcome=d.get("actual_outcome"),
             fed_to_feedback=d.get("fed_to_feedback", False),
+            horizon=d.get("horizon", 0),
         )
 
 

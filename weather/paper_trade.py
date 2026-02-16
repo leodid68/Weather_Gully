@@ -60,8 +60,12 @@ def _resolve_predictions(state: TradingState, gamma) -> int:
     return resolved_count
 
 
-def _feed_feedback(state: TradingState, feedback: FeedbackState) -> int:
+def _feed_feedback(state: TradingState, feedback: FeedbackState,
+                   kalman: "KalmanState | None" = None) -> int:
     """Feed resolved predictions into the feedback loop using daily observations.
+
+    When *kalman* is provided, also records the absolute forecast error
+    into the Kalman filter for dynamic sigma learning.
 
     Returns the number of entries fed.
     """
@@ -83,6 +87,10 @@ def _feed_feedback(state: TradingState, feedback: FeedbackState) -> int:
         except (IndexError, ValueError):
             continue
         feedback.record(pred.location, month, pred.forecast_temp, actual_temp)
+        # Feed Kalman filter
+        if kalman is not None:
+            abs_error = abs(pred.forecast_temp - actual_temp)
+            kalman.record_error(pred.location, pred.horizon, abs_error)
         pred.fed_to_feedback = True
         fed += 1
     if fed:
@@ -177,8 +185,12 @@ def main() -> None:
         # Resolve past predictions and feed feedback
         _resolve_predictions(state, gamma)
         feedback = FeedbackState.load()
-        _feed_feedback(state, feedback)
+        from .kalman import KalmanState
+        kalman = KalmanState.load() if config.kalman_sigma else None
+        _feed_feedback(state, feedback, kalman=kalman)
         feedback.save()
+        if kalman is not None:
+            kalman.save()
         _print_pnl_summary(state)
 
         # Run strategy with PaperBridge — dry_run=False so trades go through

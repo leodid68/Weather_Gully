@@ -389,6 +389,7 @@ def compute_adaptive_sigma(
     ema_error: float | None,
     forecast_date: str,
     location: str = "",
+    kalman_state: "KalmanState | None" = None,
 ) -> float:
     """Compute adaptive sigma from three independent uncertainty signals.
 
@@ -403,6 +404,9 @@ def compute_adaptive_sigma(
             (``None`` or ``0`` to skip).
         forecast_date: ISO date string ``"YYYY-MM-DD"``.
         location: Canonical location key for calibrated lookups.
+        kalman_state: Optional Kalman filter state for dynamic sigma
+            blending.  When provided and warmed up, blends the Kalman
+            sigma estimate with the max-of-4-signals result.
 
     Returns:
         Adaptive sigma (always > 0).
@@ -432,7 +436,20 @@ def compute_adaptive_sigma(
         month = datetime.now(timezone.utc).month
     sigma_floor = _get_stddev(forecast_date, location) * _get_seasonal_factor(month, location)
 
-    result = max(sigma_ensemble, sigma_spread, sigma_ema, sigma_floor)
+    max_of_signals = max(sigma_ensemble, sigma_spread, sigma_ema, sigma_floor)
+
+    if kalman_state is not None:
+        from .kalman import horizon_bucket as _hb  # avoid circular
+        horizon = get_horizon_days(forecast_date)
+        kalman_sigma = kalman_state.get_sigma(location, horizon)
+        if kalman_sigma is not None:
+            w = kalman_state.get_blend_weight(location, horizon)
+            result = w * kalman_sigma + (1.0 - w) * max_of_signals
+            result = max(result, sigma_floor)  # never below floor
+        else:
+            result = max_of_signals
+    else:
+        result = max_of_signals
 
     logger.debug(
         "adaptive_sigma: ensemble=%.2f spread=%.2f ema=%.2f floor=%.2f -> %.2f",

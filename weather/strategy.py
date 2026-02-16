@@ -574,6 +574,8 @@ def run_weather_strategy(
 ) -> None:
     """Run the weather trading strategy."""
     feedback = FeedbackState.load()
+    from .kalman import KalmanState
+    kalman = KalmanState.load() if config.kalman_sigma else None
 
     logger.info("Weather Trading Bot (CLOB direct)")
     logger.info("=" * 50)
@@ -853,6 +855,7 @@ def run_weather_strategy(
             adaptive_sigma_value = compute_adaptive_sigma(
                 ensemble_result, model_spread if config.multi_source else 0.0,
                 ema_error, date_str, location,
+                kalman_state=kalman,
             )
             log_sigma_signals(
                 location=location,
@@ -1082,6 +1085,7 @@ def run_weather_strategy(
                         bucket_low=bucket[0],
                         bucket_high=bucket[1],
                         timestamp=datetime.now(timezone.utc).isoformat(),
+                        horizon=days_ahead,
                     ))
 
                     # Update remaining balance
@@ -1119,6 +1123,13 @@ def run_weather_strategy(
         feedback.save()
     except Exception as exc:
         logger.warning("Failed to save feedback state: %s", exc)
+
+    # Persist Kalman state
+    if kalman is not None:
+        try:
+            kalman.save()
+        except Exception as exc:
+            logger.warning("Failed to save Kalman state: %s", exc)
 
     # Persist state
     save_path = state_path or config.state_file
