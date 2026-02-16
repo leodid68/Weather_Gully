@@ -270,6 +270,14 @@ def _get_stddev(forecast_date: str, location: str = "", horizon_override: int | 
             sigma_value = float(global_sigma[horizon_key])
             logger.debug("Using calibrated global sigma for h=%s: %.2f", horizon_key, sigma_value)
             return sigma_value
+        # 2b. Base sigma x horizon growth from JSON
+        base_sigma_str = global_sigma.get("0")
+        horizon_growth = cal.get("horizon_growth", {})
+        if base_sigma_str and horizon_key in horizon_growth:
+            sigma_value = float(base_sigma_str) * float(horizon_growth[horizon_key])
+            logger.debug("Using base sigma × horizon growth for h=%s: %.2f × %.2f = %.2f",
+                         horizon_key, float(base_sigma_str), float(horizon_growth[horizon_key]), sigma_value)
+            return sigma_value
 
     # 3. Hardcoded fallback
     if days_ahead <= 10:

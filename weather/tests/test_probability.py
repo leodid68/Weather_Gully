@@ -609,6 +609,59 @@ class TestCalibrationLogging(unittest.TestCase):
             prob._calibration_mtime = 0.0
 
 
+class TestHorizonGrowthFromCalibration(unittest.TestCase):
+    def test_reads_growth_from_json(self):
+        """If calibration has horizon_growth, use base_sigma * growth for missing horizons."""
+        import weather.probability as prob
+        cal_data = {
+            "global_sigma": {"0": 2.0},  # Only h=0 present
+            "horizon_growth": {"0": 1.0, "1": 1.5, "2": 2.0, "3": 2.5},
+        }
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+            json.dump(cal_data, f)
+            tmp_path = f.name
+        try:
+            orig = prob._CALIBRATION_PATH
+            prob._CALIBRATION_PATH = Path(tmp_path)
+            prob._calibration_cache = None
+            prob._calibration_mtime = 0.0
+            # h=0 should use global_sigma directly: 2.0
+            sigma_0 = prob._get_stddev("2026-02-16", horizon_override=0)
+            self.assertAlmostEqual(sigma_0, 2.0, places=1)
+            # h=1 should use base * growth: 2.0 * 1.5 = 3.0
+            sigma_1 = prob._get_stddev("2026-02-17", horizon_override=1)
+            self.assertAlmostEqual(sigma_1, 3.0, places=1)
+            # h=3 should use base * growth: 2.0 * 2.5 = 5.0
+            sigma_3 = prob._get_stddev("2026-02-19", horizon_override=3)
+            self.assertAlmostEqual(sigma_3, 5.0, places=1)
+        finally:
+            prob._CALIBRATION_PATH = orig
+            prob._calibration_cache = None
+            prob._calibration_mtime = 0.0
+            os.unlink(tmp_path)
+
+    def test_falls_back_without_growth(self):
+        """Without horizon_growth in JSON, should use hardcoded fallback."""
+        import weather.probability as prob
+        cal_data = {"global_sigma": {"0": 2.0}}  # No horizon_growth
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+            json.dump(cal_data, f)
+            tmp_path = f.name
+        try:
+            orig = prob._CALIBRATION_PATH
+            prob._CALIBRATION_PATH = Path(tmp_path)
+            prob._calibration_cache = None
+            prob._calibration_mtime = 0.0
+            # h=5 not in global_sigma, no horizon_growth → hardcoded fallback
+            sigma_5 = prob._get_stddev("2026-02-21", horizon_override=5)
+            self.assertAlmostEqual(sigma_5, 5.2, places=1)  # _HORIZON_STDDEV[5]
+        finally:
+            prob._CALIBRATION_PATH = orig
+            prob._calibration_cache = None
+            prob._calibration_mtime = 0.0
+            os.unlink(tmp_path)
+
+
 class TestCalibrationAge(unittest.TestCase):
     def test_old_calibration_warns(self):
         """Calibration >30 days old should generate a warning."""

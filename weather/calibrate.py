@@ -857,6 +857,7 @@ def build_calibration_tables(
         "platt_scaling": platt_params,
         "distribution": distribution,
         "normality_test": normality,
+        "horizon_growth": {str(h): round(_horizon_growth_factor(h), 2) for h in range(11)},
         "metadata": {
             "generated": datetime.now(timezone.utc).isoformat(),
             "samples": len(all_errors),
@@ -1128,6 +1129,7 @@ def build_weighted_calibration_tables(
         "platt_scaling": platt_params,
         "distribution": distribution,
         "normality_test": normality,
+        "horizon_growth": {str(h): round(_horizon_growth_factor(h), 2) for h in range(11)},
         "metadata": {
             "generated": datetime.now(timezone.utc).isoformat(),
             "samples": len(all_errors),
