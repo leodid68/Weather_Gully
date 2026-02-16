@@ -34,7 +34,7 @@ Polymarket lists daily temperature markets for 6 US cities: *"Will the highest t
 
 This codebase has been through **4 rounds of comprehensive code audit**, covering all 3 modules (`weather/`, `bot/`, `polymarket/`). ~50 bugs were identified and fixed across the audit rounds, including 2 critical probability distribution bugs found in the latest audit.
 
-**Current status:** 0 critical issues, 0 important issues remaining. 720 tests, all green.
+**Current status:** 0 critical issues, 0 important issues remaining. 726 tests, all green.
 
 | Category | Examples of fixes applied |
 |----------|-------------------------|
@@ -108,7 +108,7 @@ The core intelligence layer. Combines multiple weather data sources into a proba
 
 | Module | Description |
 |--------|-------------|
-| `strategy.py` | Main strategy loop — fetches data, scores buckets, manages entries/exits/stop-losses |
+| `strategy.py` | Main strategy loop — fetches data, scores buckets, manages entries/exits (parallel orderbook fetch)/stop-losses, `--explain` mode |
 | `bridge.py` | `CLOBWeatherBridge` adapter — connects weather strategy to CLOB + Gamma APIs, with fill verification |
 | `noaa.py` | NOAA Weather API client (api.weather.gov) — official US forecast |
 | `open_meteo.py` | Open-Meteo client — GFS + ECMWF multi-model forecasts with auxiliary weather variables |
@@ -212,6 +212,7 @@ The core intelligence layer. Combines multiple weather data sources into a proba
 │  - Dynamic exit thresholds (tighter as resolution approaches)        │
 │  - Stop-loss on forecast reversal (5°F shift away from bucket)       │
 │  - Observation-aware stop-loss (after 14:00 local for highs)         │
+│  - Parallel orderbook pre-fetch (all positions at once via threads)   │
 │  - State-tracked exits (positions from state, not API)               │
 │  - Pending order deduplication (skip positions with pending exits)    │
 │  - Persistent state (survives restarts)                              │
@@ -529,6 +530,9 @@ python3 -m weather.paper_trade --set locations=NYC,Chicago
 
 # Disable safeguards (for testing)
 python3 -m weather.paper_trade --no-safeguards
+
+# Detailed decision reasoning (shows full scoring chain)
+python3 -m weather.paper_trade --explain
 ```
 
 ### What It Does
@@ -879,6 +883,9 @@ python3 -m weather --positions
 # Show current config
 python3 -m weather --config
 
+# Detailed decision reasoning (implies --dry-run)
+python3 -m weather --explain
+
 # Disable METAR observations (forecast-only mode)
 python3 -m weather --no-aviation
 
@@ -992,7 +999,7 @@ Follow these steps **in order** — each one builds on the previous.
 ```bash
 git clone <repo-url> && cd Weather_Gully
 pip install httpx eth-account eth-abi eth-utils websockets certifi
-python3 -m pytest -q  # 720 tests should pass
+python3 -m pytest -q  # 726 tests should pass
 ```
 
 #### Step 2: First dry-run
@@ -1376,7 +1383,7 @@ Choose the calibration window based on what you're trading:
 ## Testing
 
 ```bash
-# Run all 720 tests
+# Run all 726 tests
 python3 -m pytest -q
 
 # Weather tests only
@@ -1397,7 +1404,7 @@ python3 -m pytest weather/tests/test_strategy.py -v
 
 | Package | Tests | Key coverage |
 |---------|-------|-------------|
-| `weather/` | ~437 tests | Strategy, bridge, paper bridge, NOAA, Open-Meteo (single + multi-location), aviation/METAR, probability (Student's t, Platt scaling, horizon override), calibration, recalibration, previous runs, METAR actuals, error cache, trade log, backtesting, sizing, state, parsing, AR(1) autocorrelation, Kalman filter sigma, mean-reversion timing |
+| `weather/` | ~443 tests | Strategy, bridge, paper bridge, NOAA, Open-Meteo (single + multi-location), aviation/METAR, probability (Student's t, Platt scaling, horizon override), calibration, recalibration, previous runs, METAR actuals, error cache, trade log, backtesting, sizing, state, parsing, AR(1) autocorrelation, Kalman filter sigma, mean-reversion timing, explain mode |
 | `bot/` | ~137 tests | Scanner, signals, scoring, sizing, daemon, Gamma API, strategy, state |
 | `polymarket/` | ~46 tests | Order signing, HMAC auth, client REST, circuit breaker, fill detection |
 
@@ -1484,6 +1491,7 @@ Weather_Gully/
 │       ├── test_ar1.py
 │       ├── test_kalman.py
 │       ├── test_mean_reversion.py
+│       ├── test_explain.py
 │       └── fixtures/
 │
 └── README.md
