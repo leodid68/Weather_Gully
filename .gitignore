@@ -29,6 +29,9 @@ weather/calibration_era5_backup.json
 backtest_*.json
 backtest_report.json
 
+# Worktrees
+.worktrees/
+
 # One-off audit/ops docs
 WEATHER_GULLY_AUDIT.md
 WEATHER_GULLY_OPS_FIXES.md
