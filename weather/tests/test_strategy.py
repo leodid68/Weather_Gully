@@ -348,7 +348,6 @@ class TestStateSaveLoad(unittest.TestCase):
             market_id="m-1", outcome_name="50-54", side="yes",
             cost_basis=0.10, shares=20.0, location="NYC",
         )
-        state.mark_analyzed("m-2")
 
         with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as f:
             path = f.name
@@ -359,7 +358,6 @@ class TestStateSaveLoad(unittest.TestCase):
         self.assertIn("m-1", loaded.trades)
         self.assertAlmostEqual(loaded.trades["m-1"].cost_basis, 0.10)
         self.assertAlmostEqual(loaded.trades["m-1"].shares, 20.0)
-        self.assertIn("m-2", loaded.analyzed_markets)
 
         Path(path).unlink()
 

@@ -14,41 +14,6 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass
-class PendingOrder:
-    """Tracks an order that has been submitted but not yet filled."""
-    order_id: str
-    market_id: str
-    side: str  # "BUY" or "SELL"
-    price: float
-    size: float
-    timestamp: str
-    token_id: str = ""
-
-    def to_dict(self) -> dict:
-        return {
-            "order_id": self.order_id,
-            "market_id": self.market_id,
-            "side": self.side,
-            "price": self.price,
-            "size": self.size,
-            "timestamp": self.timestamp,
-            "token_id": self.token_id,
-        }
-
-    @classmethod
-    def from_dict(cls, d: dict) -> "PendingOrder":
-        return cls(
-            order_id=d["order_id"],
-            market_id=d.get("market_id", ""),
-            side=d.get("side", "BUY"),
-            price=d.get("price", 0.0),
-            size=d.get("size", 0.0),
-            timestamp=d.get("timestamp", ""),
-            token_id=d.get("token_id", ""),
-        )
-
-
-@dataclass
 class TradeRecord:
     market_id: str
     outcome_name: str
@@ -133,7 +98,6 @@ class PredictionRecord:
 @dataclass
 class TradingState:
     trades: dict[str, TradeRecord] = field(default_factory=dict)  # market_id → TradeRecord
-    analyzed_markets: set[str] = field(default_factory=set)
     last_run: str = ""
     # Forecast change detection: location+date → last known temp
     previous_forecasts: dict[str, float] = field(default_factory=dict)
@@ -143,8 +107,6 @@ class TradingState:
     event_positions: dict[str, str] = field(default_factory=dict)
     # Daily METAR observations: "location|date" → obs_data dict
     daily_observations: dict[str, dict] = field(default_factory=dict)
-    # Pending orders: order_id → PendingOrder
-    pending_orders: dict[str, PendingOrder] = field(default_factory=dict)
 
     def record_trade(
         self,
@@ -177,12 +139,6 @@ class TradingState:
     def get_cost_basis(self, market_id: str) -> float | None:
         rec = self.trades.get(market_id)
         return rec.cost_basis if rec else None
-
-    def mark_analyzed(self, market_id: str) -> None:
-        self.analyzed_markets.add(market_id)
-
-    def was_analyzed(self, market_id: str) -> bool:
-        return market_id in self.analyzed_markets
 
     # -- Forecast change detection --
 
@@ -244,18 +200,10 @@ class TradingState:
     def prune(
         self,
         max_predictions: int = 500,
-        max_analyzed: int = 1000,
         max_observations_days: int = 30,
         max_forecasts: int = 500,
     ) -> None:
         """Remove old entries to prevent unbounded state growth."""
-        # Cap analyzed_markets (IDs are hex hashes without timestamps;
-        # remove arbitrary entries to stay within bounds)
-        if len(self.analyzed_markets) > max_analyzed:
-            excess = len(self.analyzed_markets) - max_analyzed
-            to_remove = list(self.analyzed_markets)[:excess]
-            self.analyzed_markets -= set(to_remove)
-
         # Prune resolved predictions beyond cap
         resolved = [(k, v) for k, v in self.predictions.items() if v.resolved]
         if len(resolved) > max_predictions:
@@ -283,13 +231,11 @@ class TradingState:
         self.prune()
         data = {
             "trades": {mid: rec.to_dict() for mid, rec in self.trades.items()},
-            "analyzed_markets": sorted(self.analyzed_markets),
             "last_run": datetime.now(timezone.utc).isoformat(),
             "previous_forecasts": self.previous_forecasts,
             "predictions": {mid: rec.to_dict() for mid, rec in self.predictions.items()},
             "event_positions": self.event_positions,
             "daily_observations": self.daily_observations,
-            "pending_orders": {oid: po.to_dict() for oid, po in self.pending_orders.items()},
         }
         dir_name = os.path.dirname(path) or "."
         fd, tmp_path = tempfile.mkstemp(suffix=".tmp", dir=dir_name)
@@ -319,7 +265,6 @@ class TradingState:
                 mid: TradeRecord.from_dict(rec)
                 for mid, rec in data.get("trades", {}).items()
             }
-            analyzed = set(data.get("analyzed_markets", []))
             previous_forecasts = data.get("previous_forecasts", {})
             predictions = {
                 mid: PredictionRecord.from_dict(rec)
@@ -327,19 +272,13 @@ class TradingState:
             }
             event_positions = data.get("event_positions", {})
             daily_observations = data.get("daily_observations", {})
-            pending_orders = {
-                oid: PendingOrder.from_dict(po)
-                for oid, po in data.get("pending_orders", {}).items()
-            }
             return cls(
                 trades=trades,
-                analyzed_markets=analyzed,
                 last_run=data.get("last_run", ""),
                 previous_forecasts=previous_forecasts,
                 predictions=predictions,
                 event_positions=event_positions,
                 daily_observations=daily_observations,
-                pending_orders=pending_orders,
             )
         except (json.JSONDecodeError, IOError, KeyError) as exc:
             logger.warning("Failed to load state from %s: %s — starting fresh", path, exc)
