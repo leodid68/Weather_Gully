@@ -500,5 +500,54 @@ class TestStudentTCDF(unittest.TestCase):
         self.assertGreater(tail_t, tail_normal)
 
 
+class TestStudentTCDFEdgeCases(unittest.TestCase):
+    """Edge cases for _student_t_cdf robustness."""
+
+    def test_extreme_positive(self):
+        from weather.probability import _student_t_cdf
+        result = _student_t_cdf(1e10, 10)
+        self.assertAlmostEqual(result, 1.0, places=4)
+
+    def test_extreme_negative(self):
+        from weather.probability import _student_t_cdf
+        result = _student_t_cdf(-1e10, 10)
+        self.assertAlmostEqual(result, 0.0, places=4)
+
+    def test_positive_inf(self):
+        from weather.probability import _student_t_cdf
+        result = _student_t_cdf(float('inf'), 10)
+        self.assertEqual(result, 1.0)
+
+    def test_negative_inf(self):
+        from weather.probability import _student_t_cdf
+        result = _student_t_cdf(float('-inf'), 10)
+        self.assertEqual(result, 0.0)
+
+    def test_nan_returns_half(self):
+        from weather.probability import _student_t_cdf
+        result = _student_t_cdf(float('nan'), 10)
+        self.assertEqual(result, 0.5)
+
+    def test_df_zero(self):
+        from weather.probability import _student_t_cdf
+        result = _student_t_cdf(1.0, 0)
+        self.assertEqual(result, 0.5)
+
+    def test_df_negative(self):
+        from weather.probability import _student_t_cdf
+        result = _student_t_cdf(1.0, -5)
+        self.assertEqual(result, 0.5)
+
+    def test_df_fractional(self):
+        from weather.probability import _student_t_cdf
+        result = _student_t_cdf(0, 0.5)
+        self.assertAlmostEqual(result, 0.5, places=4)
+
+    def test_df_very_large(self):
+        from weather.probability import _student_t_cdf
+        result = _student_t_cdf(0, 1000)
+        self.assertAlmostEqual(result, 0.5, places=4)
+
+
 if __name__ == "__main__":
     unittest.main()

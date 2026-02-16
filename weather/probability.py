@@ -173,6 +173,13 @@ def _student_t_cdf(x: float, df: float) -> float:
     Uses the regularized incomplete beta function.
     For df > 100, falls back to normal CDF (negligible difference).
     """
+    # Guard: invalid inputs
+    if math.isnan(x) or df <= 0:
+        logger.warning("Invalid student_t_cdf input: x=%s df=%s — returning 0.5", x, df)
+        return 0.5
+    if math.isinf(x):
+        return 1.0 if x > 0 else 0.0
+
     if df > 100:
         return _normal_cdf(x)
     t2 = x * x
