@@ -141,8 +141,11 @@ class FeedbackState:
                     and entry.ar_count >= _MIN_AR_SAMPLES
                     and abs(entry.ar_phi) > 0.1):
                 ar_correction = entry.ar_phi * entry.last_error * decay
-                return base_bias + ar_correction
-            return base_bias
+                correction = base_bias + ar_correction
+            else:
+                correction = base_bias
+            # Cap total correction to prevent extreme forecast shifts
+            return max(-5.0, min(5.0, correction))
         return None
 
     def get_abs_error_ema(self, location: str, month: int) -> float | None:

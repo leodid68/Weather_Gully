@@ -830,5 +830,40 @@ class TestGetCorrelation(unittest.TestCase):
             os.unlink(tmp_path)
 
 
+class TestPlattNegativeAGuard(unittest.TestCase):
+    """Platt scaling with a < 0 should be clamped to preserve ordering."""
+
+    @patch("weather.probability._load_platt_params", return_value={"a": -1.0, "b": 0.0})
+    def test_negative_a_clamped(self, _mock):
+        """a < 0 should be clamped to 0.01 — ordering preserved."""
+        low = platt_calibrate(0.3)
+        high = platt_calibrate(0.7)
+        self.assertLess(low, high, "Ordering should be preserved even with negative a param")
+
+    @patch("weather.probability._load_platt_params", return_value={"a": -2.0, "b": 0.5})
+    def test_negative_a_does_not_invert(self, _mock):
+        """Higher raw prob should still produce higher calibrated prob."""
+        results = [platt_calibrate(p) for p in [0.1, 0.3, 0.5, 0.7, 0.9]]
+        for i in range(len(results) - 1):
+            self.assertLessEqual(results[i], results[i + 1])
+
+
+class TestStudentTSmallDF(unittest.TestCase):
+    """Student-t CDF with very small df should fall back to normal CDF."""
+
+    def test_df_below_1_returns_valid(self):
+        from weather.probability import _student_t_cdf
+        result = _student_t_cdf(1.5, 0.5)
+        self.assertGreaterEqual(result, 0.0)
+        self.assertLessEqual(result, 1.0)
+
+    def test_df_below_1_near_normal(self):
+        from weather.probability import _student_t_cdf, _normal_cdf
+        # With df < 1, falls back to normal CDF
+        result = _student_t_cdf(1.0, 0.5)
+        normal = _normal_cdf(1.0)
+        self.assertAlmostEqual(result, normal, places=4)
+
+
 if __name__ == "__main__":
     unittest.main()

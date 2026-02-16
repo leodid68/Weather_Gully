@@ -254,5 +254,54 @@ class TestFeedbackDecay(unittest.TestCase):
             os.unlink(path)
 
 
+class TestFeedbackBiasCap(unittest.TestCase):
+    """C4: get_bias total correction capped to ±5.0°F."""
+
+    def _make_entry(self, bias_ema, ar_phi=0.0, last_error=None, ar_count=0):
+        return FeedbackEntry(
+            bias_ema=bias_ema, abs_error_ema=3.0, sample_count=20,
+            last_updated=datetime.now(timezone.utc).isoformat(),
+            last_error=last_error, ar_phi=ar_phi,
+            cov_sum=0.0, var_sum=0.0, ar_count=ar_count,
+        )
+
+    def test_positive_cap(self):
+        """Large positive bias + AR correction should be capped at +5.0."""
+        state = FeedbackState()
+        # bias_ema=4.0, ar_phi=0.8, last_error=5.0 → base~4.0 + ar~4.0 = ~8.0
+        state.entries["NYC|winter"] = self._make_entry(
+            bias_ema=4.0, ar_phi=0.8, last_error=5.0, ar_count=15)
+        result = state.get_bias("NYC", 1)
+        self.assertIsNotNone(result)
+        self.assertAlmostEqual(result, 5.0, delta=0.1)
+
+    def test_negative_cap(self):
+        """Large negative bias + AR correction should be capped at -5.0."""
+        state = FeedbackState()
+        state.entries["NYC|winter"] = self._make_entry(
+            bias_ema=-4.0, ar_phi=0.8, last_error=-5.0, ar_count=15)
+        result = state.get_bias("NYC", 1)
+        self.assertIsNotNone(result)
+        self.assertAlmostEqual(result, -5.0, delta=0.1)
+
+    def test_within_cap_not_clamped(self):
+        """Correction within ±5.0 should not be altered."""
+        state = FeedbackState()
+        state.entries["NYC|winter"] = self._make_entry(bias_ema=2.0)
+        result = state.get_bias("NYC", 1)
+        self.assertIsNotNone(result)
+        self.assertAlmostEqual(result, 2.0, delta=0.1)
+
+    def test_ar_pushes_above_cap(self):
+        """AR(1) correction alone exceeding +5 should be capped."""
+        state = FeedbackState()
+        # bias_ema=0, ar_phi=0.8, last_error=8.0 → ar ~ 6.4 → cap to 5.0
+        state.entries["NYC|winter"] = self._make_entry(
+            bias_ema=0.0, ar_phi=0.8, last_error=8.0, ar_count=15)
+        result = state.get_bias("NYC", 1)
+        self.assertIsNotNone(result)
+        self.assertAlmostEqual(result, 5.0, delta=0.1)
+
+
 if __name__ == "__main__":
     unittest.main()

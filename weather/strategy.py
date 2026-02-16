@@ -426,9 +426,10 @@ def should_exit_on_edge_inversion(
         # We bought YES. Exit if market price > our probability AND we can sell without big loss
         return market_price > our_prob and market_price >= cost_basis - min_loss_to_trigger
     else:
-        # We bought NO at (1-market_price). Exit if our model now favors the YES side
-        no_market_price = 1.0 - market_price  # current NO price
-        return our_prob > (1 - market_price) and no_market_price >= cost_basis - min_loss_to_trigger
+        # We bought NO. our_prob is P(NOT in bucket). Edge inverts when YES price
+        # exceeds our P(YES) = 1 - our_prob, meaning the market now favors YES.
+        no_market_price = 1.0 - market_price  # current NO token price
+        return market_price > (1.0 - our_prob) and no_market_price >= cost_basis - min_loss_to_trigger
 
 
 # --------------------------------------------------------------------------
@@ -1141,12 +1142,15 @@ def run_weather_strategy(
                 outcome_name, price, prob * 100, ev,
             )
 
-            if price >= config.entry_threshold:
-                logger.info("Price $%.2f above entry threshold $%.2f — skip", price, config.entry_threshold)
+            # Compare YES token price against threshold (for NO, yes_price = 1 - price)
+            side = entry.get("side", "yes")
+            yes_price_check = price if side == "yes" else (1.0 - price)
+            if yes_price_check >= config.entry_threshold:
+                logger.info("YES price $%.2f above entry threshold $%.2f — skip", yes_price_check, config.entry_threshold)
                 if explain:
                     explain_stats["buckets_filtered"] += 1
                     explain_stats["filter_reasons"]["price_above_threshold"] = explain_stats["filter_reasons"].get("price_above_threshold", 0) + 1
-                    logger.info("  [EXPLAIN] Filtered: price $%.2f > threshold $%.2f", price, config.entry_threshold)
+                    logger.info("  [EXPLAIN] Filtered: YES price $%.2f > threshold $%.2f", yes_price_check, config.entry_threshold)
                 continue
 
             # Safeguards
@@ -1221,8 +1225,6 @@ def run_weather_strategy(
 
             # Confidence = our probability estimate
             confidence = round(prob, 2)
-
-            side = entry.get("side", "yes")
 
             if dry_run:
                 if explain:

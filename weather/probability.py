@@ -198,11 +198,17 @@ def _regularized_incomplete_beta(x: float, a: float, b: float, max_iter: int = 2
         f *= delta
 
         if abs(delta - 1.0) < 1e-10:
+            converged = True
             break
     else:
+        converged = False
         logger.warning("_regularized_incomplete_beta: continued fraction did not converge after %d iterations (x=%.4g, a=%.4g, b=%.4g)", max_iter, x, a, b)
 
-    return front * f
+    result = front * f
+    if not converged:
+        # Clamp to valid range as safety net
+        result = max(0.0, min(1.0, result))
+    return result
 
 
 def _student_t_cdf(x: float, df: float) -> float:
@@ -220,9 +226,17 @@ def _student_t_cdf(x: float, df: float) -> float:
 
     if df > 100:
         return _normal_cdf(x)
+    # Guard: very small df can cause convergence issues — fall back to normal
+    if df < 1.0:
+        logger.debug("student_t_cdf: df=%.2f < 1 — falling back to normal CDF", df)
+        return _normal_cdf(x)
     t2 = x * x
     z = df / (df + t2)
     ibeta = _regularized_incomplete_beta(z, df / 2.0, 0.5)
+    # Sanity check: ibeta must be in [0, 1]
+    if not (0.0 <= ibeta <= 1.0):
+        logger.warning("student_t_cdf: ibeta=%.4g out of range — falling back to normal CDF", ibeta)
+        return _normal_cdf(x)
     if x >= 0:
         return 1.0 - 0.5 * ibeta
     else:
@@ -373,6 +387,11 @@ def platt_calibrate(prob: float) -> float:
     params = _load_platt_params()
     a = params.get("a", 1.0)
     b = params.get("b", 0.0)
+
+    # Guard: a must be positive to preserve probability ordering
+    if a < 0:
+        logger.warning("Platt a=%.3f is negative — clamping to 0.01 (would invert probabilities)", a)
+        a = 0.01
 
     # Identity shortcut
     if a == 1.0 and b == 0.0:
