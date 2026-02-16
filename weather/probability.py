@@ -439,7 +439,6 @@ def compute_adaptive_sigma(
     max_of_signals = max(sigma_ensemble, sigma_spread, sigma_ema, sigma_floor)
 
     if kalman_state is not None:
-        from .kalman import horizon_bucket as _hb  # avoid circular
         horizon = get_horizon_days(forecast_date)
         kalman_sigma = kalman_state.get_sigma(location, horizon)
         if kalman_sigma is not None:

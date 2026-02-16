@@ -14,11 +14,16 @@ import logging
 import sys
 from pathlib import Path
 
+from typing import TYPE_CHECKING
+
 from .config import Config
 from .feedback import FeedbackState
 from .paper_bridge import PaperBridge
 from .state import TradingState, state_lock
 from .strategy import run_weather_strategy
+
+if TYPE_CHECKING:
+    from .kalman import KalmanState
 
 logger = logging.getLogger(__name__)
 
