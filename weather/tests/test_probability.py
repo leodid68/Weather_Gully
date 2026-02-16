@@ -1057,5 +1057,63 @@ class TestSkewTCDF(unittest.TestCase):
                                msg="F(0) should be 0.5 even with gamma clamped from 100.0")
 
 
+class TestSkewTIntegration(unittest.TestCase):
+    """Test that skew-t distribution is used when calibration says so."""
+
+    def test_skew_t_distribution_from_calibration(self):
+        """When calibration says skew_t, left-tail bucket should get more probability."""
+        from unittest.mock import patch
+
+        cal_skew_t = {"distribution": "skew_t", "student_t_df": 10, "skew_t_gamma": 0.7}
+        cal_normal = {"distribution": "normal"}
+
+        with patch("weather.probability._load_calibration", return_value=cal_skew_t):
+            prob_skew = estimate_bucket_probability(
+                forecast_temp=50.0, bucket_low=-999, bucket_high=40,
+                forecast_date="2026-06-15", sigma_override=5.0,
+            )
+        with patch("weather.probability._load_calibration", return_value=cal_normal):
+            prob_normal = estimate_bucket_probability(
+                forecast_temp=50.0, bucket_low=-999, bucket_high=40,
+                forecast_date="2026-06-15", sigma_override=5.0,
+            )
+        # Left-skewed (gamma=0.7) should give higher prob for left-tail bucket
+        self.assertGreater(prob_skew, prob_normal)
+
+    def test_skew_t_obs_function_uses_skew(self):
+        """estimate_bucket_probability_with_obs should also use skew-t."""
+        from unittest.mock import patch
+        from weather.probability import estimate_bucket_probability_with_obs
+
+        cal = {"distribution": "skew_t", "student_t_df": 10, "skew_t_gamma": 0.7}
+        with patch("weather.probability._load_calibration", return_value=cal):
+            prob = estimate_bucket_probability_with_obs(
+                forecast_temp=50.0, bucket_low=-999, bucket_high=40,
+                forecast_date="2026-06-15", sigma_override=5.0,
+            )
+        self.assertGreater(prob, 0.0)
+        self.assertLess(prob, 1.0)
+
+    def test_missing_gamma_defaults_to_symmetric(self):
+        """If skew_t_gamma is missing, should default to 1.0 (symmetric)."""
+        from unittest.mock import patch
+
+        cal_skew_no_gamma = {"distribution": "skew_t", "student_t_df": 10}
+        cal_student_t = {"distribution": "student_t", "student_t_df": 10}
+
+        with patch("weather.probability._load_calibration", return_value=cal_skew_no_gamma):
+            prob_skew = estimate_bucket_probability(
+                forecast_temp=50.0, bucket_low=45, bucket_high=55,
+                forecast_date="2026-06-15", sigma_override=5.0,
+            )
+        with patch("weather.probability._load_calibration", return_value=cal_student_t):
+            prob_student = estimate_bucket_probability(
+                forecast_temp=50.0, bucket_low=45, bucket_high=55,
+                forecast_date="2026-06-15", sigma_override=5.0,
+            )
+        # gamma=1.0 default → same as Student-t(10)
+        self.assertAlmostEqual(prob_skew, prob_student, places=4)
+
+
 if __name__ == "__main__":
     unittest.main()

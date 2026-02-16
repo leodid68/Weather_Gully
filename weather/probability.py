@@ -626,7 +626,11 @@ def estimate_bucket_probability(
     # Determine CDF function based on calibration distribution
     cal = _load_calibration()
     dist = cal.get("distribution", "normal") if cal else "normal"
-    if dist == "student_t":
+    if dist == "skew_t":
+        t_df = cal.get("student_t_df", 10)
+        gamma = cal.get("skew_t_gamma", 1.0)
+        cdf_fn = lambda z: _skew_t_cdf(z, t_df, gamma)
+    elif dist == "student_t":
         t_df = cal.get("student_t_df", 30)
         cdf_fn = lambda z: _student_t_cdf(z, t_df)
     else:
@@ -815,7 +819,11 @@ def estimate_bucket_probability_with_obs(
     # Determine CDF function based on calibration distribution
     cal = _load_calibration()
     dist = cal.get("distribution", "normal") if cal else "normal"
-    if dist == "student_t":
+    if dist == "skew_t":
+        t_df = cal.get("student_t_df", 10)
+        gamma = cal.get("skew_t_gamma", 1.0)
+        cdf_fn = lambda z: _skew_t_cdf(z, t_df, gamma)
+    elif dist == "student_t":
         t_df = cal.get("student_t_df", 30)
         cdf_fn = lambda z: _student_t_cdf(z, t_df)
     else:
