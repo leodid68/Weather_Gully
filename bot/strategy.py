@@ -144,20 +144,24 @@ def _run_weather_pipeline(
             max_position_usd=config.max_position_usd,
         )
 
+        from weather.state import state_lock
+
         # Weather state is separate from bot state
         import os
         base, ext = os.path.splitext(state_path)
         weather_state_path = base + "_weather" + ext
-        weather_state = WeatherState.load(weather_state_path)
 
-        run_weather_strategy(
-            client=bridge,
-            config=weather_config,
-            state=weather_state,
-            dry_run=dry_run,
-            use_safeguards=True,
-            state_path=weather_state_path,
-        )
+        with state_lock(weather_state_path):
+            weather_state = WeatherState.load(weather_state_path)
+
+            run_weather_strategy(
+                client=bridge,
+                config=weather_config,
+                state=weather_state,
+                dry_run=dry_run,
+                use_safeguards=True,
+                state_path=weather_state_path,
+            )
 
 
 # ── Main strategy ──────────────────────────────────────────────────────

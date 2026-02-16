@@ -175,6 +175,35 @@ class TestStrategyIntegration(unittest.TestCase):
         # Markets should have been fetched
         bridge.fetch_weather_markets.assert_called_once()
 
+    @patch("weather.strategy.FeedbackState")
+    @patch("weather.strategy.get_noaa_forecast")
+    def test_feedback_state_saved(self, mock_noaa, MockFS):
+        """run_weather_strategy should persist feedback state."""
+        mock_noaa.return_value = {
+            "2025-03-15": {"high": 52, "low": 38},
+        }
+        mock_feedback = MockFS.load.return_value
+
+        bridge = self._make_mock_bridge()
+        config = Config(
+            locations="NYC",
+            adjacent_buckets=True,
+            dynamic_exits=False,
+            seasonal_adjustments=False,
+            max_days_ahead=365,
+        )
+        state = TradingState()
+
+        run_weather_strategy(
+            client=bridge,
+            config=config,
+            state=state,
+            dry_run=True,
+            use_safeguards=False,
+        )
+
+        mock_feedback.save.assert_called_once()
+
     @patch("weather.strategy.get_noaa_forecast")
     def test_no_trade_when_no_edge(self, mock_noaa):
         """When all prices are above fair value, no trades."""

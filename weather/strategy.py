@@ -952,6 +952,12 @@ def run_weather_strategy(
         logger.info("Calibration: %d resolved, Brier=%.4f, accuracy=%.1f%%",
                      cal["count"], cal["brier"], cal["accuracy"] * 100)
 
+    # Persist feedback state (EMA corrections)
+    try:
+        feedback.save()
+    except Exception as exc:
+        logger.warning("Failed to save feedback state: %s", exc)
+
     # Persist state
     save_path = state_path or config.state_file
     state.save(save_path)
