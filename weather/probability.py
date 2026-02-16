@@ -522,8 +522,8 @@ def _weather_sigma_multiplier(weather_data: dict, metric: str = "high") -> float
 
 def estimate_bucket_probability(
     forecast_temp: float,
-    bucket_low: int,
-    bucket_high: int,
+    bucket_low: float,
+    bucket_high: float,
     forecast_date: str,
     apply_seasonal: bool = True,
     location: str = "",
@@ -672,8 +672,8 @@ def _tz_from_lon(lon: float) -> str:
 
 def estimate_bucket_probability_with_obs(
     forecast_temp: float,
-    bucket_low: int,
-    bucket_high: int,
+    bucket_low: float,
+    bucket_high: float,
     forecast_date: str,
     obs_data: dict | None = None,
     metric: str = "high",

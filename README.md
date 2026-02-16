@@ -1,8 +1,8 @@
 # Weather Gully
 
-Automated weather trading bot for [Polymarket](https://polymarket.com) — trades temperature prediction markets using a multi-source ensemble forecast (NOAA + Open-Meteo + METAR observations) with empirically calibrated uncertainty, via CLOB direct (no SDK dependency).
+Automated weather trading bot for [Polymarket](https://polymarket.com) — trades temperature prediction markets using a multi-source ensemble forecast (NOAA + Open-Meteo + regional NWP models + METAR observations) with empirically calibrated uncertainty, via CLOB direct (no SDK dependency).
 
-Polymarket lists daily temperature markets for 6 US cities: *"Will the highest temperature in NYC on March 15 be 55°F or higher?"* with buckets like `[50-54]`, `[55-59]`, etc. This bot estimates the true probability for each bucket using weather forecasts and real-time airport observations, compares it to the market price, and trades when it finds a significant edge.
+Polymarket lists daily temperature markets for 14 cities worldwide (6 US + 8 international): *"Will the highest temperature in NYC on March 15 be 55°F or higher?"* with buckets like `[50-54]`, `[55-59]`, etc. This bot estimates the true probability for each bucket using weather forecasts and real-time airport observations, compares it to the market price, and trades when it finds a significant edge.
 
 ---
 
@@ -34,7 +34,7 @@ Polymarket lists daily temperature markets for 6 US cities: *"Will the highest t
 
 This codebase has been through **4 rounds of comprehensive code audit**, covering all 3 modules (`weather/`, `bot/`, `polymarket/`). ~50 bugs were identified and fixed across the audit rounds, including 2 critical probability distribution bugs found in the latest audit.
 
-**Current status:** 0 critical issues, 0 important issues remaining. 726 tests, all green.
+**Current status:** 0 critical issues, 0 important issues remaining. 801 tests, all green.
 
 | Category | Examples of fixes applied |
 |----------|-------------------------|
@@ -42,7 +42,7 @@ This codebase has been through **4 rounds of comprehensive code audit**, coverin
 | **Order integrity** | Decimal arithmetic (no float rounding), zero-amount order guards, salt stringified, tick size validated |
 | **Robustness** | Atomic file writes (tempfile + `os.replace`), file locking (`fcntl.flock`), circuit breaker (5xx only), retry with exponential backoff |
 | **Trading logic** | Kelly/exposure formulas correct for BUY and SELL, stop-loss uses state (not API), seasonal month parsed from forecast date, pending orders verified before removal |
-| **Data pipeline** | Historical actuals chunked for >90 day ranges, Open-Meteo multi-location batching (6 cities in 3 API calls), Bessel's correction on model spread |
+| **Data pipeline** | Historical actuals chunked for >90 day ranges, Open-Meteo multi-location batching (14 cities grouped by timezone + local model), Bessel's correction on model spread |
 | **Probability math** | Regularized incomplete beta `* a` bug (flattened all Student's t distributions), horizon override for backtest/calibration (was using horizon=0 for all past dates) |
 
 ---
@@ -235,10 +235,11 @@ The official US National Weather Service forecast. Provides point forecasts (hig
 
 Multi-model forecast API aggregating global weather models. Free, no API key required.
 
-- **Models used:** ECMWF IFS (50% weight) + GFS Seamless (30% weight)
+- **Models used:** ECMWF IFS (50% weight) + GFS Seamless (30% weight) + regional NWP models for international cities (20% weight)
+- **Regional NWP models:** Météo-France AROME (Paris), DWD ICON (London, Ankara), KMA (Seoul), GEM (Toronto) — higher resolution (1.5-7km) than global models
 - **Data:** Daily `temperature_2m_max` and `temperature_2m_min` per model
 - **Auxiliary variables:** `cloud_cover_max`, `wind_speed_10m_max`, `wind_gusts_10m_max`, `precipitation_sum`, `precipitation_probability_max` — used for dynamic sigma adjustment
-- **Total ensemble weight:** 80% (50% ECMWF + 30% GFS)
+- **Total ensemble weight:** 80% for US (50% ECMWF + 30% GFS), 100% for international (50% ECMWF + 30% GFS + 20% local NWP)
 - **Calibrated weights:** Per-location weights from `calibration.json` (ECMWF consistently outperforms GFS, with inverse-RMSE weighting)
 
 ### 3. Aviation Weather — METAR Observations (aviationweather.gov)
@@ -247,18 +248,22 @@ Real-time actual temperature observations from the exact airport stations used b
 
 - **Endpoint:** `https://aviationweather.gov/api/data/metar?ids=KLGA,KORD&format=json&hours=24`
 - **Data:** Hourly METAR reports with actual temperature (°C, converted to °F)
-- **Station mapping:** NYC→KLGA, Chicago→KORD, Seattle→KSEA, Atlanta→KATL, Dallas→KDFW, Miami→KMIA
+- **Station mapping (US):** NYC→KLGA, Chicago→KORD, Seattle→KSEA, Atlanta→KATL, Dallas→KDAL, Miami→KMIA
+- **Station mapping (International):** London→EGLC, Paris→LFPG, Seoul→RKSI, Toronto→CYYZ, Buenos Aires→SAEZ, São Paulo→SBGR, Ankara→LTAC, Wellington→NZWN
 - **Weight in ensemble:** Dynamic — ×2 on resolution day (day-J), ×1 on J+1, ×0 for J+2 and beyond
 - **Key advantage:** On resolution day, the running observed high/low constrains the forecast. If it's 15:00 local and the running high is 52°F, a market for "55°F or higher" at 20c is almost certainly overpriced.
 
 ### Ensemble Calculation
 
 ```python
-# Base weights (from calibration.json or defaults)
+# US cities — base weights (from calibration.json or defaults)
 ECMWF: 50%  |  GFS: 30%  |  NOAA: 20%
 
+# International cities — regional NWP replaces NOAA
+ECMWF: 50%  |  GFS: 30%  |  Local NWP: 20%
+
 # With observations on resolution day
-ECMWF: 50%  |  GFS: 30%  |  NOAA: 20%  |  METAR: 80% (2 x 0.40 base weight)
+ECMWF: 50%  |  GFS: 30%  |  NOAA/Local: 20%  |  METAR: 80% (2 x 0.40 base weight)
 
 # All weights are renormalized to sum to 1.0
 # Per-location weights override global when available
@@ -290,7 +295,7 @@ Sigma grows with forecast horizon using **real RMSE** computed from the Open-Met
 | 7              | 7.54°F      | 8.44°F | 5.12°F | 4.32°F  |
 | 10             | 10.89°F     | 11.63°F| 6.61°F | 6.12°F  |
 
-Calibrated from ~2,100 weighted samples (exponential half-life 30 days) across 6 locations with METAR ground-truth actuals. Per-location sigma tables capture climate-specific error profiles (e.g., Miami is much more predictable than NYC/Chicago).
+Calibrated from ~2,100 weighted samples (exponential half-life 30 days) across 14 locations with METAR ground-truth actuals. Per-location sigma tables capture climate-specific error profiles (e.g., Miami is much more predictable than NYC/Chicago).
 
 ### 2. Seasonal Adjustment
 
@@ -427,7 +432,7 @@ Features:
 ### Running Calibration
 
 ```bash
-# Calibrate on a full year for all 6 locations
+# Calibrate on a full year for all locations
 python3 -m weather.calibrate \
   --locations NYC,Chicago,Seattle,Atlanta,Dallas,Miami \
   --start-date 2025-01-01 \
@@ -744,16 +749,33 @@ The state tracks `PendingOrder` records for orders submitted but not yet confirm
 
 ## Supported Locations
 
+All 14 cities match the exact Weather Underground stations Polymarket uses for market resolution.
+
+### US Cities (°F, NOAA + ECMWF + GFS)
+
 | City | Airport | ICAO | Coordinates | Timezone |
 |------|---------|------|-------------|----------|
 | NYC | LaGuardia | KLGA | 40.78, -73.87 | America/New_York |
 | Chicago | O'Hare | KORD | 41.97, -87.91 | America/Chicago |
 | Seattle | Sea-Tac | KSEA | 47.45, -122.31 | America/Los_Angeles |
 | Atlanta | Hartsfield-Jackson | KATL | 33.64, -84.43 | America/New_York |
-| Dallas | DFW | KDFW | 32.90, -97.04 | America/Chicago |
+| Dallas | Love Field | KDAL | 32.85, -96.85 | America/Chicago |
 | Miami | MIA | KMIA | 25.80, -80.29 | America/New_York |
 
-These match the exact stations Polymarket uses for market resolution.
+### International Cities (°C, Regional NWP + ECMWF + GFS)
+
+| City | Airport | ICAO | Local NWP Model | Timezone |
+|------|---------|------|-----------------|----------|
+| London | City Airport | EGLC | ICON (DWD) | Europe/London |
+| Paris | CDG | LFPG | AROME (Météo-France) | Europe/Paris |
+| Seoul | Incheon | RKSI | KMA | Asia/Seoul |
+| Toronto | Pearson | CYYZ | GEM (ECCC) | America/Toronto |
+| Buenos Aires | Ezeiza | SAEZ | — | America/Argentina/Buenos_Aires |
+| São Paulo | Guarulhos | SBGR | — | America/Sao_Paulo |
+| Ankara | Esenboğa | LTAC | ICON (DWD) | Europe/Istanbul |
+| Wellington | Intl | NZWN | — | Pacific/Auckland |
+
+International cities without a regional NWP model (Buenos Aires, São Paulo, Wellington) use ECMWF + GFS only. Bucket bounds are automatically converted from °C to °F internally.
 
 ---
 
@@ -864,8 +886,8 @@ Set via `--set key=value` or `config.json`:
 # Dry-run — fetch markets, show opportunities (no trades)
 python3 -m weather
 
-# Trade all 6 locations
-python3 -m weather --set locations=NYC,Chicago,Seattle,Atlanta,Dallas,Miami
+# Trade all 14 locations
+python3 -m weather --set locations=NYC,Chicago,Seattle,Atlanta,Dallas,Miami,London,Paris,Seoul,Toronto,BuenosAires,SaoPaulo,Ankara,Wellington
 
 # Live trading (requires POLY_PRIVATE_KEY)
 export POLY_PRIVATE_KEY=0x...
@@ -999,7 +1021,7 @@ Follow these steps **in order** — each one builds on the previous.
 ```bash
 git clone <repo-url> && cd Weather_Gully
 pip install httpx eth-account eth-abi eth-utils websockets certifi
-python3 -m pytest -q  # 726 tests should pass
+python3 -m pytest -q  # 801 tests should pass
 ```
 
 #### Step 2: First dry-run
@@ -1011,8 +1033,8 @@ python3 -m weather --dry-run --verbose
 Read the output carefully. You should see:
 - `Fetched N markets from M events` — Polymarket connection works
 - `NOAA forecast for NYC: 7 days` — NOAA API works
-- `Open-Meteo: 6 locations in 3 request(s)` — Open-Meteo works
-- `METAR: N observations across 6 stations` — aviation API works
+- `Open-Meteo: 14 locations in N request(s)` — Open-Meteo works
+- `METAR: N observations across 14 stations` — aviation API works
 - `Bucket: XX-YY°F @ $0.xx — prob=XX.X% EV=0.xxx` — probability model works
 - `Safeguard blocked: ...` — safeguards correctly prevent reckless trades
 
@@ -1083,9 +1105,9 @@ python3 -m weather --live \
 Monitor the first few trades closely. Once comfortable, expand:
 
 ```bash
-# All 6 locations with higher limits
+# All locations with higher limits
 python3 -m weather --live \
-  --set locations=NYC,Chicago,Seattle,Atlanta,Dallas,Miami \
+  --set locations=NYC,Chicago,Seattle,Atlanta,Dallas,Miami,London,Paris,Seoul,Toronto,BuenosAires,SaoPaulo,Ankara,Wellington \
   --set max_position_usd=5.00 \
   --set max_exposure=50.00
 ```
@@ -1187,6 +1209,8 @@ python3 -m weather --live \
 
 ### Location-Specific Strategy
 
+#### US Cities
+
 | City | Calibrated Sigma | Best Season | Liquidity | Notes |
 |------|-----------------|-------------|-----------|-------|
 | **NYC** | 2.15°F | Summer | Highest | Best starting location. Coastal — higher winter uncertainty (nor'easters). Tightest spreads on Polymarket. |
@@ -1196,10 +1220,24 @@ python3 -m weather --live \
 | **Atlanta** | 1.89°F | Fall | Good | Moderate difficulty. Severe weather days (thunderstorms) can create large errors. |
 | **Dallas** | 1.99°F | Summer | Good | Hot summers are very predictable. Winter cold fronts add uncertainty. |
 
+#### International Cities
+
+| City | Local NWP | Liquidity | Notes |
+|------|-----------|-----------|-------|
+| **London** | ICON (7km) | High | Maritime — frequent cloud cover, moderate temperature range. Active market with good liquidity. |
+| **Paris** | AROME (1.3km) | Good | Continental — highest resolution local model. Good forecast accuracy. |
+| **Seoul** | KMA (5km) | Good | Monsoon climate — summer humidity adds uncertainty. |
+| **Toronto** | GEM (2.5km) | Moderate | Continental — large seasonal swings, cold winters. |
+| **Buenos Aires** | — | Moderate | Southern hemisphere — reversed seasons. No local NWP. |
+| **São Paulo** | — | Moderate | Tropical highland — relatively stable temperatures year-round. |
+| **Ankara** | ICON (7km) | Moderate | Continental — cold winters, hot dry summers. |
+| **Wellington** | — | Lower | Maritime — windy, moderate range. Southern hemisphere. |
+
 **Recommendations:**
 - Start with **NYC only** (highest liquidity, most trades available)
-- Add **Chicago + Atlanta** after 1 week (good liquidity, different climate)
-- Add **Miami + Dallas + Seattle** once comfortable (full coverage)
+- Add **Chicago + Atlanta + London** after 1 week (good liquidity, different climates)
+- Add **remaining US + Paris + Seoul** once comfortable
+- Add **international cities without local NWP** last (Buenos Aires, São Paulo, Wellington — less forecast advantage)
 - **Seasonal re-calibration:** Winter months (Dec-Feb) have higher sigma — the bot adjusts automatically via `seasonal_factors`, but re-running calibration quarterly improves accuracy
 
 ---
@@ -1212,8 +1250,8 @@ The bot outputs structured logs. Here's how to interpret key messages:
 
 ```
 Fetched 452 active weather markets           # Market discovery successful
-Open-Meteo: 6 locations in 3 request(s)     # API batching working (6 locations, 3 API calls)
-METAR: 160 observations across 6 stations   # Real-time observations available
+Open-Meteo: 14 locations in N request(s)    # API batching working (grouped by tz + local model)
+METAR: N observations across 14 stations   # Real-time observations available
 Ensemble forecast: 48.0°F (NOAA=47°F, spread=1.3°F)  # Low spread = models agree
 Bucket: 46-47°F @ $0.08 — prob=34.8% EV=0.269        # Good edge found
 [DRY RUN] Would buy ...                     # Trade correctly blocked in dry-run
@@ -1329,7 +1367,7 @@ tail -f weather.log | grep -E "INFO|WARNING|ERROR"
 | Symptom | Cause | Solution |
 |---------|-------|----------|
 | `0 weather markets found` | Gamma API down or no active weather events | Wait — Polymarket may not have events for today |
-| `Open-Meteo failed after 3 retries` | Rate limited (free API, 10K req/day) | Wait 1-2 minutes. Bot batches locations to minimize calls (6 locations = 3 requests). |
+| `Open-Meteo failed after 3 retries` | Rate limited (free API, 10K req/day) | Wait 1-2 minutes. Bot batches locations to minimize calls (grouped by timezone + local model). |
 | `No tradeable buckets above EV threshold` | No edge — market prices already efficient | Normal. Bot is working correctly — no trade is the right call. |
 | `Safeguard blocked: Resolves in 0.0h` | Market is resolving right now | Correct behavior — don't trade at resolution time |
 | `Circuit breaker OPEN` | 5+ consecutive CLOB API server errors | Wait 60s. If persistent, check Polymarket status. |
@@ -1383,7 +1421,7 @@ Choose the calibration window based on what you're trading:
 ## Testing
 
 ```bash
-# Run all 726 tests
+# Run all tests
 python3 -m pytest -q
 
 # Weather tests only
@@ -1404,7 +1442,7 @@ python3 -m pytest weather/tests/test_strategy.py -v
 
 | Package | Tests | Key coverage |
 |---------|-------|-------------|
-| `weather/` | ~443 tests | Strategy, bridge, paper bridge, NOAA, Open-Meteo (single + multi-location), aviation/METAR, probability (Student's t, Platt scaling, horizon override), calibration, recalibration, previous runs, METAR actuals, error cache, trade log, backtesting, sizing, state, parsing, AR(1) autocorrelation, Kalman filter sigma, mean-reversion timing, explain mode |
+| `weather/` | ~463 tests | Strategy, bridge, paper bridge, NOAA, Open-Meteo (single + multi-location + local NWP models), aviation/METAR, probability (Student's t, Platt scaling, horizon override), calibration, recalibration, previous runs, METAR actuals, error cache, trade log, backtesting, sizing, state, parsing, AR(1) autocorrelation, Kalman filter sigma, mean-reversion timing, explain mode, location validation (station/coordinate/unit alignment with Polymarket) |
 | `bot/` | ~137 tests | Scanner, signals, scoring, sizing, daemon, Gamma API, strategy, state |
 | `polymarket/` | ~46 tests | Order signing, HMAC auth, client REST, circuit breaker, fill detection |
 
@@ -1492,6 +1530,7 @@ Weather_Gully/
 │       ├── test_kalman.py
 │       ├── test_mean_reversion.py
 │       ├── test_explain.py
+│       ├── test_locations.py
 │       └── fixtures/
 │
 └── README.md

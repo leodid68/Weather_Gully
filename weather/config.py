@@ -18,16 +18,17 @@ LOCATIONS = {
     "Chicago": {"lat": 41.9742, "lon": -87.9073, "name": "Chicago (O'Hare)", "tz": "America/Chicago", "station": "KORD", "unit": "F"},
     "Seattle": {"lat": 47.4502, "lon": -122.3088, "name": "Seattle (Sea-Tac)", "tz": "America/Los_Angeles", "station": "KSEA", "unit": "F"},
     "Atlanta": {"lat": 33.6407, "lon": -84.4277, "name": "Atlanta (Hartsfield)", "tz": "America/New_York", "station": "KATL", "unit": "F"},
-    "Dallas": {"lat": 32.8998, "lon": -97.0403, "name": "Dallas (DFW)", "tz": "America/Chicago", "station": "KDFW", "unit": "F"},
+    "Dallas": {"lat": 32.8471, "lon": -96.8518, "name": "Dallas (Love Field)", "tz": "America/Chicago", "station": "KDAL", "unit": "F"},
     "Miami": {"lat": 25.7959, "lon": -80.2870, "name": "Miami (MIA)", "tz": "America/New_York", "station": "KMIA", "unit": "F"},
     # --- International (°C, no NOAA) ---
-    "London": {"lat": 51.5053, "lon": 0.0553, "name": "London (City Airport)", "tz": "Europe/London", "station": "EGLC", "unit": "C"},
-    "Paris": {"lat": 49.0097, "lon": 2.5479, "name": "Paris (CDG)", "tz": "Europe/Paris", "station": "LFPG", "unit": "C"},
-    "Seoul": {"lat": 37.4602, "lon": 126.4407, "name": "Seoul (Incheon)", "tz": "Asia/Seoul", "station": "RKSI", "unit": "C"},
-    "Toronto": {"lat": 43.6777, "lon": -79.6248, "name": "Toronto (Pearson)", "tz": "America/Toronto", "station": "CYYZ", "unit": "C"},
+    # local_model: Open-Meteo regional NWP model (higher resolution than GFS/ECMWF)
+    "London": {"lat": 51.5053, "lon": 0.0553, "name": "London (City Airport)", "tz": "Europe/London", "station": "EGLC", "unit": "C", "local_model": "icon_seamless"},
+    "Paris": {"lat": 49.0097, "lon": 2.5479, "name": "Paris (CDG)", "tz": "Europe/Paris", "station": "LFPG", "unit": "C", "local_model": "meteofrance_seamless"},
+    "Seoul": {"lat": 37.4602, "lon": 126.4407, "name": "Seoul (Incheon)", "tz": "Asia/Seoul", "station": "RKSI", "unit": "C", "local_model": "kma_seamless"},
+    "Toronto": {"lat": 43.6777, "lon": -79.6248, "name": "Toronto (Pearson)", "tz": "America/Toronto", "station": "CYYZ", "unit": "C", "local_model": "gem_seamless"},
     "BuenosAires": {"lat": -34.8222, "lon": -58.5358, "name": "Buenos Aires (Ezeiza)", "tz": "America/Argentina/Buenos_Aires", "station": "SAEZ", "unit": "C"},
     "SaoPaulo": {"lat": -23.4356, "lon": -46.4731, "name": "São Paulo (Guarulhos)", "tz": "America/Sao_Paulo", "station": "SBGR", "unit": "C"},
-    "Ankara": {"lat": 40.1281, "lon": 32.9951, "name": "Ankara (Esenboğa)", "tz": "Europe/Istanbul", "station": "LTAC", "unit": "C"},
+    "Ankara": {"lat": 40.1281, "lon": 32.9951, "name": "Ankara (Esenboğa)", "tz": "Europe/Istanbul", "station": "LTAC", "unit": "C", "local_model": "icon_seamless"},
     "Wellington": {"lat": -41.3272, "lon": 174.8053, "name": "Wellington (Intl)", "tz": "Pacific/Auckland", "station": "NZWN", "unit": "C"},
 }
 

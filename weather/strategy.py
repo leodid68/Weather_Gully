@@ -27,8 +27,31 @@ from .feedback import FeedbackState
 from .mean_reversion import PriceTracker
 from .sigma_log import log_sigma_signals
 from .sizing import compute_exit_threshold, compute_position_size
-from .trade_log import log_trade
 from .state import PredictionRecord, TradingState
+from .trade_log import log_trade
+
+
+def _c_to_f(c: float) -> float:
+    """Convert Celsius to Fahrenheit."""
+    return c * 9.0 / 5.0 + 32.0
+
+
+def _parse_bucket(outcome_name: str, location: str = "") -> tuple[float, float] | None:
+    """Parse temperature bucket, converting °C bounds to °F for international markets.
+
+    The pipeline works internally in °F; international Polymarket markets
+    resolve in °C, so bucket bounds must be converted before comparing
+    to forecasts.
+    """
+    bucket = parse_temperature_bucket(outcome_name)
+    if bucket is None:
+        return None
+    loc_data = LOCATIONS.get(location, {})
+    if loc_data.get("unit") == "C":
+        lo = _c_to_f(bucket[0]) if bucket[0] != -999 else -999.0
+        hi = _c_to_f(bucket[1]) if bucket[1] != 999 else 999.0
+        return (lo, hi)
+    return (float(bucket[0]), float(bucket[1]))
 
 logger = logging.getLogger(__name__)
 
@@ -185,7 +208,7 @@ def score_buckets(
 
     for market in event_markets:
         outcome_name = market.get("outcome_name", "")
-        bucket = parse_temperature_bucket(outcome_name)
+        bucket = _parse_bucket(outcome_name, location)
         if not bucket:
             continue
 
@@ -356,7 +379,7 @@ def check_exit_opportunities(
 
             # Mean-reversion exit signal (informational only)
             if price_tracker and config.mean_reversion and trade.location:
-                bucket_parsed = parse_temperature_bucket(trade.outcome_name)
+                bucket_parsed = _parse_bucket(trade.outcome_name, trade.location)
                 if bucket_parsed:
                     if price_tracker.should_favor_exit(
                         trade.location, trade.forecast_date,
@@ -457,7 +480,7 @@ def _check_stop_loss_reversals(
         if not trade.forecast_temp or not trade.forecast_date or not trade.location:
             continue
 
-        bucket = parse_temperature_bucket(trade.outcome_name)
+        bucket = _parse_bucket(trade.outcome_name, trade.location)
         if not bucket:
             continue
 
@@ -1074,7 +1097,7 @@ def run_weather_strategy(
             tradeable = []
             for market in event_markets:
                 outcome_name = market.get("outcome_name", "")
-                bucket = parse_temperature_bucket(outcome_name)
+                bucket = _parse_bucket(outcome_name, location)
                 if bucket and bucket[0] <= forecast_temp <= bucket[1]:
                     best_ask = market.get("best_ask")
                     price = best_ask if best_ask and best_ask > 0 else (market.get("external_price_yes") or 0.5)

@@ -1,6 +1,7 @@
 """Open-Meteo multi-model forecast client (free, no API key).
 
-Fetches GFS and ECMWF forecasts and returns a combined/ensemble view.
+Fetches GFS, ECMWF and optional regional NWP model forecasts
+and returns a combined/ensemble view.
 """
 
 import json
@@ -26,11 +27,12 @@ def _cache_key(coords: str, tz: str) -> str:
 
 OPEN_METEO_BASE = "https://api.open-meteo.com/v1/forecast"
 
-# Model weights for ensemble averaging (ECMWF generally more accurate)
+# Model weights for ensemble averaging
 MODEL_WEIGHTS = {
     "ecmwf_ifs025": 0.50,
     "gfs_seamless": 0.30,
     "noaa": 0.20,
+    "local": 0.20,  # Regional NWP model weight (international cities)
 }
 
 _CALIBRATION_PATH = Path(__file__).parent / "calibration.json"
@@ -50,7 +52,14 @@ def _get_model_weights(location: str = "") -> dict[str, float]:
                 return loc_weights
     return MODEL_WEIGHTS
 
-_MODELS = "gfs_seamless,ecmwf_ifs025"
+_BASE_MODELS = "gfs_seamless,ecmwf_ifs025"
+
+
+def _models_str(local_model: str = "") -> str:
+    """Build the ``models=`` parameter, optionally including a regional NWP model."""
+    if local_model:
+        return f"{_BASE_MODELS},{local_model}"
+    return _BASE_MODELS
 
 
 _USER_AGENT = "WeatherGully/1.0"
@@ -87,6 +96,7 @@ def get_open_meteo_forecast(
     max_retries: int = 3,
     base_delay: float = 1.0,
     tz_name: str = "",
+    local_model: str = "",
 ) -> dict[str, dict]:
     """Fetch multi-model forecasts from Open-Meteo.
 
@@ -96,6 +106,7 @@ def get_open_meteo_forecast(
             "2025-03-15": {
                 "gfs_high": 52, "gfs_low": 38,
                 "ecmwf_high": 54, "ecmwf_low": 37,
+                "local_high": 53, "local_low": 36,  # if local_model set
             },
             ...
         }
@@ -110,13 +121,14 @@ def get_open_meteo_forecast(
         "wind_speed_10m_max,wind_gusts_10m_max,"
         "precipitation_sum,precipitation_probability_max"
     )
+    models = _models_str(local_model)
     url = (
         f"{OPEN_METEO_BASE}"
         f"?latitude={lat}&longitude={lon}"
         f"&daily=temperature_2m_max,temperature_2m_min,{_AUX_VARS}"
         f"&temperature_unit=fahrenheit"
         f"&timezone={tz}"
-        f"&models={_MODELS}"
+        f"&models={models}"
         f"&forecast_days=10"
     )
 
@@ -149,7 +161,19 @@ def get_open_meteo_forecast(
         if ecmwf_low is not None:
             entry["ecmwf_low"] = round(ecmwf_low, 1)
 
+        # Regional NWP model (international cities)
+        if local_model:
+            local_high = _safe_get(daily, f"temperature_2m_max_{local_model}", i)
+            local_low = _safe_get(daily, f"temperature_2m_min_{local_model}", i)
+            if local_high is not None:
+                entry["local_high"] = round(local_high, 1)
+            if local_low is not None:
+                entry["local_low"] = round(local_low, 1)
+
         # Auxiliary weather variables (average across models where applicable)
+        model_suffixes = ["_gfs_seamless", "_ecmwf_ifs025"]
+        if local_model:
+            model_suffixes.append(f"_{local_model}")
         for aux_key, entry_key in [
             ("cloud_cover_max", "cloud_cover_max"),
             ("cloud_cover_mean", "cloud_cover_mean"),
@@ -160,7 +184,7 @@ def get_open_meteo_forecast(
         ]:
             # Try model-specific keys first, then plain key
             values = []
-            for model_suffix in ["_gfs_seamless", "_ecmwf_ifs025"]:
+            for model_suffix in model_suffixes:
                 val = _safe_get(daily, aux_key + model_suffix, i)
                 if val is not None:
                     values.append(val)
@@ -174,7 +198,11 @@ def get_open_meteo_forecast(
         if entry:
             forecasts[date_str] = entry
 
-    logger.info("Open-Meteo: %d days of multi-model forecasts", len(forecasts))
+    if local_model:
+        logger.info("Open-Meteo: %d days of multi-model forecasts (local=%s)",
+                     len(forecasts), local_model)
+    else:
+        logger.info("Open-Meteo: %d days of multi-model forecasts", len(forecasts))
     return forecasts
 
 
@@ -185,23 +213,26 @@ def get_open_meteo_forecast_multi(
 ) -> dict[str, dict[str, dict]]:
     """Fetch multi-model forecasts for all locations in minimal API calls.
 
-    Groups locations by timezone (Open-Meteo requires one tz per request),
-    then issues one request per timezone group.
+    Groups locations by ``(timezone, local_model)`` — Open-Meteo requires
+    one tz per request and the ``models=`` list is shared across locations
+    in the same request.
 
     Args:
-        locations: Dict of location_name → {"lat": float, "lon": float, "tz": str}.
+        locations: Dict of location_name → {"lat", "lon", "tz", "local_model"?}.
 
     Returns:
-        {location_name: {date_str: {gfs_high, gfs_low, ecmwf_high, ...}}}
+        {location_name: {date_str: {gfs_high, gfs_low, ecmwf_high, ..., local_high?}}}
     """
-    # Group locations by timezone
-    tz_groups: dict[str, list[tuple[str, dict]]] = {}
+    # Group locations by (timezone, local_model) so each request has a
+    # consistent models= parameter.
+    groups: dict[tuple[str, str], list[tuple[str, dict]]] = {}
     for name, loc_data in locations.items():
         tz = loc_data.get("tz", "")
         if not tz:
             from .probability import _tz_from_lon
             tz = _tz_from_lon(loc_data["lon"])
-        tz_groups.setdefault(tz, []).append((name, loc_data))
+        lm = loc_data.get("local_model", "")
+        groups.setdefault((tz, lm), []).append((name, loc_data))
 
     _AUX_VARS = (
         "cloud_cover_max,cloud_cover_mean,"
@@ -211,12 +242,12 @@ def get_open_meteo_forecast_multi(
 
     result: dict[str, dict[str, dict]] = {}
 
-    for tz, group in tz_groups.items():
+    for (tz, local_model), group in groups.items():
         lats = ",".join(str(loc["lat"]) for _, loc in group)
         lons = ",".join(str(loc["lon"]) for _, loc in group)
 
         # --- TTL cache check ---
-        cache_k = _cache_key(f"{lats},{lons}", tz)
+        cache_k = _cache_key(f"{lats},{lons}", f"{tz}|{local_model}")
         cached = _forecast_cache.get(cache_k)
         if cached is not None:
             cached_data, cached_at = cached
@@ -226,13 +257,14 @@ def get_open_meteo_forecast_multi(
                 result.update(cached_data)
                 continue
 
+        models = _models_str(local_model)
         url = (
             f"{OPEN_METEO_BASE}"
             f"?latitude={lats}&longitude={lons}"
             f"&daily=temperature_2m_max,temperature_2m_min,{_AUX_VARS}"
             f"&temperature_unit=fahrenheit"
             f"&timezone={tz}"
-            f"&models={_MODELS}"
+            f"&models={models}"
             f"&forecast_days=10"
         )
 
@@ -280,6 +312,18 @@ def get_open_meteo_forecast_multi(
                 if ecmwf_low is not None:
                     entry["ecmwf_low"] = round(ecmwf_low, 1)
 
+                # Regional NWP model
+                if local_model:
+                    lm_high = _safe_get(daily, f"temperature_2m_max_{local_model}", i)
+                    lm_low = _safe_get(daily, f"temperature_2m_min_{local_model}", i)
+                    if lm_high is not None:
+                        entry["local_high"] = round(lm_high, 1)
+                    if lm_low is not None:
+                        entry["local_low"] = round(lm_low, 1)
+
+                model_suffixes = ["_gfs_seamless", "_ecmwf_ifs025"]
+                if local_model:
+                    model_suffixes.append(f"_{local_model}")
                 for aux_key, entry_key in [
                     ("cloud_cover_max", "cloud_cover_max"),
                     ("cloud_cover_mean", "cloud_cover_mean"),
@@ -289,7 +333,7 @@ def get_open_meteo_forecast_multi(
                     ("precipitation_probability_max", "precip_prob_max"),
                 ]:
                     values = []
-                    for model_suffix in ["_gfs_seamless", "_ecmwf_ifs025"]:
+                    for model_suffix in model_suffixes:
                         val = _safe_get(daily, aux_key + model_suffix, i)
                         if val is not None:
                             values.append(val)
@@ -311,7 +355,7 @@ def get_open_meteo_forecast_multi(
 
     total_days = sum(len(v) for v in result.values())
     logger.info("Open-Meteo: %d locations in %d request(s), %d total forecast-days",
-                len(result), len(tz_groups), total_days)
+                len(result), len(groups), total_days)
     return result
 
 
@@ -333,11 +377,15 @@ def compute_ensemble_forecast(
     aviation_obs_weight: float = 0.0,
     location: str = "",
 ) -> tuple[float | None, float]:
-    """Combine NOAA + Open-Meteo + Aviation observations into a weighted ensemble.
+    """Combine NOAA + Open-Meteo + local NWP + Aviation into a weighted ensemble.
+
+    For US cities the third source is NOAA; for international cities it is a
+    regional NWP model (``local_high`` / ``local_low`` in *open_meteo_data*).
 
     Args:
         noaa_temp: NOAA point forecast (may be None).
-        open_meteo_data: Open-Meteo data for the date (gfs_high, ecmwf_high, etc.).
+        open_meteo_data: Open-Meteo data for the date (gfs_high, ecmwf_high,
+            local_high?, etc.).
         metric: ``"high"`` or ``"low"``.
         aviation_obs_temp: Observed temperature from METAR (may be None).
         aviation_obs_weight: Weight for the aviation observation (default 0.0).
@@ -364,6 +412,11 @@ def compute_ensemble_forecast(
         ecmwf_val = open_meteo_data.get(ecmwf_key)
         if ecmwf_val is not None:
             temps.append((ecmwf_val, weights.get("ecmwf_ifs025", 0.50)))
+
+        # Regional NWP model (international cities — replaces NOAA role)
+        local_val = open_meteo_data.get(f"local_{metric}")
+        if local_val is not None:
+            temps.append((local_val, weights.get("local", 0.20)))
 
     if aviation_obs_temp is not None and aviation_obs_weight > 0:
         temps.append((aviation_obs_temp, aviation_obs_weight))

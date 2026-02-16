@@ -366,5 +366,193 @@ class TestForecastCache(unittest.TestCase):
         self.assertEqual(mock_fetch.call_count, 2)
 
 
+class TestModelsStr(unittest.TestCase):
+    """Test dynamic model string construction."""
+
+    def test_base_models_only(self):
+        from weather.open_meteo import _models_str
+        self.assertEqual(_models_str(), "gfs_seamless,ecmwf_ifs025")
+        self.assertEqual(_models_str(""), "gfs_seamless,ecmwf_ifs025")
+
+    def test_with_local_model(self):
+        from weather.open_meteo import _models_str
+        result = _models_str("meteofrance_seamless")
+        self.assertEqual(result, "gfs_seamless,ecmwf_ifs025,meteofrance_seamless")
+
+
+class TestLocalModelEnsemble(unittest.TestCase):
+    """Test local NWP model integration in ensemble."""
+
+    def test_local_model_used_in_ensemble(self):
+        """local_high/local_low should be picked up as a third source."""
+        om_data = {"gfs_high": 50, "ecmwf_high": 54, "local_high": 52}
+        temp, spread = compute_ensemble_forecast(None, om_data, "high")
+        self.assertIsNotNone(temp)
+        # GFS=50*0.30, ECMWF=54*0.50, local=52*0.20
+        # = (15.0 + 27.0 + 10.4) / 1.0 = 52.4
+        self.assertAlmostEqual(temp, 52.4, places=0)
+        self.assertGreater(spread, 0)
+
+    def test_local_model_ignored_when_absent(self):
+        """Without local_high key, only GFS/ECMWF contribute."""
+        om_data = {"gfs_high": 50, "ecmwf_high": 54}
+        temp, spread = compute_ensemble_forecast(None, om_data, "high")
+        # GFS=50*0.30, ECMWF=54*0.50 → (15+27) / 0.80 = 52.5
+        self.assertAlmostEqual(temp, 52.5, places=0)
+
+    def test_local_and_noaa_both_present(self):
+        """Both NOAA and local can contribute (renormalization handles it)."""
+        om_data = {"gfs_high": 50, "ecmwf_high": 54, "local_high": 52}
+        temp, _ = compute_ensemble_forecast(51.0, om_data, "high")
+        self.assertIsNotNone(temp)
+        # All 4 sources: NOAA=51*0.20, GFS=50*0.30, ECMWF=54*0.50, local=52*0.20
+        # total_weight = 1.20 → renormalized
+
+    def test_local_model_low_metric(self):
+        """local_low is used for the 'low' metric."""
+        om_data = {"gfs_low": 30, "ecmwf_low": 28, "local_low": 29}
+        temp, _ = compute_ensemble_forecast(None, om_data, "low")
+        self.assertIsNotNone(temp)
+        self.assertLess(temp, 35)
+
+
+class TestGetForecastWithLocalModel(unittest.TestCase):
+    """Test get_open_meteo_forecast with local_model parameter."""
+
+    @patch("weather.open_meteo._fetch_json")
+    def test_local_model_parsed(self, mock_fetch):
+        from weather.open_meteo import get_open_meteo_forecast
+
+        mock_fetch.return_value = {
+            "daily": {
+                "time": ["2025-06-15"],
+                "temperature_2m_max_gfs_seamless": [85.0],
+                "temperature_2m_min_gfs_seamless": [68.0],
+                "temperature_2m_max_ecmwf_ifs025": [87.0],
+                "temperature_2m_min_ecmwf_ifs025": [69.0],
+                "temperature_2m_max_meteofrance_seamless": [86.0],
+                "temperature_2m_min_meteofrance_seamless": [67.5],
+            }
+        }
+
+        result = get_open_meteo_forecast(
+            49.0, 2.5, tz_name="Europe/Paris",
+            local_model="meteofrance_seamless",
+        )
+        self.assertIn("2025-06-15", result)
+        day = result["2025-06-15"]
+        self.assertEqual(day["gfs_high"], 85.0)
+        self.assertEqual(day["local_high"], 86.0)
+        self.assertEqual(day["local_low"], 67.5)
+
+    @patch("weather.open_meteo._fetch_json")
+    def test_local_model_missing_data_graceful(self, mock_fetch):
+        """If local model returns no data, local_high/low simply absent."""
+        from weather.open_meteo import get_open_meteo_forecast
+
+        mock_fetch.return_value = {
+            "daily": {
+                "time": ["2025-06-15"],
+                "temperature_2m_max_gfs_seamless": [85.0],
+                "temperature_2m_min_gfs_seamless": [68.0],
+                "temperature_2m_max_ecmwf_ifs025": [87.0],
+                "temperature_2m_min_ecmwf_ifs025": [69.0],
+                # No meteofrance keys at all
+            }
+        }
+
+        result = get_open_meteo_forecast(
+            49.0, 2.5, tz_name="Europe/Paris",
+            local_model="meteofrance_seamless",
+        )
+        day = result["2025-06-15"]
+        self.assertIn("gfs_high", day)
+        self.assertNotIn("local_high", day)
+
+    @patch("weather.open_meteo._fetch_json")
+    def test_models_param_includes_local(self, mock_fetch):
+        """URL should include the local model in the models= parameter."""
+        from weather.open_meteo import get_open_meteo_forecast
+
+        mock_fetch.return_value = {"daily": {"time": []}}
+        get_open_meteo_forecast(
+            49.0, 2.5, tz_name="Europe/Paris",
+            local_model="meteofrance_seamless",
+        )
+        url = mock_fetch.call_args[0][0]
+        self.assertIn("meteofrance_seamless", url)
+        self.assertIn("gfs_seamless", url)
+        self.assertIn("ecmwf_ifs025", url)
+
+
+class TestMultiForecastLocalModel(unittest.TestCase):
+    """Test get_open_meteo_forecast_multi with local model grouping."""
+
+    def setUp(self):
+        import weather.open_meteo as om
+        om._forecast_cache.clear()
+
+    @patch("weather.open_meteo._fetch_json")
+    def test_different_local_models_separate_requests(self, mock_fetch):
+        """Locations with different local_model values need separate API calls."""
+        from weather.open_meteo import get_open_meteo_forecast_multi
+
+        mock_fetch.side_effect = [
+            {"daily": {
+                "time": ["2025-06-15"],
+                "temperature_2m_max_gfs_seamless": [85.0],
+                "temperature_2m_min_gfs_seamless": [68.0],
+                "temperature_2m_max_ecmwf_ifs025": [87.0],
+                "temperature_2m_min_ecmwf_ifs025": [69.0],
+                "temperature_2m_max_icon_seamless": [86.0],
+                "temperature_2m_min_icon_seamless": [67.0],
+            }},
+            {"daily": {
+                "time": ["2025-06-15"],
+                "temperature_2m_max_gfs_seamless": [70.0],
+                "temperature_2m_min_gfs_seamless": [55.0],
+                "temperature_2m_max_ecmwf_ifs025": [72.0],
+                "temperature_2m_min_ecmwf_ifs025": [56.0],
+                "temperature_2m_max_meteofrance_seamless": [71.0],
+                "temperature_2m_min_meteofrance_seamless": [54.0],
+            }},
+        ]
+
+        locations = {
+            "London": {"lat": 51.5, "lon": 0.05, "tz": "Europe/London",
+                       "local_model": "icon_seamless"},
+            "Paris": {"lat": 49.0, "lon": 2.5, "tz": "Europe/London",
+                      "local_model": "meteofrance_seamless"},
+        }
+        result = get_open_meteo_forecast_multi(locations)
+
+        # Different local_model → 2 separate requests even if same tz
+        self.assertEqual(mock_fetch.call_count, 2)
+        self.assertIn("London", result)
+        self.assertIn("Paris", result)
+        self.assertEqual(result["London"]["2025-06-15"]["local_high"], 86.0)
+        self.assertEqual(result["Paris"]["2025-06-15"]["local_high"], 71.0)
+
+    @patch("weather.open_meteo._fetch_json")
+    def test_no_local_model_no_local_keys(self, mock_fetch):
+        """US cities without local_model should not have local_high/low."""
+        from weather.open_meteo import get_open_meteo_forecast_multi
+
+        mock_fetch.return_value = {"daily": {
+            "time": ["2025-06-15"],
+            "temperature_2m_max_gfs_seamless": [85.0],
+            "temperature_2m_min_gfs_seamless": [68.0],
+            "temperature_2m_max_ecmwf_ifs025": [87.0],
+            "temperature_2m_min_ecmwf_ifs025": [69.0],
+        }}
+
+        locations = {"NYC": {"lat": 40.77, "lon": -73.87, "tz": "America/New_York"}}
+        result = get_open_meteo_forecast_multi(locations)
+
+        day = result["NYC"]["2025-06-15"]
+        self.assertNotIn("local_high", day)
+        self.assertNotIn("local_low", day)
+
+
 if __name__ == "__main__":
     unittest.main()

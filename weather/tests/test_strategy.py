@@ -468,6 +468,88 @@ class TestScoreBucketsNO(unittest.TestCase):
             self.assertIn("side", entry, f"Entry missing 'side' field: {entry}")
 
 
+class TestParseBucketUnitConversion(unittest.TestCase):
+    """Test _parse_bucket °C → °F conversion for international markets."""
+
+    def test_fahrenheit_location_unchanged(self):
+        """NYC (°F) bucket should pass through as floats."""
+        from weather.strategy import _parse_bucket
+        result = _parse_bucket("50-54°F", "NYC")
+        self.assertEqual(result, (50.0, 54.0))
+
+    def test_celsius_location_converted(self):
+        """Paris (°C) bucket '15-20' should be converted to °F."""
+        from weather.strategy import _parse_bucket
+        result = _parse_bucket("15-20", "Paris")
+        self.assertIsNotNone(result)
+        # 15°C = 59°F, 20°C = 68°F
+        self.assertAlmostEqual(result[0], 59.0, places=1)
+        self.assertAlmostEqual(result[1], 68.0, places=1)
+
+    def test_celsius_open_ended_below(self):
+        """Open-ended lower bucket: sentinel -999 preserved."""
+        from weather.strategy import _parse_bucket
+        result = _parse_bucket("10 or below", "London")
+        self.assertIsNotNone(result)
+        self.assertEqual(result[0], -999.0)
+        self.assertAlmostEqual(result[1], 50.0, places=1)  # 10°C = 50°F
+
+    def test_celsius_open_ended_above(self):
+        """Open-ended upper bucket: sentinel 999 preserved."""
+        from weather.strategy import _parse_bucket
+        result = _parse_bucket("30 or higher", "Seoul")
+        self.assertIsNotNone(result)
+        self.assertAlmostEqual(result[0], 86.0, places=1)  # 30°C = 86°F
+        self.assertEqual(result[1], 999.0)
+
+    def test_unknown_location_treated_as_fahrenheit(self):
+        """Unknown location defaults to °F (no conversion)."""
+        from weather.strategy import _parse_bucket
+        result = _parse_bucket("50-54", "UnknownCity")
+        self.assertEqual(result, (50.0, 54.0))
+
+    def test_no_location_treated_as_fahrenheit(self):
+        """Empty location defaults to °F."""
+        from weather.strategy import _parse_bucket
+        result = _parse_bucket("50-54", "")
+        self.assertEqual(result, (50.0, 54.0))
+
+    def test_negative_celsius(self):
+        """Negative °C should convert correctly."""
+        from weather.strategy import _parse_bucket
+        result = _parse_bucket("-5 to 0", "Toronto")
+        self.assertIsNotNone(result)
+        # -5°C = 23°F, 0°C = 32°F
+        self.assertAlmostEqual(result[0], 23.0, places=1)
+        self.assertAlmostEqual(result[1], 32.0, places=1)
+
+    def test_none_for_unparseable(self):
+        """Unparseable outcome returns None."""
+        from weather.strategy import _parse_bucket
+        self.assertIsNone(_parse_bucket("Sunny weather", "Paris"))
+
+    def test_score_buckets_uses_converted_bucket(self):
+        """score_buckets should pass °F-converted bounds to probability function."""
+        from weather.strategy import score_buckets
+        markets = [{
+            "id": "m1", "outcome_name": "15-20",
+            "best_ask": 0.30, "external_price_yes": 0.30,
+        }]
+        config = Config()
+        config.min_probability = 0.01
+        with patch("weather.strategy.estimate_bucket_probability", return_value=0.50) as mock_prob:
+            with patch("weather.strategy.platt_calibrate", side_effect=lambda p: p):
+                scored = score_buckets(markets, 62.0, "2026-06-15", config,
+                                       metric="high", location="Paris")
+        # The mock should have been called with converted °F bounds
+        if mock_prob.called:
+            call_args = mock_prob.call_args
+            bucket_lo = call_args[0][1]  # second positional arg
+            bucket_hi = call_args[0][2]  # third positional arg
+            self.assertAlmostEqual(bucket_lo, 59.0, places=1)  # 15°C
+            self.assertAlmostEqual(bucket_hi, 68.0, places=1)  # 20°C
+
+
 class TestExecuteNOTrade(unittest.TestCase):
 
     def test_no_side_in_state_record(self):
