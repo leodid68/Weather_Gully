@@ -153,11 +153,11 @@ class TestRunBacktest(unittest.TestCase):
         self._cal_patcher.stop()
 
     @patch("weather.backtest.get_historical_actuals")
-    @patch("weather.backtest.get_historical_forecasts")
-    def test_basic_backtest(self, mock_forecasts, mock_actuals):
-        # Forecasts are keyed by target_date (API deduplication)
-        mock_forecasts.return_value = {
-            "2025-06-04": {
+    @patch("weather.backtest.fetch_previous_runs")
+    def test_basic_backtest(self, mock_prev_runs, mock_actuals):
+        # Forecasts keyed by horizon, then by target_date
+        mock_prev_runs.return_value = {
+            1: {
                 "2025-06-04": {
                     "gfs_high": 82.0, "gfs_low": 65.0,
                     "ecmwf_high": 84.0, "ecmwf_low": 66.0,
@@ -182,9 +182,9 @@ class TestRunBacktest(unittest.TestCase):
         self.assertGreater(result.brier_score, 0)
 
     @patch("weather.backtest.get_historical_actuals")
-    @patch("weather.backtest.get_historical_forecasts")
-    def test_no_data_returns_empty(self, mock_forecasts, mock_actuals):
-        mock_forecasts.return_value = {}
+    @patch("weather.backtest.fetch_previous_runs")
+    def test_no_data_returns_empty(self, mock_prev_runs, mock_actuals):
+        mock_prev_runs.return_value = {3: {}}
         mock_actuals.return_value = {}
 
         result = run_backtest(
@@ -196,12 +196,12 @@ class TestRunBacktest(unittest.TestCase):
         self.assertEqual(len(result.trades), 0)
 
     @patch("weather.backtest.get_historical_actuals")
-    @patch("weather.backtest.get_historical_forecasts")
-    def test_hundred_percent_win(self, mock_forecasts, mock_actuals):
+    @patch("weather.backtest.fetch_previous_runs")
+    def test_hundred_percent_win(self, mock_prev_runs, mock_actuals):
         """When forecast perfectly matches actual, trades should win."""
-        # Forecasts are keyed by target_date (API deduplication)
-        mock_forecasts.return_value = {
-            "2025-06-04": {
+        # Forecasts keyed by horizon, then by target_date
+        mock_prev_runs.return_value = {
+            3: {
                 "2025-06-04": {
                     "gfs_high": 80.0, "gfs_low": 60.0,
                     "ecmwf_high": 80.0, "ecmwf_low": 60.0,
@@ -307,11 +307,11 @@ class TestLoadPriceSnapshots(unittest.TestCase):
 class TestBacktestWithSnapshots(unittest.TestCase):
 
     @patch("weather.backtest.get_historical_actuals")
-    @patch("weather.backtest.get_historical_forecasts")
-    def test_backtest_uses_snapshot_price(self, mock_forecasts, mock_actuals):
+    @patch("weather.backtest.fetch_previous_runs")
+    def test_backtest_uses_snapshot_price(self, mock_prev_runs, mock_actuals):
         """When snapshots are available, their prices should be used."""
-        mock_forecasts.return_value = {
-            "2025-06-04": {
+        mock_prev_runs.return_value = {
+            3: {
                 "2025-06-04": {
                     "gfs_high": 82.0, "gfs_low": 65.0,
                     "ecmwf_high": 84.0, "ecmwf_low": 66.0,
@@ -354,11 +354,11 @@ class TestBacktestWithSnapshots(unittest.TestCase):
             os.unlink(tmp_path)
 
     @patch("weather.backtest.get_historical_actuals")
-    @patch("weather.backtest.get_historical_forecasts")
-    def test_fallback_when_no_snapshots(self, mock_forecasts, mock_actuals):
+    @patch("weather.backtest.fetch_previous_runs")
+    def test_fallback_when_no_snapshots(self, mock_prev_runs, mock_actuals):
         """Without snapshots, prices should use probabilistic model (not 1/N)."""
-        mock_forecasts.return_value = {
-            "2025-06-04": {
+        mock_prev_runs.return_value = {
+            3: {
                 "2025-06-04": {
                     "gfs_high": 82.0, "gfs_low": 65.0,
                     "ecmwf_high": 84.0, "ecmwf_low": 66.0,

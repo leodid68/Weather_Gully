@@ -11,14 +11,12 @@ import json
 import logging
 import math
 import random
-import sys
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
-from pathlib import Path
 
 from .config import LOCATIONS
-from .historical import get_historical_actuals, get_historical_forecasts
+from .historical import get_historical_actuals
 from .open_meteo import compute_ensemble_forecast
+from .previous_runs import fetch_previous_runs
 from .probability import estimate_bucket_probability
 
 logger = logging.getLogger(__name__)
@@ -159,13 +157,11 @@ def run_backtest(
         lat, lon = loc_data["lat"], loc_data["lon"]
         tz_name = loc_data.get("tz", "America/New_York")
 
-        # Fetch data — extend start back by horizon days for forecasts
-        forecast_start = (
-            datetime.strptime(start_date, "%Y-%m-%d") - timedelta(days=horizon)
-        ).strftime("%Y-%m-%d")
-
-        logger.info("Fetching historical data for %s (%s to %s)...", loc, forecast_start, end_date)
-        forecasts = get_historical_forecasts(lat, lon, forecast_start, end_date, tz_name=tz_name)
+        # Fetch data — previous runs handles the horizon offset internally
+        logger.info("Fetching historical data for %s (%s to %s, horizon=%d)...", loc, start_date, end_date, horizon)
+        prev_runs = fetch_previous_runs(lat, lon, start_date, end_date,
+                                        horizons=[horizon], tz_name=tz_name)
+        forecasts_by_date = prev_runs.get(horizon, {})
         actuals = get_historical_actuals(lat, lon, start_date, end_date, tz_name=tz_name)
 
         if not actuals:
@@ -173,10 +169,8 @@ def run_backtest(
             continue
 
         for target_date_str, actual_data in actuals.items():
-            # Forecasts are keyed by target_date (API deduplication — no true
-            # horizon distinction), so look up by target_date directly.
-            target_forecasts = forecasts.get(target_date_str, {})
-            run_forecasts = target_forecasts.get(target_date_str)
+            # Look up horizon-specific forecast for this target date
+            run_forecasts = forecasts_by_date.get(target_date_str)
             if not run_forecasts:
                 continue
 
