@@ -34,7 +34,7 @@ Polymarket lists daily temperature markets for 6 US cities: *"Will the highest t
 
 This codebase has been through **4 rounds of comprehensive code audit**, covering all 3 modules (`weather/`, `bot/`, `polymarket/`). ~50 bugs were identified and fixed across the audit rounds, including 2 critical probability distribution bugs found in the latest audit.
 
-**Current status:** 0 critical issues, 0 important issues remaining. 559 tests, all green.
+**Current status:** 0 critical issues, 0 important issues remaining. 720 tests, all green.
 
 | Category | Examples of fixes applied |
 |----------|-------------------------|
@@ -128,6 +128,9 @@ The core intelligence layer. Combines multiple weather data sources into a proba
 | `backtest.py` | Backtesting engine — simulates strategy on historical data with Brier scoring, supports real price snapshots |
 | `paper_bridge.py` | `PaperBridge` — simulated execution wrapper (real prices, no orders submitted) |
 | `paper_trade.py` | Paper trading CLI — runs the real strategy with simulated execution, records price snapshots |
+| `feedback.py` | Forecast bias correction via EMA + AR(1) autocorrelation of forecast errors |
+| `kalman.py` | Scalar Kalman filter — learns dynamic sigma per location+horizon from resolved trades |
+| `mean_reversion.py` | Rolling Z-score of market prices — modulates position sizing (0.5x to 1.5x) |
 | `calibration.json` | Generated calibration tables (sigma by horizon/location, seasonal factors, model weights) |
 
 ---
@@ -354,6 +357,37 @@ In addition to the static calibration, sigma can be adjusted in real-time using 
 | **Recent error EMA** | `ema × 1.053` | Exponential moving average of recent absolute errors |
 
 These factors are empirically calibrated from historical data (not literature defaults).
+
+### 9. Kalman Filter Sigma (Dynamic Learning)
+
+A scalar Kalman filter learns the true forecast error sigma per location and horizon bucket from resolved trades. As predictions resolve and actual temperatures become available, the filter updates its sigma estimate using the observed absolute error.
+
+| Horizon Bucket | Horizons | Description |
+|---------------|----------|-------------|
+| `short` | 0-1 days | Same-day and next-day forecasts |
+| `medium` | 2-4 days | Near-term forecasts |
+| `long` | 5-7 days | Medium-range forecasts |
+| `extended` | 8-10+ days | Extended-range forecasts |
+
+The Kalman sigma is blended with the existing max-of-4-signals sigma using a weight that ramps from 0 to 0.5 as the sample count grows from 5 to 30 resolved trades. The floor sigma is always enforced.
+
+### 10. AR(1) Forecast Error Autocorrelation
+
+When forecast errors are serially correlated (e.g., the model consistently overshoots for several days in a row), the AR(1) correction detects this pattern and adjusts the bias prediction accordingly.
+
+The AR(1) coefficient (phi) is estimated online from consecutive forecast errors. When `|phi| > 0.1` and at least 10 error pairs have been observed, the correction `phi * last_error * decay` is added to the base bias EMA. Phi is clamped to [-0.8, 0.8] to prevent overreaction.
+
+### 11. Mean-Reversion Sizing
+
+Market prices are tracked over time per bucket. A rolling Z-score (window=20 snapshots) detects when a price is depressed or elevated relative to its recent history:
+
+| Z-score | Effect | Multiplier Range |
+|---------|--------|-----------------|
+| Z < -1.0 | Price depressed → boost sizing | 1.0x to 1.5x |
+| -1.0 ≤ Z ≤ +1.0 | Neutral zone | 1.0x |
+| Z > +1.0 | Price elevated → reduce sizing | 0.5x to 1.0x |
+
+The multiplier is applied after Kelly sizing and correlation discount. An informational exit signal is also logged when mean-reversion favors exit (Z > 1.0).
 
 ---
 
@@ -796,6 +830,9 @@ Set via `--set key=value` or `config.json`:
 | `correlation_guard` | true | Max 1 position per event |
 | `stop_loss_reversal` | true | Exit on forecast reversal |
 | `stop_loss_reversal_threshold` | 5.0 | Temperature shift (°F) to trigger stop-loss |
+| `ar_autocorrelation` | true | AR(1) correction on feedback bias |
+| `kalman_sigma` | true | Kalman filter for dynamic sigma learning |
+| `mean_reversion` | true | Z-score sizing modifier from price history |
 | **Aviation (METAR)** | | |
 | `aviation_obs` | true | Enable real-time METAR observations |
 | `aviation_obs_weight` | 0.40 | Base weight for observations in ensemble |
@@ -955,7 +992,7 @@ Follow these steps **in order** — each one builds on the previous.
 ```bash
 git clone <repo-url> && cd Weather_Gully
 pip install httpx eth-account eth-abi eth-utils websockets certifi
-python3 -m pytest -q  # 559 tests should pass
+python3 -m pytest -q  # 720 tests should pass
 ```
 
 #### Step 2: First dry-run
@@ -1339,7 +1376,7 @@ Choose the calibration window based on what you're trading:
 ## Testing
 
 ```bash
-# Run all 559 tests
+# Run all 720 tests
 python3 -m pytest -q
 
 # Weather tests only
@@ -1360,7 +1397,7 @@ python3 -m pytest weather/tests/test_strategy.py -v
 
 | Package | Tests | Key coverage |
 |---------|-------|-------------|
-| `weather/` | ~376 tests | Strategy, bridge, paper bridge, NOAA, Open-Meteo (single + multi-location), aviation/METAR, probability (Student's t, Platt scaling, horizon override), calibration, recalibration, previous runs, METAR actuals, error cache, trade log, backtesting, sizing, state, parsing |
+| `weather/` | ~437 tests | Strategy, bridge, paper bridge, NOAA, Open-Meteo (single + multi-location), aviation/METAR, probability (Student's t, Platt scaling, horizon override), calibration, recalibration, previous runs, METAR actuals, error cache, trade log, backtesting, sizing, state, parsing, AR(1) autocorrelation, Kalman filter sigma, mean-reversion timing |
 | `bot/` | ~137 tests | Scanner, signals, scoring, sizing, daemon, Gamma API, strategy, state |
 | `polymarket/` | ~46 tests | Order signing, HMAC auth, client REST, circuit breaker, fill detection |
 
@@ -1421,6 +1458,9 @@ Weather_Gully/
 │   ├── backtest.py          # Backtesting engine (Brier score, drawdown, Sharpe, snapshot pricing)
 │   ├── paper_bridge.py      # PaperBridge — simulated execution wrapper
 │   ├── paper_trade.py       # Paper trading CLI (python -m weather.paper_trade)
+│   ├── feedback.py          # Forecast bias EMA + AR(1) autocorrelation
+│   ├── kalman.py            # Scalar Kalman filter for dynamic sigma learning
+│   ├── mean_reversion.py    # Rolling Z-score price tracking + sizing multiplier
 │   ├── calibration.json     # Generated calibration tables
 │   ├── _ssl.py              # SSL context (certifi → system → unverified fallback)
 │   └── tests/
@@ -1441,6 +1481,9 @@ Weather_Gully/
 │       ├── test_error_cache.py
 │       ├── test_trade_log.py
 │       ├── test_backtest.py
+│       ├── test_ar1.py
+│       ├── test_kalman.py
+│       ├── test_mean_reversion.py
 │       └── fixtures/
 │
 └── README.md
@@ -1536,7 +1579,60 @@ if jb_statistic > 5.99:  # p < 0.05
 a, b = logistic_regression(predicted_probs, actual_outcomes)
 ```
 
-### 6. Dynamic Exit Threshold
+### 6. AR(1) Forecast Error Autocorrelation
+
+```python
+# Online AR(1) coefficient estimation
+if last_error is not None:
+    cov_sum += error * last_error       # cross-covariance
+    var_sum += last_error * last_error   # lagged variance
+    ar_count += 1
+    if var_sum > 1e-10:
+        phi = clamp(cov_sum / var_sum, -0.8, 0.8)
+
+# Bias correction with AR(1)
+base_bias = bias_ema * decay
+if |phi| > 0.1 and ar_count >= 10:
+    bias = base_bias + phi * last_error * decay
+```
+
+### 7. Kalman Filter for Dynamic Sigma
+
+```python
+# Measurement model: E[|N(0,sigma)|] = sigma * sqrt(2/pi)
+implied_sigma = abs_error / 0.7979
+
+# Standard Kalman update
+P_pred = P + Q                        # predict
+S = P_pred + R                        # innovation variance
+K = P_pred / S                        # Kalman gain
+x = x + K * (implied_sigma - x)       # update state
+P = (1 - K) * P_pred                  # update uncertainty
+
+# Blend with existing max-of-4-signals
+w = 0.5 * clamp((sample_count - 5) / 25, 0, 1)  # ramp 0→0.5
+sigma = w * kalman_sigma + (1-w) * max(ensemble, spread, ema, floor)
+sigma = max(sigma, floor)             # never below calibrated floor
+```
+
+### 8. Mean-Reversion Sizing
+
+```python
+# Rolling Z-score from last 20 price snapshots
+z = (current_price - mean(window)) / stddev(window)
+
+# Sizing multiplier
+if z < -1.0:
+    mult = min(1.5, 1.0 + 0.25 * (-z - 1.0))   # boost depressed
+elif z > 1.0:
+    mult = max(0.5, 1.0 - 0.25 * (z - 1.0))    # reduce elevated
+else:
+    mult = 1.0                                     # neutral zone
+
+position_size *= mult  # applied after Kelly + correlation discount
+```
+
+### 9. Dynamic Exit Threshold
 
 ```python
 base_target = min(cost_basis * 2.0, 0.80)
