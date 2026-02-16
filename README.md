@@ -34,7 +34,7 @@ Polymarket lists daily temperature markets for 6 US cities: *"Will the highest t
 
 This codebase has been through **4 rounds of comprehensive code audit**, covering all 3 modules (`weather/`, `bot/`, `polymarket/`). ~50 bugs were identified and fixed across the audit rounds, including 2 critical probability distribution bugs found in the latest audit.
 
-**Current status:** 0 critical issues, 0 important issues remaining. 548 tests, all green.
+**Current status:** 0 critical issues, 0 important issues remaining. 559 tests, all green.
 
 | Category | Examples of fixes applied |
 |----------|-------------------------|
@@ -124,6 +124,7 @@ The core intelligence layer. Combines multiple weather data sources into a proba
 | `calibrate.py` | Calibration script — computes empirical sigma, model weights, Platt scaling, adaptive sigma factors from historical data |
 | `recalibrate.py` | Auto-recalibration orchestrator — rolling 90-day window, error cache, guard rails, delta logging |
 | `error_cache.py` | Persistent error cache for incremental recalibration (append-only, prunable) |
+| `trade_log.py` | Structured trade log — records prob_raw/platt/price per trade for future Platt re-fitting and threshold tuning |
 | `backtest.py` | Backtesting engine — simulates strategy on historical data with Brier scoring, supports real price snapshots |
 | `paper_bridge.py` | `PaperBridge` — simulated execution wrapper (real prices, no orders submitted) |
 | `paper_trade.py` | Paper trading CLI — runs the real strategy with simulated execution, records price snapshots |
@@ -954,7 +955,7 @@ Follow these steps **in order** — each one builds on the previous.
 ```bash
 git clone <repo-url> && cd Weather_Gully
 pip install httpx eth-account eth-abi eth-utils websockets certifi
-python3 -m pytest -q  # 548 tests should pass
+python3 -m pytest -q  # 559 tests should pass
 ```
 
 #### Step 2: First dry-run
@@ -1338,7 +1339,7 @@ Choose the calibration window based on what you're trading:
 ## Testing
 
 ```bash
-# Run all 548 tests
+# Run all 559 tests
 python3 -m pytest -q
 
 # Weather tests only
@@ -1359,7 +1360,7 @@ python3 -m pytest weather/tests/test_strategy.py -v
 
 | Package | Tests | Key coverage |
 |---------|-------|-------------|
-| `weather/` | ~365 tests | Strategy, bridge, paper bridge, NOAA, Open-Meteo (single + multi-location), aviation/METAR, probability (Student's t, Platt scaling), calibration, recalibration, previous runs, METAR actuals, error cache, backtesting, sizing, state, parsing |
+| `weather/` | ~376 tests | Strategy, bridge, paper bridge, NOAA, Open-Meteo (single + multi-location), aviation/METAR, probability (Student's t, Platt scaling, horizon override), calibration, recalibration, previous runs, METAR actuals, error cache, trade log, backtesting, sizing, state, parsing |
 | `bot/` | ~137 tests | Scanner, signals, scoring, sizing, daemon, Gamma API, strategy, state |
 | `polymarket/` | ~46 tests | Order signing, HMAC auth, client REST, circuit breaker, fill detection |
 
@@ -1416,6 +1417,7 @@ Weather_Gully/
 │   ├── calibrate.py         # Calibration script (sigma, Platt, adaptive factors, model weights)
 │   ├── recalibrate.py       # Auto-recalibration orchestrator (rolling window, guard rails)
 │   ├── error_cache.py       # Persistent error cache for incremental recalibration
+│   ├── trade_log.py         # Structured trade log (prob_raw, prob_platt, price, outcome)
 │   ├── backtest.py          # Backtesting engine (Brier score, drawdown, Sharpe, snapshot pricing)
 │   ├── paper_bridge.py      # PaperBridge — simulated execution wrapper
 │   ├── paper_trade.py       # Paper trading CLI (python -m weather.paper_trade)
@@ -1437,6 +1439,7 @@ Weather_Gully/
 │       ├── test_calibrate.py
 │       ├── test_recalibrate.py
 │       ├── test_error_cache.py
+│       ├── test_trade_log.py
 │       ├── test_backtest.py
 │       └── fixtures/
 │
