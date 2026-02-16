@@ -380,7 +380,8 @@ class TestSigmaOverride(unittest.TestCase):
 
 
 class TestPlattCalibrate(unittest.TestCase):
-    def test_identity_when_no_params(self):
+    @patch("weather.probability._load_platt_params", return_value={})
+    def test_identity_when_no_params(self, _mock):
         """Without calibration params, returns raw probability."""
         self.assertAlmostEqual(platt_calibrate(0.5), 0.5)
         self.assertAlmostEqual(platt_calibrate(0.3), 0.3)
