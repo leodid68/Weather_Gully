@@ -129,7 +129,7 @@ class Config:
     max_open_positions: int = 15              # Max simultaneous open positions
 
     # Inter-location correlation (sizing reduction)
-    correlation_threshold: float = 0.7    # Ignore correlations below this
+    correlation_threshold: float = 0.3    # Ignore correlations below this
     correlation_discount: float = 0.5     # How much to reduce sizing (0=ignore, 1=full)
 
     # AR(1) autocorrelation correction in feedback bias
@@ -140,6 +140,18 @@ class Config:
 
     # Mean-reversion timing (price Z-score sizing modifier)
     mean_reversion: bool = True
+
+    # Adaptive execution (VWAP, depth sizing, edge-proportional slippage)
+    slippage_edge_ratio: float = 0.5
+    depth_fill_ratio: float = 0.5
+    vwap_max_levels: int = 5
+
+    # Low temperature markets
+    trade_metrics: str = "high"
+
+    # Portfolio: same-location sizing discount
+    same_location_discount: float = 0.5
+    same_location_horizon_window: int = 2
 
     @property
     def active_locations(self) -> list[str]:
@@ -159,6 +171,11 @@ class Config:
             else:
                 result.append(raw)  # Pass through unknown locations as-is
         return result
+
+    @property
+    def active_metrics(self) -> list[str]:
+        """Return list of metrics to trade: ['high'], ['low'], or ['high', 'low']."""
+        return [m.strip().lower() for m in self.trade_metrics.split(",") if m.strip()]
 
     @classmethod
     def load(cls, config_dir: str) -> "Config":

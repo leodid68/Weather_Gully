@@ -17,5 +17,28 @@ class TestCircuitBreakerConfig(unittest.TestCase):
         self.assertEqual(c.max_open_positions, 30)
 
 
+def test_new_execution_config_defaults():
+    cfg = Config()
+    assert cfg.slippage_edge_ratio == 0.5
+    assert cfg.depth_fill_ratio == 0.5
+    assert cfg.vwap_max_levels == 5
+    assert cfg.trade_metrics == "high"
+    assert cfg.same_location_discount == 0.5
+    assert cfg.same_location_horizon_window == 2
+    assert cfg.correlation_threshold == 0.3
+
+def test_active_metrics_single():
+    cfg = Config(trade_metrics="high")
+    assert cfg.active_metrics == ["high"]
+
+def test_active_metrics_both():
+    cfg = Config(trade_metrics="high,low")
+    assert cfg.active_metrics == ["high", "low"]
+
+def test_active_metrics_low_only():
+    cfg = Config(trade_metrics="low")
+    assert cfg.active_metrics == ["low"]
+
+
 if __name__ == "__main__":
     unittest.main()
