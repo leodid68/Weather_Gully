@@ -243,6 +243,43 @@ def _student_t_cdf(x: float, df: float) -> float:
         return 0.5 * ibeta
 
 
+def _skew_t_cdf(x: float, df: float, gamma: float) -> float:
+    """CDF of the Fernández-Steel skewed Student's t-distribution.
+
+    Args:
+        x: Standardized value (z-score).
+        df: Degrees of freedom (> 0).
+        gamma: Skewness parameter (> 0).
+            gamma = 1.0: symmetric (reduces to Student-t).
+            gamma < 1.0: left-skewed (heavier left tail).
+            gamma > 1.0: right-skewed (heavier right tail).
+
+    Returns:
+        CDF value in [0, 1].
+    """
+    # Guard: invalid inputs
+    if math.isnan(x) or df <= 0:
+        return 0.5
+    if math.isinf(x):
+        return 1.0 if x > 0 else 0.0
+
+    # Clamp gamma to safe range
+    gamma = max(0.3, min(3.0, gamma))
+
+    # gamma == 1.0 → standard Student-t (avoid division artifacts)
+    if abs(gamma - 1.0) < 1e-10:
+        return _student_t_cdf(x, df)
+
+    # Two-piece Student-t: scale left and right halves differently.
+    # For x < 0: compress/stretch by gamma → heavier left tail when gamma < 1.
+    # For x >= 0: compress/stretch by 1/gamma → heavier right tail when gamma > 1.
+    # F(0) = T(0) = 0.5 for all gamma, total integral = 1.
+    if x < 0:
+        return _student_t_cdf(x * gamma, df)
+    else:
+        return _student_t_cdf(x / gamma, df)
+
+
 def get_horizon_days(forecast_date: str) -> int:
     """Number of days between now (UTC) and the forecast date."""
     try:

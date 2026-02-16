@@ -13,6 +13,8 @@ from weather.probability import (
     _get_seasonal_factor,
     _get_stddev,
     _load_calibration,
+    _skew_t_cdf,
+    _student_t_cdf,
     _weather_sigma_multiplier,
     compute_adaptive_sigma,
     estimate_bucket_probability,
@@ -964,6 +966,95 @@ class TestPlattLargeBGuard(unittest.TestCase):
         result = platt_calibrate(0.5)
         # sigmoid(1.2*0 + 0.3) = sigmoid(0.3) ≈ 0.574
         self.assertNotAlmostEqual(result, 0.5, places=2)
+
+
+class TestSkewTCDF(unittest.TestCase):
+    """Tests for the Fernández-Steel skewed Student-t CDF."""
+
+    def test_gamma_one_equals_student_t(self):
+        """gamma=1.0 should match _student_t_cdf exactly."""
+        for df in [3, 5, 10, 30]:
+            for x in [-2, -1, 0, 1, 2]:
+                expected = _student_t_cdf(x, df)
+                result = _skew_t_cdf(x, df, 1.0)
+                self.assertAlmostEqual(
+                    result, expected, places=10,
+                    msg=f"gamma=1.0 should match student_t for x={x}, df={df}",
+                )
+
+    def test_center_is_half(self):
+        """F(0) = 0.5 for any gamma."""
+        for gamma in [0.5, 0.8, 1.0, 1.2, 1.5]:
+            result = _skew_t_cdf(0.0, 5, gamma)
+            self.assertAlmostEqual(
+                result, 0.5, places=10,
+                msg=f"F(0) should be 0.5 for gamma={gamma}",
+            )
+
+    def test_left_skew_heavier_left_tail(self):
+        """gamma=0.7 (left-skewed): P(X < -3) > P_symmetric(X < -3)."""
+        p_skewed = _skew_t_cdf(-3.0, 5, 0.7)
+        p_symmetric = _skew_t_cdf(-3.0, 5, 1.0)
+        self.assertGreater(
+            p_skewed, p_symmetric,
+            f"Left-skewed (gamma=0.7) should have more mass in left tail: "
+            f"skewed={p_skewed:.6f} vs symmetric={p_symmetric:.6f}",
+        )
+
+    def test_right_skew_heavier_right_tail(self):
+        """gamma=1.5 (right-skewed): P(X > 3) > P_symmetric(X > 3)."""
+        p_skewed = 1.0 - _skew_t_cdf(3.0, 5, 1.5)
+        p_symmetric = 1.0 - _skew_t_cdf(3.0, 5, 1.0)
+        self.assertGreater(
+            p_skewed, p_symmetric,
+            f"Right-skewed (gamma=1.5) should have more mass in right tail: "
+            f"skewed={p_skewed:.6f} vs symmetric={p_symmetric:.6f}",
+        )
+
+    def test_cdf_monotonically_increasing(self):
+        """CDF must be monotonically non-decreasing."""
+        for gamma in [0.6, 1.0, 1.4]:
+            xs = [i * 0.5 for i in range(-20, 21)]  # -10 to 10 in steps of 0.5
+            values = [_skew_t_cdf(x, 5, gamma) for x in xs]
+            for i in range(len(values) - 1):
+                self.assertLessEqual(
+                    values[i], values[i + 1] + 1e-12,
+                    msg=f"CDF not monotonic at x={xs[i]:.1f} for gamma={gamma}: "
+                        f"F({xs[i]:.1f})={values[i]:.8f} > F({xs[i+1]:.1f})={values[i+1]:.8f}",
+                )
+
+    def test_limits_zero_and_one(self):
+        """F(-1e10) ~ 0 and F(1e10) ~ 1 for various gamma."""
+        for gamma in [0.5, 1.0, 1.5]:
+            low = _skew_t_cdf(-1e10, 5, gamma)
+            high = _skew_t_cdf(1e10, 5, gamma)
+            self.assertAlmostEqual(low, 0.0, places=4,
+                                   msg=f"F(-1e10) should be ~0 for gamma={gamma}")
+            self.assertAlmostEqual(high, 1.0, places=4,
+                                   msg=f"F(1e10) should be ~1 for gamma={gamma}")
+
+    def test_inf_inputs(self):
+        """inf -> 1.0, -inf -> 0.0."""
+        self.assertEqual(_skew_t_cdf(float('inf'), 5, 0.8), 1.0)
+        self.assertEqual(_skew_t_cdf(float('-inf'), 5, 0.8), 0.0)
+        self.assertEqual(_skew_t_cdf(float('inf'), 5, 1.3), 1.0)
+        self.assertEqual(_skew_t_cdf(float('-inf'), 5, 1.3), 0.0)
+
+    def test_nan_returns_half(self):
+        """nan -> 0.5."""
+        self.assertEqual(_skew_t_cdf(float('nan'), 5, 0.8), 0.5)
+        self.assertEqual(_skew_t_cdf(float('nan'), 10, 1.5), 0.5)
+
+    def test_gamma_clamped(self):
+        """Extreme gamma values are clamped to [0.3, 3.0]; F(0) still = 0.5."""
+        # gamma=0.01 clamped to 0.3
+        result_low = _skew_t_cdf(0.0, 5, 0.01)
+        self.assertAlmostEqual(result_low, 0.5, places=10,
+                               msg="F(0) should be 0.5 even with gamma clamped from 0.01")
+        # gamma=100 clamped to 3.0
+        result_high = _skew_t_cdf(0.0, 5, 100.0)
+        self.assertAlmostEqual(result_high, 0.5, places=10,
+                               msg="F(0) should be 0.5 even with gamma clamped from 100.0")
 
 
 if __name__ == "__main__":
