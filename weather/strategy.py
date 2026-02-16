@@ -598,6 +598,7 @@ def run_weather_strategy(
     config: Config,
     state: TradingState,
     dry_run: bool = True,
+    explain: bool = False,
     positions_only: bool = False,
     show_config: bool = False,
     use_safeguards: bool = True,
@@ -608,6 +609,27 @@ def run_weather_strategy(
     from .kalman import KalmanState
     kalman = KalmanState.load() if config.kalman_sigma else None
     price_tracker = PriceTracker.load() if config.mean_reversion else None
+
+    explain_stats = {
+        "events_scanned": 0,
+        "buckets_scored": 0,
+        "buckets_tradeable": 0,
+        "buckets_filtered": 0,
+        "filter_reasons": {},  # reason -> count
+        "total_ev": 0.0,
+        "total_position_proposed": 0.0,
+    } if explain else None
+
+    if explain and not dry_run:
+        logger.warning("--explain implies dry-run; forcing dry_run=True")
+        dry_run = True
+
+    _prev_log_levels: dict[str, int] = {}
+    if explain:
+        for _name in ("weather.probability", "weather.strategy"):
+            _lgr = logging.getLogger(_name)
+            _prev_log_levels[_name] = _lgr.level
+            _lgr.setLevel(logging.DEBUG)
 
     logger.info("Weather Trading Bot (CLOB direct)")
     logger.info("=" * 50)
@@ -908,6 +930,8 @@ def run_weather_strategy(
             forecast_temp -= feedback_bias
             logger.info("Feedback bias correction: %+.1f°F → adjusted forecast %.0f°F",
                          -feedback_bias, forecast_temp)
+        if explain and feedback_bias is None:
+            logger.info("  [EXPLAIN] No feedback bias (insufficient data for %s month=%d)", location, forecast_month)
 
         # Forecast change detection (operates on bias-corrected forecast)
         delta = state.get_forecast_delta(location, date_str, metric, forecast_temp)
@@ -935,6 +959,7 @@ def run_weather_strategy(
             scoring_obs = None  # Already incorporated in ensemble forecast
         else:
             scoring_obs = obs_data if (obs_data and days_ahead <= 1 and config.aviation_obs) else None
+        scored: list[dict] = []
         if config.adjacent_buckets:
             scored = score_buckets(event_markets, forecast_temp, date_str, config,
                                    obs_data=scoring_obs, metric=metric,
@@ -973,6 +998,23 @@ def run_weather_strategy(
                             })
                     break
 
+        if explain:
+            explain_stats["events_scanned"] += 1
+            if config.adjacent_buckets:
+                explain_stats["buckets_scored"] += len(scored)
+            else:
+                explain_stats["buckets_scored"] += len(tradeable)
+            explain_stats["buckets_tradeable"] += len(tradeable)
+            if config.adjacent_buckets:
+                filtered_count = len(scored) - len(tradeable)
+                if filtered_count > 0:
+                    explain_stats["buckets_filtered"] += filtered_count
+                    explain_stats["filter_reasons"]["low_ev"] = explain_stats["filter_reasons"].get("low_ev", 0) + filtered_count
+                if scored and not tradeable:
+                    best = max(scored, key=lambda s: s["ev"])
+                    logger.info("  [EXPLAIN] Best bucket rejected: %s prob=%.1f%% price=$%.2f EV=%.3f (threshold=%.3f)",
+                                 best["outcome_name"], best["prob"]*100, best["price"], best["ev"], config.min_ev_threshold)
+
         if not tradeable:
             logger.info("No tradeable buckets above EV threshold (%.2f)", config.min_ev_threshold)
             continue
@@ -997,6 +1039,10 @@ def run_weather_strategy(
 
             if price >= config.entry_threshold:
                 logger.info("Price $%.2f above entry threshold $%.2f — skip", price, config.entry_threshold)
+                if explain:
+                    explain_stats["buckets_filtered"] += 1
+                    explain_stats["filter_reasons"]["price_above_threshold"] = explain_stats["filter_reasons"].get("price_above_threshold", 0) + 1
+                    logger.info("  [EXPLAIN] Filtered: price $%.2f > threshold $%.2f", price, config.entry_threshold)
                 continue
 
             # Safeguards
@@ -1005,6 +1051,9 @@ def run_weather_strategy(
                 should_trade, reasons = check_context_safeguards(context, config)
                 if not should_trade:
                     logger.info("Safeguard blocked: %s", "; ".join(reasons))
+                    if explain:
+                        explain_stats["buckets_filtered"] += 1
+                        explain_stats["filter_reasons"]["safeguard"] = explain_stats["filter_reasons"].get("safeguard", 0) + 1
                     continue
                 if reasons:
                     logger.info("Warnings: %s", "; ".join(reasons))
@@ -1018,12 +1067,19 @@ def run_weather_strategy(
                 kelly_frac=config.kelly_fraction,
             )
 
+            if explain:
+                logger.info("  [EXPLAIN] Kelly: prob=%.1f%% price=$%.2f edge=%.3f → base=$%.2f",
+                             prob*100, price, prob - price, position_size)
+
             # Correlation discount: reduce sizing for correlated open positions
+            base_position_size = position_size  # Save before correlation discount
             open_locations = list({t.location for t in state.trades.values() if t.location})
             forecast_month = int(date_str.split("-")[1])
             position_size = _apply_correlation_discount(
                 position_size, location, forecast_month, open_locations, config,
             )
+            if explain and position_size != base_position_size:
+                logger.info("  [EXPLAIN] Correlation discount: $%.2f → $%.2f", base_position_size, position_size)
 
             # Mean-reversion sizing modifier
             if price_tracker and config.mean_reversion and entry.get("bucket"):
@@ -1059,10 +1115,22 @@ def run_weather_strategy(
             side = entry.get("side", "yes")
 
             if dry_run:
-                logger.info(
-                    "[DRY RUN] Would buy %s $%.2f (~%.1f shares) of '%s' — confidence=%.0f%%",
-                    side.upper(), position_size, position_size / price, outcome_name, confidence * 100,
-                )
+                if explain:
+                    explain_stats["total_ev"] += ev
+                    explain_stats["total_position_proposed"] += position_size
+                    logger.info(
+                        "[DRY RUN] Would buy %s $%.2f (~%.1f shares) of '%s'\n"
+                        "          prob=%.1f%% price=$%.2f EV=%.3f sigma=%.2f bias=%s",
+                        side.upper(), position_size, position_size / price, outcome_name,
+                        prob*100, price, ev,
+                        adaptive_sigma_value or 0,
+                        f"{-feedback_bias:+.1f}\u00b0F" if feedback_bias else "none",
+                    )
+                else:
+                    logger.info(
+                        "[DRY RUN] Would buy %s $%.2f (~%.1f shares) of '%s' — confidence=%.0f%%",
+                        side.upper(), position_size, position_size / price, outcome_name, confidence * 100,
+                    )
             else:
                 logger.info("Executing trade: %s $%.2f on '%s'...", side.upper(), position_size, outcome_name)
                 result = client.execute_trade(
@@ -1158,6 +1226,22 @@ def run_weather_strategy(
     if dry_run:
         logger.info("[DRY RUN MODE — no real trades executed]")
 
+    if explain and explain_stats:
+        logger.info("=" * 60)
+        logger.info("[EXPLAIN] DECISION SUMMARY")
+        logger.info("=" * 60)
+        logger.info("  Events scanned:      %d", explain_stats["events_scanned"])
+        logger.info("  Buckets scored:      %d", explain_stats["buckets_scored"])
+        logger.info("  Buckets tradeable:   %d", explain_stats["buckets_tradeable"])
+        logger.info("  Buckets filtered:    %d", explain_stats["buckets_filtered"])
+        if explain_stats["filter_reasons"]:
+            logger.info("  Filter breakdown:")
+            for reason, count in sorted(explain_stats["filter_reasons"].items(), key=lambda x: -x[1]):
+                logger.info("    %-25s %d", reason, count)
+        logger.info("  Total EV proposed:   %.3f", explain_stats["total_ev"])
+        logger.info("  Total $ proposed:    $%.2f", explain_stats["total_position_proposed"])
+        logger.info("=" * 60)
+
     # Calibration stats
     cal = state.get_calibration_stats()
     if cal["count"] > 0:
@@ -1184,6 +1268,10 @@ def run_weather_strategy(
             price_tracker.save()
         except Exception as exc:
             logger.warning("Failed to save price tracker: %s", exc)
+
+    # Restore logger levels after explain mode
+    for _name, _lvl in _prev_log_levels.items():
+        logging.getLogger(_name).setLevel(_lvl)
 
     # Persist state
     save_path = state_path or config.state_file

@@ -76,6 +76,8 @@ def main() -> None:
     parser.add_argument("--json-log", action="store_true", help="Output structured JSON logs")
     parser.add_argument("--no-safeguards", action="store_true", help="Disable context safeguards")
     parser.add_argument("--no-aviation", action="store_true", help="Disable METAR aviation observations")
+    parser.add_argument("--explain", action="store_true",
+                        help="Show detailed decision reasoning (implies --dry-run)")
 
     args = parser.parse_args()
 
@@ -138,7 +140,8 @@ def main() -> None:
             client=bridge,
             config=config,
             state=state,
-            dry_run=dry_run,
+            dry_run=dry_run or args.explain,
+            explain=args.explain,
             positions_only=args.positions,
             show_config=False,
             use_safeguards=not args.no_safeguards,
