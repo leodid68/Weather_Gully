@@ -122,11 +122,21 @@ def _run_weather_pipeline(
     from weather.state import TradingState as WeatherState
     from weather.strategy import run_weather_strategy
 
+    # Calculate remaining exposure budget for weather
+    bot_exposure = sum(
+        (1.0 - t.price) * t.size if t.side == 'SELL' else t.price * t.size
+        for t in state.trades.values()
+        if t.memo not in ('pending_exit', 'pending_fill')
+    )
+    remaining_exposure = max(0.0, config.max_total_exposure - bot_exposure)
+    logger.info("Weather pipeline: bot_exposure=$%.2f, remaining=$%.2f",
+                bot_exposure, remaining_exposure)
+
     with GammaClient() as gamma:
         bridge = CLOBWeatherBridge(
             clob_client=client,
             gamma_client=gamma,
-            max_exposure=config.max_total_exposure,
+            max_exposure=remaining_exposure,
         )
 
         weather_config = WeatherConfig(
@@ -139,7 +149,7 @@ def _run_weather_pipeline(
             correlation_guard=config.weather_correlation_guard,
             stop_loss_reversal=config.weather_stop_loss_reversal,
             stop_loss_reversal_threshold=config.weather_stop_loss_reversal_threshold,
-            max_exposure=config.max_total_exposure,
+            max_exposure=remaining_exposure,
             kelly_fraction=config.kelly_fraction,
             max_position_usd=config.max_position_usd,
         )
