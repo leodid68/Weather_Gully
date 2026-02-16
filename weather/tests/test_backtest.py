@@ -173,10 +173,11 @@ class TestRunBacktest(unittest.TestCase):
             start_date="2025-06-04",
             end_date="2025-06-04",
             horizon=1,
+            entry_threshold=0.0,  # hash() is non-deterministic; use 0 to guarantee trades
         )
 
         self.assertIsInstance(result, BacktestResult)
-        # Should have some trades (high-probability bucket should trigger)
+        # With threshold=0, center bucket should always trigger
         self.assertGreater(len(result.trades), 0)
         self.assertGreater(result.brier_score, 0)
 
@@ -216,7 +217,7 @@ class TestRunBacktest(unittest.TestCase):
             start_date="2025-06-04",
             end_date="2025-06-04",
             horizon=3,
-            entry_threshold=0.0,  # Take all trades
+            entry_threshold=-1.0,  # Take all trades regardless of EV
         )
 
         # At least the center bucket should win

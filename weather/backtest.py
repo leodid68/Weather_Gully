@@ -6,6 +6,7 @@ Usage::
 """
 
 import argparse
+import hashlib
 import json
 import logging
 import math
@@ -221,7 +222,10 @@ def run_backtest(
                     if snapshot and snapshot["best_ask"] > 0:
                         simulated_price = snapshot["best_ask"]
                     else:
-                        seed = hash(f"{target_date_str}{loc}{metric}{bucket_lo}")
+                        # Use hashlib for deterministic seed (hash() is randomized per-process)
+                        seed = int.from_bytes(
+                            hashlib.md5(f"{target_date_str}{loc}{metric}{bucket_lo}".encode()).digest()[:8]
+                        )
                         simulated_price = _simulate_market_price(prob, n_buckets, seed)
 
                     ev = prob - simulated_price

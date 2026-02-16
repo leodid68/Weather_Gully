@@ -99,6 +99,9 @@ class Config:
     aviation_obs_weight: float = 0.40
     aviation_hours: int = 24
 
+    # Trading fees (Polymarket ~2% on gains)
+    trading_fees: float = 0.02
+
     # Adaptive sigma (ensemble-based)
     adaptive_sigma: bool = True
 

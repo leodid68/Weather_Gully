@@ -128,17 +128,17 @@ def get_open_meteo_forecast(
         gfs_high = _safe_get(daily, "temperature_2m_max_gfs_seamless", i)
         gfs_low = _safe_get(daily, "temperature_2m_min_gfs_seamless", i)
         if gfs_high is not None:
-            entry["gfs_high"] = round(gfs_high)
+            entry["gfs_high"] = round(gfs_high, 1)
         if gfs_low is not None:
-            entry["gfs_low"] = round(gfs_low)
+            entry["gfs_low"] = round(gfs_low, 1)
 
         # ECMWF
         ecmwf_high = _safe_get(daily, "temperature_2m_max_ecmwf_ifs025", i)
         ecmwf_low = _safe_get(daily, "temperature_2m_min_ecmwf_ifs025", i)
         if ecmwf_high is not None:
-            entry["ecmwf_high"] = round(ecmwf_high)
+            entry["ecmwf_high"] = round(ecmwf_high, 1)
         if ecmwf_low is not None:
-            entry["ecmwf_low"] = round(ecmwf_low)
+            entry["ecmwf_low"] = round(ecmwf_low, 1)
 
         # Auxiliary weather variables (average across models where applicable)
         for aux_key, entry_key in [
@@ -247,16 +247,16 @@ def get_open_meteo_forecast_multi(
                 gfs_high = _safe_get(daily, "temperature_2m_max_gfs_seamless", i)
                 gfs_low = _safe_get(daily, "temperature_2m_min_gfs_seamless", i)
                 if gfs_high is not None:
-                    entry["gfs_high"] = round(gfs_high)
+                    entry["gfs_high"] = round(gfs_high, 1)
                 if gfs_low is not None:
-                    entry["gfs_low"] = round(gfs_low)
+                    entry["gfs_low"] = round(gfs_low, 1)
 
                 ecmwf_high = _safe_get(daily, "temperature_2m_max_ecmwf_ifs025", i)
                 ecmwf_low = _safe_get(daily, "temperature_2m_min_ecmwf_ifs025", i)
                 if ecmwf_high is not None:
-                    entry["ecmwf_high"] = round(ecmwf_high)
+                    entry["ecmwf_high"] = round(ecmwf_high, 1)
                 if ecmwf_low is not None:
-                    entry["ecmwf_low"] = round(ecmwf_low)
+                    entry["ecmwf_low"] = round(ecmwf_low, 1)
 
                 for aux_key, entry_key in [
                     ("cloud_cover_max", "cloud_cover_max"),

@@ -186,7 +186,8 @@ def score_buckets(
             )
 
         prob = platt_calibrate(prob)
-        ev = prob - price  # Expected value above break-even
+        # EV adjusted for trading fees (Polymarket ~2%)
+        ev = prob * (1.0 - config.trading_fees) - price
 
         # Skip low-probability buckets (value traps at $0.01-0.03)
         if prob < config.min_probability:
@@ -665,9 +666,9 @@ def run_weather_strategy(
             obs_key = f"obs_{metric}"
             aviation_obs_temp = obs_data.get(obs_key)
             if aviation_obs_temp is not None:
-                # Dynamic weight: ×2 for day-J (today), ×1 for J+1, 0 for J+2+
+                # Weight: full for day-J (today), full for J+1, 0 for J+2+
                 if days_ahead == 0:
-                    effective_aviation_weight = config.aviation_obs_weight * 2.0
+                    effective_aviation_weight = config.aviation_obs_weight
                 elif days_ahead == 1:
                     effective_aviation_weight = config.aviation_obs_weight
                 else:
@@ -724,7 +725,8 @@ def run_weather_strategy(
                 loc_data.get("lat", 0), loc_data.get("lon", 0),
                 date_str, metric,
             )
-            ema_error = feedback.get_abs_error_ema(location, datetime.now(timezone.utc).month)
+            forecast_month = int(date_str.split("-")[1])
+            ema_error = feedback.get_abs_error_ema(location, forecast_month)
             adaptive_sigma_value = compute_adaptive_sigma(
                 ensemble_result, model_spread if config.multi_source else 0.0,
                 ema_error, date_str, location,
@@ -741,7 +743,8 @@ def run_weather_strategy(
             )
 
         # Feedback bias correction (before delta detection so both use corrected temp)
-        feedback_bias = feedback.get_bias(location, datetime.now(timezone.utc).month)
+        forecast_month = int(date_str.split("-")[1])
+        feedback_bias = feedback.get_bias(location, forecast_month)
         if feedback_bias is not None:
             forecast_temp -= feedback_bias
             logger.info("Feedback bias correction: %+.1f°F → adjusted forecast %.0f°F",

@@ -267,7 +267,7 @@ class CLOBWeatherBridge:
         market_id: str,
         side: str,
         amount: float,
-        fill_timeout: float = 0.0,
+        fill_timeout: float = 30.0,
         fill_poll_interval: float = 2.0,
     ) -> dict:
         """Execute a buy trade via CLOB limit order at fresh best ask.
@@ -279,7 +279,7 @@ class CLOBWeatherBridge:
             market_id: condition_id of the market.
             side: "yes" or "no".
             amount: USD amount to spend.
-            fill_timeout: Seconds to wait for fill verification (0 = skip).
+            fill_timeout: Seconds to wait for fill verification (default 30s).
             fill_poll_interval: Seconds between fill status polls.
 
         Returns:
@@ -376,7 +376,7 @@ class CLOBWeatherBridge:
         self,
         market_id: str,
         shares: float,
-        fill_timeout: float = 0.0,
+        fill_timeout: float = 30.0,
         fill_poll_interval: float = 2.0,
     ) -> dict:
         """Execute a sell trade via CLOB limit order at fresh best bid.
@@ -387,7 +387,7 @@ class CLOBWeatherBridge:
         Args:
             market_id: condition_id of the market.
             shares: Number of shares to sell.
-            fill_timeout: Seconds to wait for fill verification (0 = skip).
+            fill_timeout: Seconds to wait for fill verification (default 30s).
             fill_poll_interval: Seconds between fill status polls.
 
         Returns:

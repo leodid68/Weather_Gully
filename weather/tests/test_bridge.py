@@ -150,7 +150,7 @@ class TestExecuteTrade(unittest.TestCase):
         gm = _make_gamma_market(best_ask=0.10)
         bridge._market_cache["cond-1"] = gm
 
-        result = bridge.execute_trade("cond-1", "yes", 2.00)
+        result = bridge.execute_trade("cond-1", "yes", 2.00, fill_timeout=0)
         self.assertTrue(result["success"])
         self.assertEqual(result["trade_id"], "order-123")
         self.assertAlmostEqual(result["shares_bought"], 2.00 / 0.10)
@@ -167,7 +167,7 @@ class TestExecuteTrade(unittest.TestCase):
             clob_client=MagicMock(),
             gamma_client=MagicMock(),
         )
-        result = bridge.execute_trade("unknown", "yes", 1.0)
+        result = bridge.execute_trade("unknown", "yes", 1.0, fill_timeout=0)
         self.assertFalse(result["success"])
 
     def test_clob_error_handled(self):
@@ -183,7 +183,7 @@ class TestExecuteTrade(unittest.TestCase):
         gm = _make_gamma_market()
         bridge._market_cache["cond-1"] = gm
 
-        result = bridge.execute_trade("cond-1", "yes", 2.00)
+        result = bridge.execute_trade("cond-1", "yes", 2.00, fill_timeout=0)
         self.assertFalse(result["success"])
         self.assertIn("Network error", result["error"])
 
@@ -203,7 +203,7 @@ class TestExecuteSell(unittest.TestCase):
         gm = _make_gamma_market(best_bid=0.40)
         bridge._market_cache["cond-1"] = gm
 
-        result = bridge.execute_sell("cond-1", 10.0)
+        result = bridge.execute_sell("cond-1", 10.0, fill_timeout=0)
         self.assertTrue(result["success"])
         self.assertEqual(result["trade_id"], "sell-456")
 
@@ -217,7 +217,7 @@ class TestExecuteSell(unittest.TestCase):
             clob_client=MagicMock(),
             gamma_client=MagicMock(),
         )
-        result = bridge.execute_sell("unknown", 10.0)
+        result = bridge.execute_sell("unknown", 10.0, fill_timeout=0)
         self.assertFalse(result["success"])
 
 
