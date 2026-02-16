@@ -612,6 +612,240 @@ def build_calibration_tables(
     }
 
 
+def compute_exponential_weights(
+    dates: list[str],
+    half_life: float = 30.0,
+    reference_date: str | None = None,
+) -> dict[str, float]:
+    """Compute exponential decay weights for a list of date strings.
+
+    Formula: w(t) = exp(-ln(2) * age_days / half_life)
+
+    Args:
+        dates: List of date strings in YYYY-MM-DD format.
+        half_life: Half-life in days (default 30).
+        reference_date: Override "today" for testing (YYYY-MM-DD string).
+            Defaults to ``datetime.now()``.
+
+    Returns:
+        Dict mapping date string to weight in (0, 1].
+    """
+    if reference_date is not None:
+        ref = datetime.strptime(reference_date, "%Y-%m-%d")
+    else:
+        ref = datetime.now()
+
+    ln2 = math.log(2)
+    weights: dict[str, float] = {}
+    for d in dates:
+        dt = datetime.strptime(d, "%Y-%m-%d")
+        age_days = (ref - dt).days
+        if age_days < 0:
+            age_days = 0
+        weights[d] = math.exp(-ln2 * age_days / half_life)
+    return weights
+
+
+def _weighted_base_sigma(errors: list[dict], weights: dict[str, float]) -> float:
+    """Compute base sigma using exponentially-weighted errors.
+
+    Formula: sqrt(sum(w * error^2) / sum(w))
+
+    Falls back to 1.5 if sum of weights is near zero.
+    """
+    sum_w = 0.0
+    sum_w_err_sq = 0.0
+    for e in errors:
+        w = weights.get(e["target_date"], 0.0)
+        sum_w += w
+        sum_w_err_sq += w * e["error"] ** 2
+    if sum_w < 1e-9:
+        return 1.5
+    return math.sqrt(sum_w_err_sq / sum_w)
+
+
+def _weighted_model_weights(
+    errors: list[dict],
+    weights: dict[str, float],
+    group_by: str = "location",
+) -> dict[str, dict[str, float]]:
+    """Compute model weights per group using weighted RMSE.
+
+    Same structure as ``compute_model_weights()`` but uses exponential weights.
+
+    wmse = sum(w * (forecast - actual)^2) / sum(w), then sqrt for RMSE.
+    Uses inverse-RMSE weighting with NOAA fixed at 0.20.
+    """
+    # Group errors by (group_key, model)
+    grouped: dict[str, dict[str, list[tuple[float, float, float]]]] = defaultdict(
+        lambda: defaultdict(list)
+    )
+
+    for err in errors:
+        group_key = str(err.get(group_by, "global"))
+        model = err["model"]
+        w = weights.get(err["target_date"], 0.0)
+        grouped[group_key][model].append((err["forecast"], err["actual"], w))
+
+    results: dict[str, dict[str, float]] = {}
+
+    for group_key, model_data in grouped.items():
+        model_rmse: dict[str, float] = {}
+        for model, triples in model_data.items():
+            sum_w = sum(t[2] for t in triples)
+            if sum_w < 1e-9:
+                continue
+            wmse = sum(t[2] * (t[0] - t[1]) ** 2 for t in triples) / sum_w
+            model_rmse[model] = math.sqrt(wmse)
+
+        if not model_rmse:
+            continue
+
+        # Inverse-RMSE weighting
+        inv_rmse = {m: 1.0 / r for m, r in model_rmse.items() if r > 0}
+        total_inv = sum(inv_rmse.values())
+
+        if total_inv == 0:
+            continue
+
+        # Map to canonical model names
+        model_map = {"gfs": "gfs_seamless", "ecmwf": "ecmwf_ifs025"}
+        model_weights: dict[str, float] = {}
+        for model, inv in inv_rmse.items():
+            canonical = model_map.get(model, model)
+            model_weights[canonical] = round(inv / total_inv, 3)
+
+        # Add NOAA weight (fixed 0.20)
+        noaa_weight = 0.20
+        remaining = 1.0 - noaa_weight
+        for k in model_weights:
+            model_weights[k] = round(model_weights[k] * remaining, 3)
+        model_weights["noaa"] = noaa_weight
+
+        # Normalize to sum to 1.0
+        total = sum(model_weights.values())
+        if total > 0:
+            model_weights = {k: round(v / total, 3) for k, v in model_weights.items()}
+
+        results[group_key] = model_weights
+
+    return results
+
+
+def build_weighted_calibration_tables(
+    all_errors: list[dict],
+    locations: list[str],
+    half_life: float = 30.0,
+    reference_date: str | None = None,
+) -> dict:
+    """Build calibration tables with exponential decay weighting.
+
+    Same output format as ``build_calibration_tables()`` but weights recent
+    data more heavily using exponential decay.
+
+    Args:
+        all_errors: Combined error records from all locations.
+        locations: List of location keys processed.
+        half_life: Half-life in days for exponential weighting (default 30).
+        reference_date: Override "today" for testing (YYYY-MM-DD string).
+
+    Returns:
+        Dict ready to be serialized to ``calibration.json``.
+    """
+    # Compute exponential weights for all dates
+    all_dates = list({e["target_date"] for e in all_errors})
+    weights = compute_exponential_weights(all_dates, half_life, reference_date)
+
+    # Global weighted base sigma
+    global_base = _weighted_base_sigma(all_errors, weights)
+    logger.info("Weighted global base sigma: %.2f°F (half-life=%.0fd)", global_base, half_life)
+
+    # Expand to full horizon table
+    global_sigma = _expand_sigma_by_horizon(global_base)
+
+    # Weighted seasonal factors
+    # Group errors by month, compute weighted sigma per month
+    monthly_errors: dict[str, list[dict]] = defaultdict(list)
+    for e in all_errors:
+        monthly_errors[str(e["month"])].append(e)
+
+    monthly_sigma: dict[str, float] = {}
+    for month_str, errs in monthly_errors.items():
+        if len(errs) >= 3:
+            monthly_sigma[month_str] = _weighted_base_sigma(errs, weights)
+
+    if monthly_sigma:
+        mean_sigma = sum(monthly_sigma.values()) / len(monthly_sigma)
+        seasonal_factors = {
+            m: round(s / mean_sigma, 3) if mean_sigma > 0 else 1.0
+            for m, s in monthly_sigma.items()
+        }
+    else:
+        seasonal_factors = {}
+
+    # Per-location weighted sigma
+    location_sigma: dict[str, dict] = {}
+    location_seasonal: dict[str, dict] = {}
+    for loc in locations:
+        loc_errors = [e for e in all_errors if e["location"] == loc]
+        if not loc_errors:
+            continue
+
+        loc_base = _weighted_base_sigma(loc_errors, weights)
+        location_sigma[loc] = _expand_sigma_by_horizon(loc_base)
+        logger.info("  %s weighted base sigma: %.2f°F", loc, loc_base)
+
+        loc_monthly: dict[str, list[dict]] = defaultdict(list)
+        for e in loc_errors:
+            loc_monthly[str(e["month"])].append(e)
+
+        loc_monthly_sigma: dict[str, float] = {}
+        for month_str, errs in loc_monthly.items():
+            if len(errs) >= 3:
+                loc_monthly_sigma[month_str] = _weighted_base_sigma(errs, weights)
+
+        if loc_monthly_sigma:
+            loc_mean = sum(loc_monthly_sigma.values()) / len(loc_monthly_sigma)
+            location_seasonal[loc] = {
+                m: round(s / loc_mean, 3) if loc_mean > 0 else 1.0
+                for m, s in loc_monthly_sigma.items()
+            }
+
+    # Weighted model weights
+    model_weights = _weighted_model_weights(all_errors, weights, group_by="location")
+
+    # Reuse existing unweighted functions for adaptive and Platt
+    adaptive_factors = _compute_adaptive_factors(all_errors)
+    platt_params = _fit_platt_from_errors(all_errors)
+
+    # Effective sample count = sum of all weights
+    sum_all_weights = sum(weights.get(e["target_date"], 0.0) for e in all_errors)
+
+    # Metadata
+    dates = [e["target_date"] for e in all_errors]
+    date_range = [min(dates), max(dates)] if dates else []
+
+    return {
+        "global_sigma": global_sigma,
+        "location_sigma": location_sigma,
+        "seasonal_factors": seasonal_factors,
+        "location_seasonal": location_seasonal,
+        "model_weights": model_weights,
+        "adaptive_sigma": adaptive_factors,
+        "platt_scaling": platt_params,
+        "metadata": {
+            "generated": datetime.now(timezone.utc).isoformat(),
+            "samples": len(all_errors),
+            "samples_effective": round(sum_all_weights, 1),
+            "weighting": f"exponential half-life {half_life}d",
+            "date_range": date_range,
+            "locations": locations,
+            "base_sigma_global": round(global_base, 2),
+            "horizon_growth_model": "NWP linear: sigma(h) = base * growth(h)",
+        },
+    }
+
+
 def main() -> None:
     """CLI entry point for calibration."""
     parser = argparse.ArgumentParser(

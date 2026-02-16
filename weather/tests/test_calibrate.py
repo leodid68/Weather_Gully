@@ -15,6 +15,9 @@ from weather.calibrate import (
     compute_empirical_sigma,
     compute_forecast_errors,
     compute_model_weights,
+    compute_exponential_weights,
+    _weighted_base_sigma,
+    build_weighted_calibration_tables,
 )
 
 
@@ -341,6 +344,81 @@ class TestComputePlattParams(unittest.TestCase):
         params = _compute_platt_params(predictions, actuals)
         # a should be > 1 (stretches logit space to correct overconfidence)
         self.assertGreater(params["a"], 1.0)
+
+
+class TestWeightedCalibration(unittest.TestCase):
+
+    def _make_dated_errors(self, n_days=60, base_error=2.0):
+        """Generate errors with dates spread over n_days ending today."""
+        from datetime import datetime, timedelta
+        errors = []
+        today = datetime.now()
+        for day_offset in range(n_days):
+            date = (today - timedelta(days=day_offset)).strftime("%Y-%m-%d")
+            month = (today - timedelta(days=day_offset)).month
+            for metric in ["high", "low"]:
+                for model in ["gfs", "ecmwf"]:
+                    err = base_error * (1 if model == "gfs" else -0.8)
+                    errors.append({
+                        "location": "NYC",
+                        "target_date": date,
+                        "month": month,
+                        "metric": metric,
+                        "model": model,
+                        "forecast": 50.0 + err,
+                        "actual": 50.0,
+                        "error": err,
+                        "model_spread": abs(base_error * 0.5),
+                    })
+        return errors
+
+    def test_compute_weights_recent_higher(self):
+        from datetime import datetime, timedelta
+        today = datetime.now()
+        dates = [
+            today.strftime("%Y-%m-%d"),
+            (today - timedelta(days=60)).strftime("%Y-%m-%d"),
+        ]
+        weights = compute_exponential_weights(dates, half_life=30.0)
+        today_str = today.strftime("%Y-%m-%d")
+        old_str = (today - timedelta(days=60)).strftime("%Y-%m-%d")
+        # Today's weight should be higher than a 60-day-old weight
+        self.assertGreater(weights[today_str], weights[old_str])
+        # Today should be approximately 1.0
+        self.assertAlmostEqual(weights[today_str], 1.0, places=2)
+
+    def test_weighted_base_sigma_differs_from_unweighted(self):
+        errors = self._make_dated_errors()
+        from datetime import datetime
+        dates = list({e["target_date"] for e in errors})
+        weights = compute_exponential_weights(dates, half_life=30.0)
+        weighted_sigma = _weighted_base_sigma(errors, weights)
+        unweighted_sigma = _compute_base_sigma(errors)
+        # Both should be positive
+        self.assertGreater(weighted_sigma, 0)
+        self.assertGreater(unweighted_sigma, 0)
+        # Both should be in reasonable range
+        self.assertLess(weighted_sigma, 10.0)
+        self.assertLess(unweighted_sigma, 10.0)
+
+    def test_build_weighted_tables_has_all_keys(self):
+        errors = self._make_dated_errors()
+        result = build_weighted_calibration_tables(errors, locations=["NYC"])
+        self.assertIn("global_sigma", result)
+        self.assertIn("location_sigma", result)
+        self.assertIn("seasonal_factors", result)
+        self.assertIn("model_weights", result)
+        self.assertIn("adaptive_sigma", result)
+        self.assertIn("platt_scaling", result)
+        self.assertIn("metadata", result)
+
+    def test_effective_samples_in_metadata(self):
+        errors = self._make_dated_errors()
+        result = build_weighted_calibration_tables(errors, locations=["NYC"])
+        metadata = result["metadata"]
+        self.assertIn("samples_effective", metadata)
+        self.assertGreater(metadata["samples_effective"], 0)
+        self.assertLessEqual(metadata["samples_effective"], metadata["samples"])
 
 
 if __name__ == "__main__":
