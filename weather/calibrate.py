@@ -648,6 +648,59 @@ def _fit_student_t_df(errors: list[float]) -> float:
     return best_df
 
 
+def _skew_t_logpdf(x: float, df: float, gamma: float) -> float:
+    """Log-PDF of the two-piece skewed Student's t-distribution.
+
+    PDF: f(x) = gamma * t(x*gamma, df)    for x < 0
+         f(x) = (1/gamma) * t(x/gamma, df) for x >= 0
+    where t(·, df) is the standard Student-t PDF.
+    """
+    if x < 0:
+        z = x * gamma
+        log_scale = math.log(gamma)
+    else:
+        z = x / gamma
+        log_scale = -math.log(gamma)
+
+    # Student-t log-PDF
+    log_t = (
+        math.lgamma((df + 1) / 2) - math.lgamma(df / 2)
+        - 0.5 * math.log(df * math.pi)
+        - ((df + 1) / 2) * math.log(1 + z * z / df)
+    )
+
+    return log_scale + log_t
+
+
+def _fit_skew_t_params(errors: list[float]) -> tuple[float, float]:
+    """Fit (df, gamma) for the two-piece skew-t by maximum likelihood.
+
+    Grid search over candidate df and gamma values.
+    Returns (best_df, best_gamma).
+    """
+    n = len(errors)
+    if n < 30:
+        return 10.0, 1.0  # Default fallback
+
+    sigma = (sum(e ** 2 for e in errors) / n) ** 0.5
+    standardized = [e / sigma for e in errors] if sigma > 0 else errors
+
+    best_df = 10.0
+    best_gamma = 1.0
+    best_ll = float("-inf")
+
+    for df in [2, 3, 4, 5, 7, 10, 15, 20, 30, 50]:
+        for gamma_int in [5, 6, 7, 8, 9, 10, 11, 12, 13, 15]:
+            gamma = gamma_int / 10.0
+            ll = sum(_skew_t_logpdf(z, df, gamma) for z in standardized)
+            if ll > best_ll:
+                best_ll = ll
+                best_df = float(df)
+                best_gamma = round(gamma, 1)
+
+    return best_df, best_gamma
+
+
 def _compute_mean_model_spread(errors: list[dict]) -> float:
     """Average model spread across all errors (for diagnostics)."""
     spreads = [e.get("model_spread", 0.0) for e in errors if e.get("model_spread")]

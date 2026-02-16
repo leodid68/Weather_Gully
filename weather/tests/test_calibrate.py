@@ -11,10 +11,12 @@ from weather.calibrate import (
     _compute_platt_params,
     _compute_sigma_by_horizon,
     _expand_sigma_by_horizon,
+    _fit_skew_t_params,
     _fit_student_t_df,
     _HORIZON_GROWTH,
     _iqr_bounds,
     _iqr_filter,
+    _skew_t_logpdf,
     _test_normality,
     build_calibration_tables,
     compute_empirical_sigma,
@@ -885,6 +887,59 @@ class TestPlattForcedIdentity(unittest.TestCase):
         platt = result["platt_scaling"]
         self.assertAlmostEqual(platt["a"], 1.0)
         self.assertAlmostEqual(platt["b"], 0.0)
+
+
+class TestSkewTFitting(unittest.TestCase):
+
+    def test_fit_returns_valid_params(self):
+        import random
+        random.seed(42)
+        errors = [random.gauss(0, 2) for _ in range(200)]
+        df, gamma = _fit_skew_t_params(errors)
+        self.assertIn(df, [2, 3, 4, 5, 7, 10, 15, 20, 30, 50])
+        self.assertGreaterEqual(gamma, 0.5)
+        self.assertLessEqual(gamma, 1.5)
+
+    def test_left_skewed_data_gives_gamma_below_one(self):
+        """Left-skewed data (negative outliers) should give gamma < 1."""
+        import random
+        random.seed(42)
+        errors = [random.gauss(0, 2) for _ in range(400)]
+        errors += [random.gauss(-8, 2) for _ in range(100)]
+        df, gamma = _fit_skew_t_params(errors)
+        self.assertLess(gamma, 1.0, f"Expected gamma < 1 for left-skewed data, got {gamma}")
+
+    def test_symmetric_data_gives_gamma_near_one(self):
+        """Symmetric data should give gamma close to 1.0."""
+        import random
+        random.seed(42)
+        errors = [random.gauss(0, 2) for _ in range(500)]
+        df, gamma = _fit_skew_t_params(errors)
+        self.assertAlmostEqual(gamma, 1.0, delta=0.2,
+            msg=f"Expected gamma ≈ 1 for symmetric data, got {gamma}")
+
+    def test_insufficient_data_returns_defaults(self):
+        df, gamma = _fit_skew_t_params([1.0, -1.0])
+        self.assertEqual(df, 10.0)
+        self.assertEqual(gamma, 1.0)
+
+    def test_heavy_tailed_skewed_gives_low_df_and_skew(self):
+        """Heavy-tailed AND left-skewed data should give low df AND gamma < 1."""
+        import random
+        random.seed(42)
+        # Asymmetric heavy-tailed: amplify negative values of a t(3) sample
+        errors = []
+        for _ in range(600):
+            z = random.gauss(0, 1)
+            chi2 = sum(random.gauss(0, 1)**2 for _ in range(3)) / 3
+            t_val = z / (chi2**0.5)
+            if t_val < 0:
+                errors.append(t_val * 1.5)
+            else:
+                errors.append(t_val)
+        df, gamma = _fit_skew_t_params(errors)
+        self.assertLessEqual(df, 15)
+        self.assertLess(gamma, 1.0)
 
 
 if __name__ == "__main__":
