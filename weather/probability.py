@@ -5,9 +5,13 @@ import math
 import logging
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import TYPE_CHECKING
 from zoneinfo import ZoneInfo
 
 from .ensemble import EnsembleResult
+
+if TYPE_CHECKING:
+    from .kalman import KalmanState
 
 logger = logging.getLogger(__name__)
 

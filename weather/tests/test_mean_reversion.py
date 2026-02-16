@@ -88,7 +88,7 @@ def test_sizing_boost_depressed():
                              timestamp=f"2026-02-19T{i:02d}:00:00Z")
     # Compute mean and stddev to find a depressed price
     mean = sum(prices) / len(prices)
-    variance = sum((p - mean) ** 2 for p in prices) / len(prices)
+    variance = sum((p - mean) ** 2 for p in prices) / (len(prices) - 1)
     stddev = variance ** 0.5
     depressed_price = mean - 2.0 * stddev  # z = -2.0
     mult = tracker.sizing_multiplier("NYC", "2026-02-20", "high", (30, 35), depressed_price)
@@ -104,7 +104,7 @@ def test_sizing_reduction_elevated():
         tracker.record_price("NYC", "2026-02-20", "high", (30, 35), p,
                              timestamp=f"2026-02-19T{i:02d}:00:00Z")
     mean = sum(prices) / len(prices)
-    variance = sum((p - mean) ** 2 for p in prices) / len(prices)
+    variance = sum((p - mean) ** 2 for p in prices) / (len(prices) - 1)
     stddev = variance ** 0.5
     elevated_price = mean + 2.0 * stddev  # z = +2.0
     mult = tracker.sizing_multiplier("NYC", "2026-02-20", "high", (30, 35), elevated_price)
