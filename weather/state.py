@@ -107,6 +107,10 @@ class TradingState:
     event_positions: dict[str, str] = field(default_factory=dict)
     # Daily METAR observations: "location|date" → obs_data dict
     daily_observations: dict[str, dict] = field(default_factory=dict)
+    # Circuit breaker
+    daily_pnl: dict[str, float] = field(default_factory=dict)          # date_str → cumulative P&L
+    daily_positions_count: dict[str, int] = field(default_factory=dict) # date_str → count opened
+    last_circuit_break: str | None = None                               # ISO timestamp
 
     def record_trade(
         self,
@@ -197,6 +201,24 @@ class TradingState:
         key = f"{location}|{date}"
         return self.daily_observations.get(key)
 
+    # -- Circuit breaker tracking --
+
+    def get_daily_pnl(self, date_str: str) -> float:
+        """Get cumulative P&L for a given day."""
+        return self.daily_pnl.get(date_str, 0.0)
+
+    def record_daily_pnl(self, date_str: str, amount: float) -> None:
+        """Add a P&L amount to the daily total."""
+        self.daily_pnl[date_str] = self.daily_pnl.get(date_str, 0.0) + amount
+
+    def positions_opened_today(self, date_str: str) -> int:
+        """Get count of positions opened today."""
+        return self.daily_positions_count.get(date_str, 0)
+
+    def record_position_opened(self, date_str: str) -> None:
+        """Increment the position opened counter for today."""
+        self.daily_positions_count[date_str] = self.daily_positions_count.get(date_str, 0) + 1
+
     def prune(
         self,
         max_predictions: int = 500,
@@ -236,6 +258,9 @@ class TradingState:
             "predictions": {mid: rec.to_dict() for mid, rec in self.predictions.items()},
             "event_positions": self.event_positions,
             "daily_observations": self.daily_observations,
+            "daily_pnl": self.daily_pnl,
+            "daily_positions_count": self.daily_positions_count,
+            "last_circuit_break": self.last_circuit_break,
         }
         dir_name = os.path.dirname(path) or "."
         fd, tmp_path = tempfile.mkstemp(suffix=".tmp", dir=dir_name)
@@ -272,6 +297,9 @@ class TradingState:
             }
             event_positions = data.get("event_positions", {})
             daily_observations = data.get("daily_observations", {})
+            daily_pnl = data.get("daily_pnl", {})
+            daily_positions_count = data.get("daily_positions_count", {})
+            last_circuit_break = data.get("last_circuit_break")
             return cls(
                 trades=trades,
                 last_run=data.get("last_run", ""),
@@ -279,6 +307,9 @@ class TradingState:
                 predictions=predictions,
                 event_positions=event_positions,
                 daily_observations=daily_observations,
+                daily_pnl=daily_pnl,
+                daily_positions_count=daily_positions_count,
+                last_circuit_break=last_circuit_break,
             )
         except (json.JSONDecodeError, IOError, KeyError) as exc:
             logger.warning("Failed to load state from %s: %s — starting fresh", path, exc)
