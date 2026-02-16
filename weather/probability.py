@@ -48,6 +48,7 @@ def _load_calibration() -> dict:
         except (json.JSONDecodeError, IOError) as exc:
             logger.warning("Failed to load calibration data: %s — using defaults", exc)
 
+    logger.warning("Calibration file not found at %s — using hardcoded fallbacks", _CALIBRATION_PATH)
     _calibration_cache = {}
     _calibration_mtime = current_mtime
     return _calibration_cache
@@ -244,18 +245,25 @@ def _get_stddev(forecast_date: str, location: str = "", horizon_override: int | 
     if location and cal:
         loc_sigma = cal.get("location_sigma", {}).get(location, {})
         if horizon_key in loc_sigma:
-            return float(loc_sigma[horizon_key])
+            sigma_value = float(loc_sigma[horizon_key])
+            logger.debug("Using calibrated location sigma for %s h=%s: %.2f", location, horizon_key, sigma_value)
+            return sigma_value
 
     # 2. Global calibrated sigma
     if cal:
         global_sigma = cal.get("global_sigma", {})
         if horizon_key in global_sigma:
-            return float(global_sigma[horizon_key])
+            sigma_value = float(global_sigma[horizon_key])
+            logger.debug("Using calibrated global sigma for h=%s: %.2f", horizon_key, sigma_value)
+            return sigma_value
 
     # 3. Hardcoded fallback
     if days_ahead <= 10:
-        return _HORIZON_STDDEV.get(days_ahead, 11.8)
-    return min(18.0, 11.8 + 0.7 * (days_ahead - 10))
+        sigma_value = _HORIZON_STDDEV.get(days_ahead, 11.8)
+    else:
+        sigma_value = min(18.0, 11.8 + 0.7 * (days_ahead - 10))
+    logger.debug("Using hardcoded fallback sigma for h=%s: %.2f", horizon_key, sigma_value)
+    return sigma_value
 
 
 def _get_seasonal_factor(month: int, location: str = "") -> float:

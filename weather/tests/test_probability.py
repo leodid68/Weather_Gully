@@ -588,5 +588,25 @@ class TestStudentTCDFEdgeCases(unittest.TestCase):
         self.assertAlmostEqual(result, 0.5, places=4)
 
 
+class TestCalibrationLogging(unittest.TestCase):
+    """Test that the calibration fallback chain emits appropriate log messages."""
+
+    def test_missing_file_logs_warning(self):
+        import weather.probability as prob
+        # Force cache reset and point to non-existent path
+        orig_path = prob._CALIBRATION_PATH
+        prob._CALIBRATION_PATH = Path("/tmp/nonexistent_calibration_xyz.json")
+        prob._calibration_cache = None
+        prob._calibration_mtime = 0.0
+        try:
+            with self.assertLogs("weather.probability", level="WARNING") as cm:
+                prob._load_calibration()
+            self.assertTrue(any("not found" in msg or "fallback" in msg for msg in cm.output))
+        finally:
+            prob._CALIBRATION_PATH = orig_path
+            prob._calibration_cache = None
+            prob._calibration_mtime = 0.0
+
+
 if __name__ == "__main__":
     unittest.main()
