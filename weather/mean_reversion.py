@@ -14,6 +14,7 @@ import logging
 import os
 import tempfile
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -56,7 +57,7 @@ class PriceHistory:
 
         n = len(window)
         mean = sum(window) / n
-        variance = sum((p - mean) ** 2 for p in window) / n
+        variance = sum((p - mean) ** 2 for p in window) / (n - 1)
         stddev = variance ** 0.5
 
         if stddev < 0.001:
@@ -96,7 +97,6 @@ class PriceTracker:
                      bucket: tuple[int | float, int | float], price: float,
                      timestamp: str | None = None) -> None:
         """Record a price snapshot for a market."""
-        from datetime import datetime, timezone
         key = _market_key(location, forecast_date, metric, bucket)
         if key not in self.histories:
             self.histories[key] = PriceHistory()
