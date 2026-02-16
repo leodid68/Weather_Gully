@@ -3,6 +3,7 @@
 import json
 import logging
 import random
+import threading
 import time
 from urllib.parse import urlencode
 
@@ -42,34 +43,38 @@ class _CircuitBreaker:
         self.state = self.CLOSED
         self._failure_count = 0
         self._last_failure_time: float = 0.0
+        self._lock = threading.Lock()
 
     def allow_request(self) -> bool:
-        if self.state == self.CLOSED:
-            return True
-        if self.state == self.OPEN:
-            if time.monotonic() - self._last_failure_time >= self.recovery_timeout:
-                self.state = self.HALF_OPEN
-                logger.info("Circuit breaker → HALF_OPEN (probe allowed)")
+        with self._lock:
+            if self.state == self.CLOSED:
                 return True
-            return False
-        # HALF_OPEN: allow one probe
-        return True
+            if self.state == self.OPEN:
+                if time.monotonic() - self._last_failure_time >= self.recovery_timeout:
+                    self.state = self.HALF_OPEN
+                    logger.info("Circuit breaker → HALF_OPEN (probe allowed)")
+                    return True
+                return False
+            # HALF_OPEN: allow one probe
+            return True
 
     def record_success(self) -> None:
-        if self.state == self.HALF_OPEN:
-            logger.info("Circuit breaker → CLOSED (probe succeeded)")
-        self._failure_count = 0
-        self.state = self.CLOSED
+        with self._lock:
+            if self.state == self.HALF_OPEN:
+                logger.info("Circuit breaker → CLOSED (probe succeeded)")
+            self._failure_count = 0
+            self.state = self.CLOSED
 
     def record_failure(self) -> None:
-        self._failure_count += 1
-        self._last_failure_time = time.monotonic()
-        if self._failure_count >= self.failure_threshold:
-            self.state = self.OPEN
-            logger.warning(
-                "Circuit breaker → OPEN after %d consecutive failures (cooldown %.0fs)",
-                self._failure_count, self.recovery_timeout,
-            )
+        with self._lock:
+            self._failure_count += 1
+            self._last_failure_time = time.monotonic()
+            if self._failure_count >= self.failure_threshold:
+                self.state = self.OPEN
+                logger.warning(
+                    "Circuit breaker → OPEN after %d consecutive failures (cooldown %.0fs)",
+                    self._failure_count, self.recovery_timeout,
+                )
 
 
 class PolymarketClient:
