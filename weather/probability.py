@@ -100,6 +100,80 @@ def _normal_cdf(x: float) -> float:
     return 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))
 
 
+def _regularized_incomplete_beta(x: float, a: float, b: float, max_iter: int = 200) -> float:
+    """Regularized incomplete beta function I_x(a, b) via continued fraction.
+
+    Uses the Lentz algorithm for the continued fraction representation.
+    """
+    if x <= 0:
+        return 0.0
+    if x >= 1:
+        return 1.0
+
+    # Use the symmetry relation if x > (a+1)/(a+b+2)
+    if x > (a + 1) / (a + b + 2):
+        return 1.0 - _regularized_incomplete_beta(1.0 - x, b, a, max_iter)
+
+    # Log of the prefactor: x^a * (1-x)^b / (a * B(a,b))
+    lbeta = math.lgamma(a) + math.lgamma(b) - math.lgamma(a + b)
+    front = math.exp(a * math.log(x) + b * math.log(1.0 - x) - lbeta) / a
+
+    # Lentz's continued fraction
+    f = 1.0
+    c = 1.0
+    d = 1.0 - (a + b) * x / (a + 1.0)
+    if abs(d) < 1e-30:
+        d = 1e-30
+    d = 1.0 / d
+    f = d
+
+    for m in range(1, max_iter + 1):
+        # Even step
+        numerator = m * (b - m) * x / ((a + 2*m - 1) * (a + 2*m))
+        d = 1.0 + numerator * d
+        if abs(d) < 1e-30:
+            d = 1e-30
+        d = 1.0 / d
+        c = 1.0 + numerator / c
+        if abs(c) < 1e-30:
+            c = 1e-30
+        f *= c * d
+
+        # Odd step
+        numerator = -(a + m) * (a + b + m) * x / ((a + 2*m) * (a + 2*m + 1))
+        d = 1.0 + numerator * d
+        if abs(d) < 1e-30:
+            d = 1e-30
+        d = 1.0 / d
+        c = 1.0 + numerator / c
+        if abs(c) < 1e-30:
+            c = 1e-30
+        delta = c * d
+        f *= delta
+
+        if abs(delta - 1.0) < 1e-10:
+            break
+
+    return front * f * a
+
+
+def _student_t_cdf(x: float, df: float) -> float:
+    """CDF of standard Student's t-distribution.
+
+    Uses the regularized incomplete beta function.
+    For df > 100, falls back to normal CDF (negligible difference).
+    """
+    if df > 100:
+        return _normal_cdf(x)
+    t2 = x * x
+    z = df / (df + t2)
+    ibeta = _regularized_incomplete_beta(z, df / 2.0, 0.5)
+    if x >= 0:
+        return 1.0 - 0.5 * ibeta
+    else:
+        return 0.5 * ibeta
+
+
 def get_horizon_days(forecast_date: str) -> int:
     """Number of days between now (UTC) and the forecast date."""
     try:
@@ -382,16 +456,25 @@ def estimate_bucket_probability(
     if sigma <= 0:
         sigma = 0.01
 
+    # Determine CDF function based on calibration distribution
+    cal = _load_calibration()
+    dist = cal.get("distribution", "normal") if cal else "normal"
+    if dist == "student_t":
+        t_df = cal.get("student_t_df", 30)
+        cdf_fn = lambda z: _student_t_cdf(z, t_df)
+    else:
+        cdf_fn = _normal_cdf
+
     # CDF bounds
     if bucket_low <= -900:
         cdf_low = 0.0
     else:
-        cdf_low = _normal_cdf((bucket_low - 0.5 - forecast_temp) / sigma)
+        cdf_low = cdf_fn((bucket_low - 0.5 - forecast_temp) / sigma)
 
     if bucket_high >= 900:
         cdf_high = 1.0
     else:
-        cdf_high = _normal_cdf((bucket_high + 0.5 - forecast_temp) / sigma)
+        cdf_high = cdf_fn((bucket_high + 0.5 - forecast_temp) / sigma)
 
     prob = max(0.0, cdf_high - cdf_low)
     return round(prob, 4)
@@ -561,16 +644,25 @@ def estimate_bucket_probability_with_obs(
     if sigma <= 0:
         sigma = 0.01
 
+    # Determine CDF function based on calibration distribution
+    cal = _load_calibration()
+    dist = cal.get("distribution", "normal") if cal else "normal"
+    if dist == "student_t":
+        t_df = cal.get("student_t_df", 30)
+        cdf_fn = lambda z: _student_t_cdf(z, t_df)
+    else:
+        cdf_fn = _normal_cdf
+
     # CDF bounds
     if bucket_low <= -900:
         cdf_low = 0.0
     else:
-        cdf_low = _normal_cdf((bucket_low - 0.5 - effective_temp) / sigma)
+        cdf_low = cdf_fn((bucket_low - 0.5 - effective_temp) / sigma)
 
     if bucket_high >= 900:
         cdf_high = 1.0
     else:
-        cdf_high = _normal_cdf((bucket_high + 0.5 - effective_temp) / sigma)
+        cdf_high = cdf_fn((bucket_high + 0.5 - effective_temp) / sigma)
 
     prob = max(0.0, cdf_high - cdf_low)
     return round(prob, 4)

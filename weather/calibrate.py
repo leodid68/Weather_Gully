@@ -519,6 +519,71 @@ def compute_horizon_errors(
     return errors
 
 
+def _test_normality(errors: list[float]) -> dict:
+    """Jarque-Bera test for normality of forecast errors.
+
+    Returns dict with:
+        normal: bool — True if normality NOT rejected at 5% level
+        jb_statistic: float
+        skewness: float
+        kurtosis: float (excess kurtosis = kurtosis - 3)
+    """
+    n = len(errors)
+    if n < 30:
+        return {"normal": True, "jb_statistic": 0.0, "skewness": 0.0, "kurtosis": 0.0}
+    mean = sum(errors) / n
+    centered = [e - mean for e in errors]
+    m2 = sum(c**2 for c in centered) / n
+    m3 = sum(c**3 for c in centered) / n
+    m4 = sum(c**4 for c in centered) / n
+    sigma = m2 ** 0.5
+    if sigma < 1e-10:
+        return {"normal": True, "jb_statistic": 0.0, "skewness": 0.0, "kurtosis": 0.0}
+    skewness = m3 / (sigma ** 3)
+    kurtosis = m4 / (sigma ** 4)
+    excess_kurtosis = kurtosis - 3.0
+    jb = (n / 6.0) * (skewness**2 + excess_kurtosis**2 / 4.0)
+    # chi-squared(2) critical value at 5%: 5.991
+    normal = jb < 5.991
+    return {
+        "normal": normal,
+        "jb_statistic": round(jb, 2),
+        "skewness": round(skewness, 3),
+        "kurtosis": round(excess_kurtosis, 3),
+    }
+
+
+def _student_t_logpdf(x: float, df: float) -> float:
+    """Log-PDF of standard Student's t-distribution."""
+    return (
+        math.lgamma((df + 1) / 2) - math.lgamma(df / 2)
+        - 0.5 * math.log(df * math.pi)
+        - ((df + 1) / 2) * math.log(1 + x**2 / df)
+    )
+
+
+def _fit_student_t_df(errors: list[float]) -> float:
+    """Fit degrees of freedom for Student's t by maximum likelihood.
+
+    Grid search over candidate df values. Returns the df that maximizes
+    the log-likelihood of the standardized errors.
+    """
+    n = len(errors)
+    sigma = (sum(e**2 for e in errors) / n) ** 0.5
+    standardized = [e / sigma for e in errors] if sigma > 0 else errors
+
+    best_df = 30.0
+    best_ll = float("-inf")
+
+    for df in [2, 3, 4, 5, 7, 10, 15, 20, 30, 50, 100]:
+        ll = sum(_student_t_logpdf(z, df) for z in standardized)
+        if ll > best_ll:
+            best_ll = ll
+            best_df = float(df)
+
+    return best_df
+
+
 def _compute_mean_model_spread(errors: list[dict]) -> float:
     """Average model spread across all errors (for diagnostics)."""
     spreads = [e.get("model_spread", 0.0) for e in errors if e.get("model_spread")]
@@ -765,11 +830,23 @@ def build_calibration_tables(
     # Platt scaling
     platt_params = _fit_platt_from_errors(all_errors)
 
+    # Test normality and fit distribution
+    all_error_values = [e["error"] for e in all_errors]
+    normality = _test_normality(all_error_values)
+    if normality["normal"]:
+        distribution = "normal"
+        student_t_df = None
+    else:
+        distribution = "student_t"
+        student_t_df = _fit_student_t_df(all_error_values)
+        logger.info("Non-normal errors detected (JB=%.1f, skew=%.3f, kurt=%.3f). Using Student's t (df=%.0f)",
+                    normality["jb_statistic"], normality["skewness"], normality["kurtosis"], student_t_df)
+
     # Metadata
     dates = [e["target_date"] for e in all_errors]
     date_range = [min(dates), max(dates)] if dates else []
 
-    return {
+    result = {
         "global_sigma": global_sigma,
         "location_sigma": location_sigma,
         "seasonal_factors": seasonal_factors,
@@ -777,6 +854,8 @@ def build_calibration_tables(
         "model_weights": model_weights,
         "adaptive_sigma": adaptive_factors,
         "platt_scaling": platt_params,
+        "distribution": distribution,
+        "normality_test": normality,
         "metadata": {
             "generated": datetime.now(timezone.utc).isoformat(),
             "samples": len(all_errors),
@@ -787,6 +866,10 @@ def build_calibration_tables(
             "horizon_growth_model": horizon_model,
         },
     }
+    if student_t_df is not None:
+        result["student_t_df"] = student_t_df
+
+    return result
 
 
 def compute_exponential_weights(
@@ -1015,6 +1098,18 @@ def build_weighted_calibration_tables(
     adaptive_factors = _compute_adaptive_factors(all_errors)
     platt_params = _fit_platt_from_errors(all_errors)
 
+    # Test normality and fit distribution
+    all_error_values = [e["error"] for e in all_errors]
+    normality = _test_normality(all_error_values)
+    if normality["normal"]:
+        distribution = "normal"
+        student_t_df = None
+    else:
+        distribution = "student_t"
+        student_t_df = _fit_student_t_df(all_error_values)
+        logger.info("Non-normal errors detected (JB=%.1f, skew=%.3f, kurt=%.3f). Using Student's t (df=%.0f)",
+                    normality["jb_statistic"], normality["skewness"], normality["kurtosis"], student_t_df)
+
     # Effective sample count = sum of all weights
     sum_all_weights = sum(weights.get(e["target_date"], 0.0) for e in all_errors)
 
@@ -1022,7 +1117,7 @@ def build_weighted_calibration_tables(
     dates = [e["target_date"] for e in all_errors]
     date_range = [min(dates), max(dates)] if dates else []
 
-    return {
+    result = {
         "global_sigma": global_sigma,
         "location_sigma": location_sigma,
         "seasonal_factors": seasonal_factors,
@@ -1030,6 +1125,8 @@ def build_weighted_calibration_tables(
         "model_weights": model_weights,
         "adaptive_sigma": adaptive_factors,
         "platt_scaling": platt_params,
+        "distribution": distribution,
+        "normality_test": normality,
         "metadata": {
             "generated": datetime.now(timezone.utc).isoformat(),
             "samples": len(all_errors),
@@ -1041,6 +1138,10 @@ def build_weighted_calibration_tables(
             "horizon_growth_model": horizon_model,
         },
     }
+    if student_t_df is not None:
+        result["student_t_df"] = student_t_df
+
+    return result
 
 
 def main() -> None:

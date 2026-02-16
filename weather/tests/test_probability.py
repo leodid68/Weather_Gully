@@ -415,5 +415,35 @@ class TestPlattCalibrate(unittest.TestCase):
             self.assertLessEqual(calibrated[i], calibrated[i + 1])
 
 
+class TestStudentTCDF(unittest.TestCase):
+    def test_symmetry(self):
+        """Student's t CDF should be symmetric: F(-x) = 1 - F(x)."""
+        from weather.probability import _student_t_cdf
+        for df in [3, 5, 10, 30]:
+            for x in [0.5, 1.0, 2.0]:
+                self.assertAlmostEqual(
+                    _student_t_cdf(-x, df) + _student_t_cdf(x, df), 1.0, places=6)
+
+    def test_center_is_half(self):
+        """F(0) should be 0.5 for all df."""
+        from weather.probability import _student_t_cdf
+        for df in [3, 5, 10, 100]:
+            self.assertAlmostEqual(_student_t_cdf(0, df), 0.5, places=6)
+
+    def test_high_df_matches_normal(self):
+        """For df > 100, should match normal CDF."""
+        from weather.probability import _student_t_cdf, _normal_cdf
+        for x in [-2.0, -1.0, 0.0, 1.0, 2.0]:
+            self.assertAlmostEqual(_student_t_cdf(x, 200), _normal_cdf(x), places=4)
+
+    def test_fatter_tails_than_normal(self):
+        """Student's t with low df should have more probability in tails."""
+        from weather.probability import _student_t_cdf, _normal_cdf
+        # P(X > 3) should be larger for t(3) than for normal
+        tail_t = 1 - _student_t_cdf(3.0, 3)
+        tail_normal = 1 - _normal_cdf(3.0)
+        self.assertGreater(tail_t, tail_normal)
+
+
 if __name__ == "__main__":
     unittest.main()

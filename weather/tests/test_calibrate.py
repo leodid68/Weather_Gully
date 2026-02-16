@@ -11,7 +11,9 @@ from weather.calibrate import (
     _compute_platt_params,
     _compute_sigma_by_horizon,
     _expand_sigma_by_horizon,
+    _fit_student_t_df,
     _HORIZON_GROWTH,
+    _test_normality,
     build_calibration_tables,
     compute_empirical_sigma,
     compute_forecast_errors,
@@ -645,6 +647,55 @@ class TestBuildCalibrationTablesWithHorizonErrors(unittest.TestCase):
                 })
         result = build_calibration_tables(errors, ["NYC"])
         self.assertIn("NWP linear", result["metadata"]["horizon_growth_model"])
+
+
+class TestNormality(unittest.TestCase):
+    def test_normal_data_passes(self):
+        """Normal data should not be rejected."""
+        import random
+        random.seed(42)
+        errors = [random.gauss(0, 2) for _ in range(200)]
+        result = _test_normality(errors)
+        self.assertTrue(result["normal"])
+
+    def test_heavy_tailed_data_rejected(self):
+        """Data with fat tails should be rejected."""
+        import random
+        random.seed(42)
+        # Mix of normal + outliers (simulates fat tails)
+        errors = [random.gauss(0, 2) for _ in range(180)]
+        errors += [random.choice([-15, 15]) for _ in range(20)]
+        result = _test_normality(errors)
+        self.assertFalse(result["normal"])
+        self.assertGreater(result["jb_statistic"], 5.991)
+
+    def test_insufficient_data(self):
+        """< 30 samples should return normal=True (not enough data to reject)."""
+        result = _test_normality([1.0, -1.0, 2.0])
+        self.assertTrue(result["normal"])
+
+
+class TestStudentTFitting(unittest.TestCase):
+    def test_fit_returns_valid_df(self):
+        import random
+        random.seed(42)
+        errors = [random.gauss(0, 2) for _ in range(200)]
+        df = _fit_student_t_df(errors)
+        self.assertIn(df, [2, 3, 4, 5, 7, 10, 15, 20, 30, 50, 100])
+
+    def test_heavy_tails_give_low_df(self):
+        """Heavy-tailed data should fit low df (broader tails)."""
+        import random
+        random.seed(42)
+        # Generate Student's t with df=3 (heavy tails)
+        errors = []
+        for _ in range(500):
+            # Approximate t(3) by normal / sqrt(chi2(3)/3)
+            z = random.gauss(0, 1)
+            chi2 = sum(random.gauss(0, 1)**2 for _ in range(3)) / 3
+            errors.append(z / (chi2**0.5) * 2)
+        df = _fit_student_t_df(errors)
+        self.assertLessEqual(df, 10)  # Should prefer low df
 
 
 if __name__ == "__main__":
