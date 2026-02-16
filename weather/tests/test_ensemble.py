@@ -224,6 +224,29 @@ class TestFetchEnsembleSpread(unittest.TestCase):
         self.assertEqual(_stddev([]), 0.0)
 
     @patch("weather.ensemble._fetch_ensemble_json")
+    def test_new_api_format_model_in_key(self, mock_fetch):
+        """New Open-Meteo format: model name embedded in member key suffix."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mock_fetch.return_value = {
+                "daily": {
+                    "time": ["2026-02-17"],
+                    "temperature_2m_max_member01_ecmwf_ifs025_ensemble": [38.9],
+                    "temperature_2m_max_member02_ecmwf_ifs025_ensemble": [37.0],
+                    "temperature_2m_max_member03_ecmwf_ifs025_ensemble": [39.6],
+                    "temperature_2m_max_member01_ncep_gefs025": [43.8],
+                    "temperature_2m_max_member02_ncep_gefs025": [43.0],
+                    "temperature_2m_max_ecmwf_ifs025_ensemble": [37.4],
+                    "temperature_2m_max_ncep_gefs025": [43.6],
+                },
+            }
+            result = fetch_ensemble_spread(40.78, -73.87, "2026-02-17", "high",
+                                            cache_dir=tmpdir)
+            # 3 ECMWF members + 2 GFS members (mean keys excluded by regex)
+            self.assertEqual(result.n_members, 5)
+            self.assertGreater(result.ecmwf_stddev, 0)
+            self.assertGreater(result.gfs_stddev, 0)
+
+    @patch("weather.ensemble._fetch_ensemble_json")
     def test_low_metric_uses_min(self, mock_fetch):
         """Metric 'low' should query temperature_2m_min."""
         with tempfile.TemporaryDirectory() as tmpdir:

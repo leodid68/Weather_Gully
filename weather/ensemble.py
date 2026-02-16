@@ -234,8 +234,11 @@ def fetch_ensemble_spread(
         logger.error("Unexpected ensemble API response type: %s", type(raw))
         return EnsembleResult.empty()
 
-    # Regex to match member keys like temperature_2m_max_member0
-    member_re = re.compile(rf"^{re.escape(daily_var)}_member(\d+)$")
+    # Match member keys in both old and new API formats:
+    #   Old: temperature_2m_max_member01
+    #   New: temperature_2m_max_member01_ecmwf_ifs025_ensemble
+    #   New: temperature_2m_max_member01_ncep_gefs025
+    member_re = re.compile(rf"^{re.escape(daily_var)}_member(\d+)(?:_(.+))?$")
 
     ecmwf_temps: list[float] = []
     gfs_temps: list[float] = []
@@ -250,7 +253,9 @@ def fetch_ensemble_spread(
                 temp = values[0]
                 if temp is not None:
                     temp = float(temp)
-                    if "ecmwf" in model:
+                    # Determine model from key suffix (new format) or entry model field (old format)
+                    key_suffix = m.group(2) or ""
+                    if "ecmwf" in key_suffix or "ecmwf" in model:
                         ecmwf_temps.append(temp)
                     else:
                         gfs_temps.append(temp)
