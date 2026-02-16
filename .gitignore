@@ -13,3 +13,5 @@ weather_state.json
 *.lock
 weather/cache/
 weather/sigma_log.json
+weather/error_history.json
+weather/recalibration_log/
