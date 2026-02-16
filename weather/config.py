@@ -125,6 +125,9 @@ class Config:
     # Kalman filter for dynamic sigma estimation
     kalman_sigma: bool = True
 
+    # Mean-reversion timing (price Z-score sizing modifier)
+    mean_reversion: bool = True
+
     @property
     def active_locations(self) -> list[str]:
         """Return canonical location keys matching LOCATIONS dict keys.

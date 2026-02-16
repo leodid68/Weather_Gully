@@ -22,6 +22,7 @@ weather/kalman_state.json
 weather/feedback_state.json
 weather/paper_state.json
 weather/price_snapshots.json
+weather/price_snapshots_mr.json
 weather/calibration_era5_backup.json
 
 # Backtest results (large, regenerated)

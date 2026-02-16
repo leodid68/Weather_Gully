@@ -24,6 +24,7 @@ from .probability import (
 )
 from .bridge import CLOBWeatherBridge
 from .feedback import FeedbackState
+from .mean_reversion import PriceTracker
 from .sigma_log import log_sigma_signals
 from .sizing import compute_exit_threshold, compute_position_size
 from .trade_log import log_trade
@@ -272,6 +273,7 @@ def check_exit_opportunities(
     state: TradingState,
     dry_run: bool = True,
     use_safeguards: bool = True,
+    price_tracker: "PriceTracker | None" = None,
 ) -> tuple[int, int]:
     """Check open positions for exit opportunities. Returns ``(found, executed)``.
 
@@ -329,6 +331,16 @@ def check_exit_opportunities(
                 "EXIT: %s — price $%.2f >= threshold $%.2f",
                 outcome_name, current_price, exit_threshold,
             )
+
+            # Mean-reversion exit signal (informational only)
+            if price_tracker and config.mean_reversion and trade.location:
+                bucket_parsed = parse_temperature_bucket(trade.outcome_name)
+                if bucket_parsed:
+                    if price_tracker.should_favor_exit(
+                        trade.location, trade.forecast_date,
+                        trade.metric, tuple(bucket_parsed), current_price,
+                    ):
+                        logger.info("Mean-reversion also favors exit (elevated price)")
 
             if use_safeguards:
                 context = client.get_market_context(market_id)
@@ -576,6 +588,7 @@ def run_weather_strategy(
     feedback = FeedbackState.load()
     from .kalman import KalmanState
     kalman = KalmanState.load() if config.kalman_sigma else None
+    price_tracker = PriceTracker.load() if config.mean_reversion else None
 
     logger.info("Weather Trading Bot (CLOB direct)")
     logger.info("=" * 50)
@@ -953,6 +966,11 @@ def run_weather_strategy(
             prob = entry["prob"]
             ev = entry["ev"]
 
+            # Record price snapshot for mean-reversion tracking
+            if price_tracker and entry.get("bucket"):
+                bucket_mr = (entry["bucket"][0], entry["bucket"][1])
+                price_tracker.record_price(location, date_str, metric, bucket_mr, price)
+
             logger.info(
                 "Bucket: %s @ $%.2f — prob=%.1f%% EV=%.3f",
                 outcome_name, price, prob * 100, ev,
@@ -987,6 +1005,14 @@ def run_weather_strategy(
             position_size = _apply_correlation_discount(
                 position_size, location, forecast_month, open_locations, config,
             )
+
+            # Mean-reversion sizing modifier
+            if price_tracker and config.mean_reversion and entry.get("bucket"):
+                bucket_mr = (entry["bucket"][0], entry["bucket"][1])
+                mr_mult = price_tracker.sizing_multiplier(location, date_str, metric, bucket_mr, price)
+                if mr_mult != 1.0:
+                    position_size = round(position_size * mr_mult, 2)
+                    logger.info("Mean-reversion: z-mult=%.2f -> $%.2f", mr_mult, position_size)
 
             if position_size <= 0:
                 logger.info("Kelly says no bet (no edge at this price)")
@@ -1101,6 +1127,7 @@ def run_weather_strategy(
     # Check exits
     exits_found, exits_executed = check_exit_opportunities(
         client, config, state, dry_run, use_safeguards,
+        price_tracker=price_tracker,
     )
 
     # Summary
@@ -1130,6 +1157,14 @@ def run_weather_strategy(
             kalman.save()
         except Exception as exc:
             logger.warning("Failed to save Kalman state: %s", exc)
+
+    # Persist price tracker (mean-reversion)
+    if price_tracker is not None:
+        try:
+            price_tracker.prune()
+            price_tracker.save()
+        except Exception as exc:
+            logger.warning("Failed to save price tracker: %s", exc)
 
     # Persist state
     save_path = state_path or config.state_file
