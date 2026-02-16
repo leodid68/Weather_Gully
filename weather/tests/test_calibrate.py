@@ -942,5 +942,24 @@ class TestSkewTFitting(unittest.TestCase):
         self.assertLess(gamma, 1.0)
 
 
+class TestCalibrationSkewTOutput(unittest.TestCase):
+    """Verify calibration fitting produces skew-t params when non-normal."""
+
+    def test_non_normal_errors_produce_skew_t_params(self):
+        import random
+        random.seed(42)
+        errors = [random.gauss(0, 2) for _ in range(200)]
+        errors += [random.choice([-15, 15]) for _ in range(30)]
+
+        normality = _test_normality(errors)
+        self.assertFalse(normality["normal"])
+
+        df, gamma = _fit_skew_t_params(errors)
+        self.assertIsInstance(df, float)
+        self.assertIsInstance(gamma, float)
+        self.assertGreater(gamma, 0)
+        self.assertLessEqual(gamma, 1.5)
+
+
 if __name__ == "__main__":
     unittest.main()

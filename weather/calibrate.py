@@ -1035,14 +1035,20 @@ def build_calibration_tables(
     # Test normality and fit distribution
     all_error_values = [e["error"] for e in all_errors]
     normality = _test_normality(all_error_values)
+    skew_t_gamma = None
     if normality["normal"]:
         distribution = "normal"
         student_t_df = None
     else:
-        distribution = "student_t"
-        student_t_df = _fit_student_t_df(all_error_values)
-        logger.info("Non-normal errors detected (JB=%.1f, skew=%.3f, kurt=%.3f). Using Student's t (df=%.0f)",
-                    normality["jb_statistic"], normality["skewness"], normality["kurtosis"], student_t_df)
+        # Fit skewed Student-t (handles both heavy tails AND asymmetry)
+        distribution = "skew_t"
+        student_t_df, skew_t_gamma = _fit_skew_t_params(all_error_values)
+        logger.info(
+            "Non-normal errors (JB=%.1f, skew=%.3f, kurt=%.3f). "
+            "Using skew-t (df=%.0f, gamma=%.2f)",
+            normality["jb_statistic"], normality["skewness"],
+            normality["kurtosis"], student_t_df, skew_t_gamma,
+        )
 
     # Inter-location correlation matrix
     correlation_matrix = _compute_correlation_matrix(locations, all_errors)
@@ -1075,6 +1081,8 @@ def build_calibration_tables(
     }
     if student_t_df is not None:
         result["student_t_df"] = student_t_df
+    if skew_t_gamma is not None:
+        result["skew_t_gamma"] = skew_t_gamma
 
     return result
 
@@ -1331,14 +1339,20 @@ def build_weighted_calibration_tables(
     # Test normality and fit distribution
     all_error_values = [e["error"] for e in all_errors]
     normality = _test_normality(all_error_values)
+    skew_t_gamma = None
     if normality["normal"]:
         distribution = "normal"
         student_t_df = None
     else:
-        distribution = "student_t"
-        student_t_df = _fit_student_t_df(all_error_values)
-        logger.info("Non-normal errors detected (JB=%.1f, skew=%.3f, kurt=%.3f). Using Student's t (df=%.0f)",
-                    normality["jb_statistic"], normality["skewness"], normality["kurtosis"], student_t_df)
+        # Fit skewed Student-t (handles both heavy tails AND asymmetry)
+        distribution = "skew_t"
+        student_t_df, skew_t_gamma = _fit_skew_t_params(all_error_values)
+        logger.info(
+            "Non-normal errors (JB=%.1f, skew=%.3f, kurt=%.3f). "
+            "Using skew-t (df=%.0f, gamma=%.2f)",
+            normality["jb_statistic"], normality["skewness"],
+            normality["kurtosis"], student_t_df, skew_t_gamma,
+        )
 
     # Effective sample count = sum of all weights
     sum_all_weights = sum(weights.get(e["target_date"], 0.0) for e in all_errors)
@@ -1375,6 +1389,8 @@ def build_weighted_calibration_tables(
     }
     if student_t_df is not None:
         result["student_t_df"] = student_t_df
+    if skew_t_gamma is not None:
+        result["skew_t_gamma"] = skew_t_gamma
 
     return result
 
