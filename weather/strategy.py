@@ -242,6 +242,19 @@ def score_buckets(
     """
     scored: list[dict] = []
 
+    # Detect "Other" bucket price from non-parseable markets
+    p_other = 0.0
+    for m in event_markets:
+        oname = m.get("outcome_name", "")
+        if _parse_bucket(oname, location) is None:
+            ask_str = m.get("best_ask") or m.get("external_price_yes") or "0"
+            try:
+                p = float(ask_str)
+            except (ValueError, TypeError):
+                p = 0.0
+            if 0 < p < 1.0:
+                p_other += p
+
     for market in event_markets:
         outcome_name = market.get("outcome_name", "")
         bucket = _parse_bucket(outcome_name, location)
@@ -308,7 +321,7 @@ def score_buckets(
         })
 
         # ---- NO side: if bucket is overpriced, buying NO is profitable ----
-        no_prob = 1.0 - prob    # P(not in this bucket)
+        no_prob = max(0.0, 1.0 - prob - p_other)  # Account for "Other" bucket
         no_price = 1.0 - price  # Price of NO token (complement)
         if no_price >= MIN_TICK_SIZE and no_prob >= config.min_probability:
             ev_no = no_prob * (1.0 - config.trading_fees) - no_price
