@@ -179,6 +179,24 @@ async def _async_main(
         feedback.save()
         if kalman is not None:
             kalman.save()
+
+        # Auto-resolve trade log entries using daily observations
+        from .trade_log import resolve_trades
+        actuals: dict[str, dict[str, float]] = {}
+        for key, obs in state.daily_observations.items():
+            parts = key.split("|", 1)
+            if len(parts) != 2:
+                continue
+            _, date_str = parts
+            for metric_name in ("high", "low"):
+                temp = obs.get(f"obs_{metric_name}")
+                if temp is not None:
+                    actuals.setdefault(date_str, {})[metric_name] = temp
+        if actuals:
+            tl_resolved = resolve_trades(actuals)
+            if tl_resolved:
+                logger.info("Resolved %d trade_log entries via METAR observations", tl_resolved)
+
         _print_pnl_summary(state)
 
         # Clear all pending orders — in paper mode no order_manager runs,
