@@ -266,6 +266,12 @@ def score_buckets(
         if prob < config.min_probability:
             continue
 
+        # Value trap: bucket center too far from forecast
+        _lo, _hi = bucket
+        bc = _hi if _lo < -900 else (_lo if _hi > 900 else (_lo + _hi) / 2.0)
+        if sigma_override and abs(forecast_temp - bc) > config.max_bucket_distance_sigma * sigma_override:
+            continue
+
         scored.append({
             "market": market,
             "bucket": bucket,

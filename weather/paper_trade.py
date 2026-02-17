@@ -13,6 +13,7 @@ import argparse
 import asyncio
 import logging
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 from typing import TYPE_CHECKING
@@ -61,6 +62,37 @@ async def _resolve_predictions(state: TradingState, gamma) -> int:
                 "Resolved prediction %s: outcome=%s (prob was %.2f)",
                 market_id[:16], result["outcome"], pred.our_probability,
             )
+    # Fallback: resolve via local METAR observations when Gamma hasn't
+    now = datetime.now(timezone.utc)
+    for market_id, pred in list(state.predictions.items()):
+        if pred.resolved:
+            continue
+        # Only resolve if forecast date is 24h+ in the past
+        try:
+            fd = datetime.strptime(pred.forecast_date, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+        except ValueError:
+            continue
+        if (now - fd).total_seconds() < 86400:
+            continue
+        # Check daily observations
+        obs = state.get_daily_obs(pred.location, pred.forecast_date)
+        if not obs:
+            continue
+        actual_key = f"obs_{pred.metric}"
+        actual_temp = obs.get(actual_key)
+        if actual_temp is None:
+            continue
+        # Resolve: is actual temp within [bucket_low, bucket_high]?
+        in_bucket = pred.bucket_low <= actual_temp <= pred.bucket_high
+        pred.resolved = True
+        pred.actual_outcome = in_bucket
+        resolved_count += 1
+        logger.info(
+            "Resolved prediction %s via METAR: actual=%.1f°F bucket=[%s,%s] → %s (prob was %.2f)",
+            market_id[:16], actual_temp, pred.bucket_low, pred.bucket_high,
+            "WIN" if in_bucket else "LOSS", pred.our_probability,
+        )
+
     if resolved_count:
         logger.info("Resolved %d pending predictions", resolved_count)
     return resolved_count

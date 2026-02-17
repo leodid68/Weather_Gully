@@ -63,7 +63,8 @@ class Config:
     # Kelly
     kelly_fraction: float = 0.25
     min_ev_threshold: float = 0.03
-    min_probability: float = 0.15
+    min_probability: float = 0.25
+    max_bucket_distance_sigma: float = 2.5
 
     # Rate limiting
     max_trades_per_run: int = 5
