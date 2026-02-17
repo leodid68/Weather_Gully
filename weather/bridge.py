@@ -11,6 +11,8 @@ import time
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
+from .config import MIN_SHARES_PER_ORDER
+
 if TYPE_CHECKING:
     from bot.gamma import GammaClient, GammaMarket
     from polymarket.client import PolymarketClient
@@ -567,3 +569,61 @@ class CLOBWeatherBridge:
         except Exception as exc:
             logger.error("Bridge sell failed: %s", exc)
             return {"error": str(exc), "success": False}
+
+    def execute_maker_order(
+        self,
+        market_id: str,
+        side: str,
+        amount: float,
+        maker_price: float,
+    ) -> dict:
+        """Post a GTC postOnly bid. Returns immediately, no fill wait.
+
+        Returns dict with keys: success, posted, order_id, price, size, token_id.
+        If CLOB rejects postOnly (would cross spread), returns {"posted": False}.
+        """
+        gm = self._market_cache.get(market_id)
+        if not gm or not gm.clob_token_ids:
+            return {"success": False, "posted": False, "error": "no market data"}
+
+        token_id = gm.clob_token_ids[0]
+        price = round(maker_price, 2)
+        size = round(amount / price, 1) if price > 0 else 0.0
+
+        if size < MIN_SHARES_PER_ORDER:
+            return {"success": False, "posted": False, "error": "size below minimum"}
+
+        clob_side = "BUY" if side.lower() in ("yes", "buy") else "SELL"
+
+        try:
+            result = self.clob.post_order(
+                token_id=token_id,
+                side=clob_side,
+                price=price,
+                size=size,
+                neg_risk=True,
+                order_type="GTC",
+                post_only=True,
+            )
+            order_id = result.get("orderID", "")
+
+            if not order_id:
+                logger.info("Maker order rejected (postOnly would cross): %s", result)
+                return {"success": False, "posted": False, "error": "rejected"}
+
+            logger.info(
+                "Maker order posted: %s %.1f shares @ $%.2f (order %s)",
+                clob_side, size, price, order_id,
+            )
+            return {
+                "success": True,
+                "posted": True,
+                "order_id": order_id,
+                "price": price,
+                "size": size,
+                "token_id": token_id,
+            }
+
+        except Exception as exc:
+            logger.warning("Maker order failed: %s", exc)
+            return {"success": False, "posted": False, "error": str(exc)}
