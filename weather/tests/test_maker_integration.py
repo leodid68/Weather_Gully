@@ -1,7 +1,7 @@
 """Integration tests for the full maker order lifecycle."""
 
 from datetime import datetime, timezone, timedelta
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 import pytest
 from weather.pending_state import PendingOrders, pending_lock
 from weather.order_manager import poll_once, reconcile_on_startup
@@ -21,7 +21,8 @@ def _make_order(**overrides):
 
 
 class TestFullMakerCycle:
-    def test_post_fill_record(self, tmp_path):
+    @pytest.mark.asyncio(loop_scope="function")
+    async def test_post_fill_record(self, tmp_path):
         """Full cycle: post maker → fill → record in state."""
         pending_path = str(tmp_path / "pending.json")
         state_path = str(tmp_path / "state.json")
@@ -34,12 +35,12 @@ class TestFullMakerCycle:
         assert len(po) == 1
 
         # 2. Order manager detects fill
-        mock_clob = MagicMock()
+        mock_clob = AsyncMock()
         mock_clob.get_order.return_value = {
             "status": "MATCHED", "size_matched": 20.0, "original_size": 20.0,
         }
 
-        fills, _, _ = poll_once(mock_clob, po, pending_path, None, state_path)
+        fills, _, _ = await poll_once(mock_clob, po, pending_path, None, state_path)
         assert fills == 1
 
         # 3. Pending cleaned
@@ -57,7 +58,8 @@ class TestFullMakerCycle:
         assert po.has_market("m1") is True
         assert po.has_market("m2") is False
 
-    def test_ttl_frees_capital(self, tmp_path):
+    @pytest.mark.asyncio(loop_scope="function")
+    async def test_ttl_frees_capital(self, tmp_path):
         """TTL expired → order cancelled, exposure freed."""
         pending_path = str(tmp_path / "pending.json")
         state_path = str(tmp_path / "state.json")
@@ -70,8 +72,8 @@ class TestFullMakerCycle:
         initial_exposure = po.total_exposure()
         assert initial_exposure == pytest.approx(5.0)
 
-        mock_clob = MagicMock()
-        _, cancels, _ = poll_once(mock_clob, po, pending_path, None, state_path)
+        mock_clob = AsyncMock()
+        _, cancels, _ = await poll_once(mock_clob, po, pending_path, None, state_path)
         assert cancels == 1
 
         po.load()
@@ -87,7 +89,8 @@ class TestFullMakerCycle:
 
         assert po.total_exposure() == pytest.approx(7.0)
 
-    def test_reconcile_after_crash(self, tmp_path):
+    @pytest.mark.asyncio(loop_scope="function")
+    async def test_reconcile_after_crash(self, tmp_path):
         """After crash, reconcile removes orders not on CLOB."""
         pending_path = str(tmp_path / "pending.json")
         po = PendingOrders(pending_path)
@@ -97,11 +100,11 @@ class TestFullMakerCycle:
         po.add(_make_order(order_id="ox3", market_id="m3", amount_usd=4.0))
         po.save()
 
-        mock_clob = MagicMock()
+        mock_clob = AsyncMock()
         # Only ox2 is still open on CLOB
         mock_clob.get_open_orders.return_value = [{"id": "ox2"}]
 
-        cleaned = reconcile_on_startup(mock_clob, po, pending_path)
+        cleaned = await reconcile_on_startup(mock_clob, po, pending_path)
         assert cleaned == 2
 
         po.load()
@@ -109,7 +112,8 @@ class TestFullMakerCycle:
         assert po.orders[0]["order_id"] == "ox2"
         assert po.total_exposure() == pytest.approx(3.0)
 
-    def test_multiple_orders_mixed_status(self, tmp_path):
+    @pytest.mark.asyncio(loop_scope="function")
+    async def test_multiple_orders_mixed_status(self, tmp_path):
         """Multiple orders: one filled, one expired, one live."""
         pending_path = str(tmp_path / "pending.json")
         state_path = str(tmp_path / "state.json")
@@ -125,9 +129,9 @@ class TestFullMakerCycle:
         po.add(_make_order(order_id="live1", market_id="m3"))
         po.save()
 
-        mock_clob = MagicMock()
+        mock_clob = AsyncMock()
 
-        def get_order_side_effect(order_id):
+        async def get_order_side_effect(order_id):
             if order_id == "filled1":
                 return {"status": "MATCHED", "size_matched": 20.0, "original_size": 20.0}
             elif order_id == "live1":
@@ -136,7 +140,7 @@ class TestFullMakerCycle:
 
         mock_clob.get_order.side_effect = get_order_side_effect
 
-        fills, cancels, errors = poll_once(mock_clob, po, pending_path, None, state_path)
+        fills, cancels, errors = await poll_once(mock_clob, po, pending_path, None, state_path)
         assert fills == 1
         assert cancels == 1  # expired
 

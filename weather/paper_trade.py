@@ -10,6 +10,7 @@ but no orders are ever submitted.
 """
 
 import argparse
+import asyncio
 import logging
 import sys
 from pathlib import Path
@@ -125,6 +126,31 @@ def _print_pnl_summary(state: TradingState) -> None:
     logger.info("=" * 50)
 
 
+async def _async_main(
+    config: Config,
+    paper_bridge: PaperBridge,
+    state: TradingState,
+    explain: bool,
+    use_safeguards: bool,
+) -> None:
+    """Async entry point — runs strategy and cleans up HTTP session."""
+    try:
+        # Run strategy with PaperBridge — dry_run=False so trades go through
+        # the bridge (which simulates them), not skipped as dry_run
+        await run_weather_strategy(
+            client=paper_bridge,
+            config=config,
+            state=state,
+            dry_run=explain,  # paper_trade normally runs with dry_run=False (paper bridge handles it)
+            explain=explain,
+            use_safeguards=use_safeguards,
+            state_path=_PAPER_STATE_FILE,
+        )
+    finally:
+        from .http_client import close_session
+        await close_session()
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         prog="weather.paper_trade",
@@ -200,17 +226,13 @@ def main() -> None:
             kalman.save()
         _print_pnl_summary(state)
 
-        # Run strategy with PaperBridge — dry_run=False so trades go through
-        # the bridge (which simulates them), not skipped as dry_run
-        run_weather_strategy(
-            client=paper_bridge,
+        asyncio.run(_async_main(
             config=config,
+            paper_bridge=paper_bridge,
             state=state,
-            dry_run=args.explain,  # paper_trade normally runs with dry_run=False (paper bridge handles it)
             explain=args.explain,
             use_safeguards=not args.no_safeguards,
-            state_path=_PAPER_STATE_FILE,
-        )
+        ))
 
         # Save price snapshots
         paper_bridge.save_snapshots(_SNAPSHOTS_FILE)

@@ -4,7 +4,7 @@ import json
 import os
 import tempfile
 import unittest
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 from weather.paper_bridge import PaperBridge
 from weather.bridge import CLOBWeatherBridge
@@ -45,35 +45,35 @@ def _make_gamma_market(**overrides):
     return gm
 
 
-class TestFetchDelegatesToRealBridge(unittest.TestCase):
+class TestFetchDelegatesToRealBridge(unittest.IsolatedAsyncioTestCase):
 
-    def test_fetch_delegates_to_real_bridge(self):
+    async def test_fetch_delegates_to_real_bridge(self):
         gamma = MagicMock()
         gm = _make_gamma_market()
-        gamma.fetch_events_with_markets.return_value = ([], [gm])
+        gamma.fetch_events_with_markets = AsyncMock(return_value=([], [gm]))
 
         clob = MagicMock()
         real_bridge = CLOBWeatherBridge(clob_client=clob, gamma_client=gamma)
         paper = PaperBridge(real_bridge)
 
-        markets = paper.fetch_weather_markets()
+        markets = await paper.fetch_weather_markets()
         self.assertEqual(len(markets), 1)
         self.assertEqual(markets[0]["id"], "cond-1")
         gamma.fetch_events_with_markets.assert_called_once()
 
 
-class TestFetchRecordsSnapshots(unittest.TestCase):
+class TestFetchRecordsSnapshots(unittest.IsolatedAsyncioTestCase):
 
-    def test_fetch_records_snapshots(self):
+    async def test_fetch_records_snapshots(self):
         gamma = MagicMock()
         gm = _make_gamma_market()
-        gamma.fetch_events_with_markets.return_value = ([], [gm])
+        gamma.fetch_events_with_markets = AsyncMock(return_value=([], [gm]))
 
         clob = MagicMock()
         real_bridge = CLOBWeatherBridge(clob_client=clob, gamma_client=gamma)
         paper = PaperBridge(real_bridge)
 
-        paper.fetch_weather_markets()
+        await paper.fetch_weather_markets()
         self.assertEqual(len(paper._snapshots), 1)
         snap = paper._snapshots[0]
         self.assertIn("timestamp", snap)
@@ -82,9 +82,9 @@ class TestFetchRecordsSnapshots(unittest.TestCase):
         self.assertEqual(snap["bucket_name"], "50-54°F")
 
 
-class TestExecuteTradeNoClobCall(unittest.TestCase):
+class TestExecuteTradeNoClobCall(unittest.IsolatedAsyncioTestCase):
 
-    def test_execute_trade_no_clob_call(self):
+    async def test_execute_trade_no_clob_call(self):
         gamma = MagicMock()
         clob = MagicMock()
         real_bridge = CLOBWeatherBridge(clob_client=clob, gamma_client=gamma)
@@ -94,7 +94,7 @@ class TestExecuteTradeNoClobCall(unittest.TestCase):
         gm = _make_gamma_market(best_ask=0.40)
         real_bridge._market_cache["cond-1"] = gm
 
-        result = paper.execute_trade("cond-1", "yes", 2.00)
+        result = await paper.execute_trade("cond-1", "yes", 2.00)
         self.assertTrue(result["success"])
         self.assertAlmostEqual(result["shares_bought"], 2.00 / 0.40)
         self.assertIn("paper-", result["trade_id"])
@@ -103,9 +103,9 @@ class TestExecuteTradeNoClobCall(unittest.TestCase):
         clob.post_order.assert_not_called()
 
 
-class TestExecuteTradeUpdatesExposure(unittest.TestCase):
+class TestExecuteTradeUpdatesExposure(unittest.IsolatedAsyncioTestCase):
 
-    def test_execute_trade_updates_exposure(self):
+    async def test_execute_trade_updates_exposure(self):
         gamma = MagicMock()
         clob = MagicMock()
         real_bridge = CLOBWeatherBridge(clob_client=clob, gamma_client=gamma)
@@ -115,7 +115,7 @@ class TestExecuteTradeUpdatesExposure(unittest.TestCase):
         real_bridge._market_cache["cond-1"] = gm
 
         self.assertAlmostEqual(paper._total_exposure, 0.0)
-        paper.execute_trade("cond-1", "yes", 5.00)
+        await paper.execute_trade("cond-1", "yes", 5.00)
         self.assertAlmostEqual(paper._total_exposure, 5.00)
         self.assertEqual(paper._position_count, 1)
 
@@ -124,19 +124,19 @@ class TestExecuteTradeUpdatesExposure(unittest.TestCase):
         self.assertIsNotNone(pos)
         self.assertAlmostEqual(pos["shares_yes"], 10.0)
 
-    def test_unknown_market_returns_error(self):
+    async def test_unknown_market_returns_error(self):
         gamma = MagicMock()
         clob = MagicMock()
         real_bridge = CLOBWeatherBridge(clob_client=clob, gamma_client=gamma)
         paper = PaperBridge(real_bridge)
 
-        result = paper.execute_trade("unknown", "yes", 1.0)
+        result = await paper.execute_trade("unknown", "yes", 1.0)
         self.assertFalse(result["success"])
 
 
-class TestExecuteSellSimulated(unittest.TestCase):
+class TestExecuteSellSimulated(unittest.IsolatedAsyncioTestCase):
 
-    def test_execute_sell_simulated(self):
+    async def test_execute_sell_simulated(self):
         gamma = MagicMock()
         clob = MagicMock()
         real_bridge = CLOBWeatherBridge(clob_client=clob, gamma_client=gamma)
@@ -146,9 +146,9 @@ class TestExecuteSellSimulated(unittest.TestCase):
         real_bridge._market_cache["cond-1"] = gm
 
         # Buy first
-        paper.execute_trade("cond-1", "yes", 5.00)
+        await paper.execute_trade("cond-1", "yes", 5.00)
         # Sell
-        result = paper.execute_sell("cond-1", 5.0)
+        result = await paper.execute_sell("cond-1", 5.0)
         self.assertTrue(result["success"])
         self.assertIn("paper-sell-", result["trade_id"])
 
@@ -189,18 +189,18 @@ class TestMarketCacheProxied(unittest.TestCase):
         self.assertIs(paper.gamma, gamma)
 
 
-class TestSaveSnapshotsFormat(unittest.TestCase):
+class TestSaveSnapshotsFormat(unittest.IsolatedAsyncioTestCase):
 
-    def test_save_snapshots_format(self):
+    async def test_save_snapshots_format(self):
         gamma = MagicMock()
         gm = _make_gamma_market()
-        gamma.fetch_events_with_markets.return_value = ([], [gm])
+        gamma.fetch_events_with_markets = AsyncMock(return_value=([], [gm]))
 
         clob = MagicMock()
         real_bridge = CLOBWeatherBridge(clob_client=clob, gamma_client=gamma)
         paper = PaperBridge(real_bridge)
 
-        paper.fetch_weather_markets()
+        await paper.fetch_weather_markets()
 
         with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as f:
             tmp_path = f.name
@@ -222,10 +222,10 @@ class TestSaveSnapshotsFormat(unittest.TestCase):
         finally:
             os.unlink(tmp_path)
 
-    def test_save_appends_to_existing(self):
+    async def test_save_appends_to_existing(self):
         gamma = MagicMock()
         gm = _make_gamma_market()
-        gamma.fetch_events_with_markets.return_value = ([], [gm])
+        gamma.fetch_events_with_markets = AsyncMock(return_value=([], [gm]))
 
         clob = MagicMock()
         real_bridge = CLOBWeatherBridge(clob_client=clob, gamma_client=gamma)
@@ -236,7 +236,7 @@ class TestSaveSnapshotsFormat(unittest.TestCase):
             tmp_path = f.name
 
         try:
-            paper.fetch_weather_markets()
+            await paper.fetch_weather_markets()
             paper.save_snapshots(tmp_path)
 
             with open(tmp_path) as f:
@@ -247,7 +247,7 @@ class TestSaveSnapshotsFormat(unittest.TestCase):
         finally:
             os.unlink(tmp_path)
 
-    def test_no_snapshots_no_write(self):
+    async def test_no_snapshots_no_write(self):
         real_bridge = CLOBWeatherBridge(clob_client=MagicMock(), gamma_client=MagicMock())
         paper = PaperBridge(real_bridge)
 
@@ -263,25 +263,26 @@ class TestSaveSnapshotsFormat(unittest.TestCase):
                 os.unlink(tmp_path)
 
 
-class TestVerifyFillAndCancel(unittest.TestCase):
+class TestVerifyFillAndCancel(unittest.IsolatedAsyncioTestCase):
 
-    def test_verify_fill_returns_success(self):
+    async def test_verify_fill_returns_success(self):
         real_bridge = CLOBWeatherBridge(clob_client=MagicMock(), gamma_client=MagicMock())
         paper = PaperBridge(real_bridge)
 
-        result = paper.verify_fill("any-order-id")
+        result = await paper.verify_fill("any-order-id")
         self.assertTrue(result["filled"])
         self.assertEqual(result["status"], "PAPER_FILLED")
 
-    def test_cancel_returns_true(self):
+    async def test_cancel_returns_true(self):
         real_bridge = CLOBWeatherBridge(clob_client=MagicMock(), gamma_client=MagicMock())
         paper = PaperBridge(real_bridge)
-        self.assertTrue(paper.cancel_order("any-order-id"))
+        result = await paper.cancel_order("any-order-id")
+        self.assertTrue(result)
 
 
-class TestGetPortfolio(unittest.TestCase):
+class TestGetPortfolio(unittest.IsolatedAsyncioTestCase):
 
-    def test_portfolio_reflects_exposure(self):
+    async def test_portfolio_reflects_exposure(self):
         real_bridge = CLOBWeatherBridge(
             clob_client=MagicMock(), gamma_client=MagicMock(), max_exposure=100.0,
         )
@@ -290,11 +291,11 @@ class TestGetPortfolio(unittest.TestCase):
         gm = _make_gamma_market(best_ask=0.50)
         real_bridge._market_cache["cond-1"] = gm
 
-        portfolio = paper.get_portfolio()
+        portfolio = await paper.get_portfolio()
         self.assertAlmostEqual(portfolio["balance_usdc"], 100.0)
 
-        paper.execute_trade("cond-1", "yes", 10.0)
-        portfolio = paper.get_portfolio()
+        await paper.execute_trade("cond-1", "yes", 10.0)
+        portfolio = await paper.get_portfolio()
         self.assertAlmostEqual(portfolio["balance_usdc"], 90.0)
 
 

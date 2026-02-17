@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import pytest
 
 
@@ -102,7 +103,8 @@ class TestScoreBucketsNoSide:
 class TestPaperBridgeNoSidePricing:
     """Verify PaperBridge uses correct price for NO trades."""
 
-    def test_no_trade_uses_complement_of_bid(self):
+    @pytest.mark.asyncio(loop_scope="function")
+    async def test_no_trade_uses_complement_of_bid(self):
         """NO price should be 1 - YES best_bid, not YES best_ask."""
         from unittest.mock import MagicMock
         from weather.paper_bridge import PaperBridge
@@ -115,7 +117,7 @@ class TestPaperBridgeNoSidePricing:
         real_bridge._market_cache = {"mkt1": gm}
 
         paper = PaperBridge(real_bridge)
-        result = paper.execute_trade("mkt1", "no", 1.00)
+        result = await paper.execute_trade("mkt1", "no", 1.00)
 
         assert result["success"] is True
         # NO price = 1 - 0.65 = 0.35
@@ -123,7 +125,8 @@ class TestPaperBridgeNoSidePricing:
         expected_shares = 1.00 / expected_no_price
         assert abs(result["shares_bought"] - expected_shares) < 0.01
 
-    def test_yes_trade_uses_best_ask(self):
+    @pytest.mark.asyncio(loop_scope="function")
+    async def test_yes_trade_uses_best_ask(self):
         """YES trades should still use best_ask."""
         from unittest.mock import MagicMock
         from weather.paper_bridge import PaperBridge
@@ -136,7 +139,7 @@ class TestPaperBridgeNoSidePricing:
         real_bridge._market_cache = {"mkt1": gm}
 
         paper = PaperBridge(real_bridge)
-        result = paper.execute_trade("mkt1", "yes", 1.00)
+        result = await paper.execute_trade("mkt1", "yes", 1.00)
 
         assert result["success"] is True
         expected_shares = 1.00 / 0.10

@@ -115,7 +115,12 @@ def _run_weather_pipeline(
     Creates a CLOBWeatherBridge from the existing CLOB client + a GammaClient,
     builds a weather.config.Config from bot.config.Config fields, and delegates
     to weather.strategy.run_weather_strategy().
+
+    Note: run_weather_strategy is async, so we use asyncio.run() here since
+    bot.strategy.run_strategy is synchronous.
     """
+    import asyncio
+
     from .gamma import GammaClient
     from weather.bridge import CLOBWeatherBridge
     from weather.config import Config as WeatherConfig
@@ -164,14 +169,14 @@ def _run_weather_pipeline(
         with state_lock(weather_state_path):
             weather_state = WeatherState.load(weather_state_path)
 
-            run_weather_strategy(
+            asyncio.run(run_weather_strategy(
                 client=bridge,
                 config=weather_config,
                 state=weather_state,
                 dry_run=dry_run,
                 use_safeguards=True,
                 state_path=weather_state_path,
-            )
+            ))
 
 
 # ── Main strategy ──────────────────────────────────────────────────────

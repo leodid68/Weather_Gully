@@ -1,6 +1,6 @@
 """Tests for fair-price limit orders and adaptive slippage wiring."""
 import unittest
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 from weather.bridge import CLOBWeatherBridge
 
@@ -43,7 +43,7 @@ class TestMarketContextEdge(unittest.TestCase):
         self.assertEqual(ctx["edge"]["recommendation"], "HOLD")
 
 
-class TestLimitPriceCap(unittest.TestCase):
+class TestLimitPriceCap(unittest.IsolatedAsyncioTestCase):
     """Test that execute_trade respects limit_price."""
 
     def _make_bridge(self, ask_price="0.50"):
@@ -61,37 +61,37 @@ class TestLimitPriceCap(unittest.TestCase):
         gm.clob_token_ids = ["token-yes", "token-no"]
         bridge._market_cache["m1"] = gm
 
-        bridge.clob.get_orderbook.return_value = {
+        bridge.clob.get_orderbook = AsyncMock(return_value={
             "asks": [{"price": ask_price, "size": "100"}],
-        }
-        bridge.clob.post_order.return_value = {"orderID": "order-1"}
+        })
+        bridge.clob.post_order = AsyncMock(return_value={"orderID": "order-1"})
         return bridge
 
-    def test_limit_price_caps_order(self):
+    async def test_limit_price_caps_order(self):
         bridge = self._make_bridge(ask_price="0.50")
-        result = bridge.execute_trade("m1", "yes", 1.0, fill_timeout=0, limit_price=0.40)
+        result = await bridge.execute_trade("m1", "yes", 1.0, fill_timeout=0, limit_price=0.40)
         self.assertTrue(result.get("success"))
         # Verify post_order was called with capped price
         call_args = bridge.clob.post_order.call_args
         actual_price = call_args[1]["price"] if "price" in call_args[1] else call_args.kwargs["price"]
         self.assertLessEqual(actual_price, 0.40)
 
-    def test_no_limit_uses_ask(self):
+    async def test_no_limit_uses_ask(self):
         bridge = self._make_bridge(ask_price="0.30")
-        result = bridge.execute_trade("m1", "yes", 1.0, fill_timeout=0)
+        result = await bridge.execute_trade("m1", "yes", 1.0, fill_timeout=0)
         self.assertTrue(result.get("success"))
 
-    def test_limit_below_ask_uses_limit(self):
+    async def test_limit_below_ask_uses_limit(self):
         bridge = self._make_bridge(ask_price="0.50")
-        result = bridge.execute_trade("m1", "yes", 1.0, fill_timeout=0, limit_price=0.35)
+        result = await bridge.execute_trade("m1", "yes", 1.0, fill_timeout=0, limit_price=0.35)
         call_args = bridge.clob.post_order.call_args
         actual_price = call_args[1]["price"] if "price" in call_args[1] else call_args.kwargs["price"]
         self.assertLessEqual(actual_price, 0.35)
 
-    def test_limit_above_ask_uses_ask(self):
+    async def test_limit_above_ask_uses_ask(self):
         """When limit > ask, we should use ask (better price)."""
         bridge = self._make_bridge(ask_price="0.30")
-        result = bridge.execute_trade("m1", "yes", 1.0, fill_timeout=0, limit_price=0.50)
+        result = await bridge.execute_trade("m1", "yes", 1.0, fill_timeout=0, limit_price=0.50)
         call_args = bridge.clob.post_order.call_args
         actual_price = call_args[1]["price"] if "price" in call_args[1] else call_args.kwargs["price"]
         self.assertAlmostEqual(actual_price, 0.30, places=2)

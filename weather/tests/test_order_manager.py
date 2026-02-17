@@ -1,7 +1,7 @@
 """Tests for order manager — fill detection, TTL, reconciliation."""
 
 from datetime import datetime, timezone, timedelta
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 import pytest
 from weather.pending_state import PendingOrders
 from weather.order_manager import poll_once, reconcile_on_startup
@@ -21,7 +21,8 @@ def _make_order(**overrides):
 
 
 class TestPollOnce:
-    def test_fill_detected(self, tmp_path):
+    @pytest.mark.asyncio(loop_scope="function")
+    async def test_fill_detected(self, tmp_path):
         """Filled order → remove from pending."""
         pending_path = str(tmp_path / "pending.json")
         state_path = str(tmp_path / "state.json")
@@ -30,18 +31,19 @@ class TestPollOnce:
         po.add(_make_order(order_id="ox1"))
         po.save()
 
-        mock_clob = MagicMock()
+        mock_clob = AsyncMock()
         mock_clob.get_order.return_value = {
             "status": "MATCHED", "size_matched": 20.0, "original_size": 20.0,
         }
 
-        fills, cancels, errors = poll_once(mock_clob, po, pending_path, None, state_path)
+        fills, cancels, errors = await poll_once(mock_clob, po, pending_path, None, state_path)
         assert fills == 1
         assert cancels == 0
         po.load()
         assert len(po) == 0
 
-    def test_ttl_expired(self, tmp_path):
+    @pytest.mark.asyncio(loop_scope="function")
+    async def test_ttl_expired(self, tmp_path):
         """Expired order → cancel + remove."""
         pending_path = str(tmp_path / "pending.json")
         state_path = str(tmp_path / "state.json")
@@ -51,12 +53,13 @@ class TestPollOnce:
         po.add(_make_order(order_id="ox1", submitted_at=old_time, ttl_seconds=900))
         po.save()
 
-        mock_clob = MagicMock()
-        fills, cancels, errors = poll_once(mock_clob, po, pending_path, None, state_path)
+        mock_clob = AsyncMock()
+        fills, cancels, errors = await poll_once(mock_clob, po, pending_path, None, state_path)
         assert cancels == 1
         mock_clob.cancel_order.assert_called_once_with("ox1")
 
-    def test_cancelled_externally(self, tmp_path):
+    @pytest.mark.asyncio(loop_scope="function")
+    async def test_cancelled_externally(self, tmp_path):
         """Externally cancelled → cleanup."""
         pending_path = str(tmp_path / "pending.json")
         state_path = str(tmp_path / "state.json")
@@ -65,15 +68,16 @@ class TestPollOnce:
         po.add(_make_order(order_id="ox1"))
         po.save()
 
-        mock_clob = MagicMock()
+        mock_clob = AsyncMock()
         mock_clob.get_order.return_value = {"status": "CANCELLED", "size_matched": 0}
 
-        fills, cancels, errors = poll_once(mock_clob, po, pending_path, None, state_path)
+        fills, cancels, errors = await poll_once(mock_clob, po, pending_path, None, state_path)
         assert cancels == 1
         po.load()
         assert len(po) == 0
 
-    def test_still_live_no_change(self, tmp_path):
+    @pytest.mark.asyncio(loop_scope="function")
+    async def test_still_live_no_change(self, tmp_path):
         """Live order, not expired → no action."""
         pending_path = str(tmp_path / "pending.json")
         state_path = str(tmp_path / "state.json")
@@ -82,17 +86,18 @@ class TestPollOnce:
         po.add(_make_order(order_id="ox1"))
         po.save()
 
-        mock_clob = MagicMock()
+        mock_clob = AsyncMock()
         mock_clob.get_order.return_value = {"status": "LIVE", "size_matched": 0, "original_size": 20}
 
-        fills, cancels, errors = poll_once(mock_clob, po, pending_path, None, state_path)
+        fills, cancels, errors = await poll_once(mock_clob, po, pending_path, None, state_path)
         assert fills == 0 and cancels == 0
         po.load()
         assert len(po) == 1
 
 
 class TestReconciliation:
-    def test_removes_stale(self, tmp_path):
+    @pytest.mark.asyncio(loop_scope="function")
+    async def test_removes_stale(self, tmp_path):
         """Stale entries not in CLOB open orders → removed."""
         pending_path = str(tmp_path / "pending.json")
         po = PendingOrders(pending_path)
@@ -101,16 +106,17 @@ class TestReconciliation:
         po.add(_make_order(order_id="ox2", market_id="m2"))
         po.save()
 
-        mock_clob = MagicMock()
+        mock_clob = AsyncMock()
         mock_clob.get_open_orders.return_value = [{"id": "ox2"}]
 
-        cleaned = reconcile_on_startup(mock_clob, po, pending_path)
+        cleaned = await reconcile_on_startup(mock_clob, po, pending_path)
         assert cleaned == 1
         po.load()
         assert len(po) == 1
         assert po.orders[0]["order_id"] == "ox2"
 
-    def test_no_stale(self, tmp_path):
+    @pytest.mark.asyncio(loop_scope="function")
+    async def test_no_stale(self, tmp_path):
         """All entries match CLOB → nothing removed."""
         pending_path = str(tmp_path / "pending.json")
         po = PendingOrders(pending_path)
@@ -118,13 +124,14 @@ class TestReconciliation:
         po.add(_make_order(order_id="ox1"))
         po.save()
 
-        mock_clob = MagicMock()
+        mock_clob = AsyncMock()
         mock_clob.get_open_orders.return_value = [{"id": "ox1"}]
 
-        cleaned = reconcile_on_startup(mock_clob, po, pending_path)
+        cleaned = await reconcile_on_startup(mock_clob, po, pending_path)
         assert cleaned == 0
 
-    def test_reconcile_with_api_error(self, tmp_path):
+    @pytest.mark.asyncio(loop_scope="function")
+    async def test_reconcile_with_api_error(self, tmp_path):
         """API error during reconciliation → no changes."""
         pending_path = str(tmp_path / "pending.json")
         po = PendingOrders(pending_path)
@@ -132,10 +139,10 @@ class TestReconciliation:
         po.add(_make_order(order_id="ox1"))
         po.save()
 
-        mock_clob = MagicMock()
+        mock_clob = AsyncMock()
         mock_clob.get_open_orders.side_effect = Exception("API down")
 
-        cleaned = reconcile_on_startup(mock_clob, po, pending_path)
+        cleaned = await reconcile_on_startup(mock_clob, po, pending_path)
         assert cleaned == 0
         po.load()
         assert len(po) == 1

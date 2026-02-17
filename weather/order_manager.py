@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
-import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 POLL_INTERVAL = 10  # seconds
 
 
-def reconcile_on_startup(
+async def reconcile_on_startup(
     clob,
     pending: PendingOrders,
     pending_path: str,
@@ -27,7 +27,7 @@ def reconcile_on_startup(
     Returns number of stale entries cleaned.
     """
     try:
-        open_orders = clob.get_open_orders()
+        open_orders = await clob.get_open_orders()
     except Exception as exc:
         logger.warning("Failed to fetch open orders for reconciliation: %s", exc)
         return 0
@@ -48,7 +48,7 @@ def reconcile_on_startup(
     return cleaned
 
 
-def poll_once(
+async def poll_once(
     clob,
     pending: PendingOrders,
     pending_path: str,
@@ -75,7 +75,7 @@ def poll_once(
             if elapsed > order.get("ttl_seconds", 900):
                 logger.info("TTL expired for order %s (%.0fs)", order_id, elapsed)
                 try:
-                    clob.cancel_order(order_id)
+                    await clob.cancel_order(order_id)
                 except Exception as exc:
                     logger.debug("Cancel failed (may already be gone): %s", exc)
                 to_remove.append(order_id)
@@ -84,7 +84,7 @@ def poll_once(
 
             # 2. Check fill status
             try:
-                status_resp = clob.get_order(order_id)
+                status_resp = await clob.get_order(order_id)
             except Exception as exc:
                 logger.debug("Get order failed for %s: %s", order_id, exc)
                 errors += 1
@@ -131,7 +131,7 @@ def poll_once(
     return fills, cancels, errors
 
 
-def run_manager(
+async def run_manager(
     clob,
     config_dir: str = "",
     poll_interval: int = POLL_INTERVAL,
@@ -148,19 +148,19 @@ def run_manager(
     logger.info("Order manager starting — poll every %ds", poll_interval)
 
     # Startup reconciliation
-    cleaned = reconcile_on_startup(clob, pending, pending_path)
+    cleaned = await reconcile_on_startup(clob, pending, pending_path)
     if cleaned:
         logger.info("Reconciliation: cleaned %d stale entries", cleaned)
 
     while True:
         try:
-            fills, cancels, errors = poll_once(clob, pending, pending_path, None, state_path)
+            fills, cancels, errors = await poll_once(clob, pending, pending_path, None, state_path)
             if fills or cancels:
                 logger.info("Poll: %d fills, %d cancels, %d errors", fills, cancels, errors)
         except Exception as exc:
             logger.error("Poll error: %s", exc)
 
-        time.sleep(poll_interval)
+        await asyncio.sleep(poll_interval)
 
 
 if __name__ == "__main__":
@@ -176,4 +176,4 @@ if __name__ == "__main__":
 
     from .bridge import CLOBWeatherBridge
     bridge = CLOBWeatherBridge(config=config, api_creds=creds)
-    run_manager(bridge.clob, config_dir=config_dir)
+    asyncio.run(run_manager(bridge.clob, config_dir=config_dir))

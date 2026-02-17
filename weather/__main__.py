@@ -1,6 +1,7 @@
 """CLI entry point — ``python -m weather`` (CLOB direct)."""
 
 import argparse
+import asyncio
 import logging
 import os
 import sys
@@ -59,6 +60,35 @@ def _build_bridge(config: Config, live: bool):
     )
 
 
+async def _async_main(
+    config: Config,
+    state: TradingState,
+    bridge,
+    dry_run: bool,
+    explain: bool,
+    positions_only: bool,
+    use_safeguards: bool,
+    state_path: str,
+    show_config: bool = False,
+) -> None:
+    """Async entry point — runs strategy and cleans up HTTP session."""
+    try:
+        await run_weather_strategy(
+            client=bridge,
+            config=config,
+            state=state,
+            dry_run=dry_run,
+            explain=explain,
+            positions_only=positions_only,
+            show_config=show_config,
+            use_safeguards=use_safeguards,
+            state_path=state_path,
+        )
+    finally:
+        from .http_client import close_session
+        await close_session()
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         prog="weather",
@@ -113,13 +143,17 @@ def main() -> None:
 
     # Show config only
     if args.config:
-        run_weather_strategy(
-            client=None,  # type: ignore[arg-type]
+        asyncio.run(_async_main(
             config=config,
             state=TradingState(),
-            show_config=True,
+            bridge=None,  # type: ignore[arg-type]
+            dry_run=True,
+            explain=False,
+            positions_only=False,
+            use_safeguards=True,
             state_path=state_path,
-        )
+            show_config=True,
+        ))
         return
 
     # Disable aviation observations if requested
@@ -136,17 +170,16 @@ def main() -> None:
         # Load persistent state
         state = TradingState.load(state_path)
 
-        run_weather_strategy(
-            client=bridge,
+        asyncio.run(_async_main(
             config=config,
             state=state,
+            bridge=bridge,
             dry_run=dry_run or args.explain,
             explain=args.explain,
             positions_only=args.positions,
-            show_config=False,
             use_safeguards=not args.no_safeguards,
             state_path=state_path,
-        )
+        ))
 
 
 if __name__ == "__main__":
