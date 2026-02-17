@@ -96,6 +96,17 @@ class CLOBWeatherBridge:
         self._total_exposure: float = 0.0
         self._position_count: int = 0
         self._known_positions: set[str] = set()  # market_ids with open positions
+        self._neg_risk_cache: dict[str, bool] = {}  # token_id → neg_risk
+
+    async def _get_neg_risk(self, token_id: str) -> bool:
+        """Get neg_risk for a token, with caching to avoid repeated API calls."""
+        if token_id not in self._neg_risk_cache:
+            try:
+                self._neg_risk_cache[token_id] = await self.clob.is_neg_risk(token_id)
+            except Exception:
+                self._neg_risk_cache[token_id] = True  # Safe default for weather markets
+                logger.debug("neg_risk check failed for %s, defaulting to True", token_id[:16])
+        return self._neg_risk_cache[token_id]
 
     def sync_exposure_from_state(self, trades: dict) -> None:
         """Initialize exposure tracking from persisted weather state trades.
@@ -416,12 +427,13 @@ class CLOBWeatherBridge:
         shares = amount / price
 
         try:
+            neg_risk = await self._get_neg_risk(token_id)
             result = await self.clob.post_order(
                 token_id=token_id,
                 side="BUY",
                 price=price,
                 size=shares,
-                neg_risk=True,  # Weather markets are always neg-risk
+                neg_risk=neg_risk,
             )
             order_id = result.get("orderID", "")
             logger.info(
@@ -524,12 +536,13 @@ class CLOBWeatherBridge:
             return {"error": "Invalid bid price", "success": False}
 
         try:
+            neg_risk = await self._get_neg_risk(token_id)
             result = await self.clob.post_order(
                 token_id=token_id,
                 side="SELL",
                 price=price,
                 size=shares,
-                neg_risk=True,
+                neg_risk=neg_risk,
             )
             order_id = result.get("orderID", "")
             logger.info(
@@ -566,6 +579,8 @@ class CLOBWeatherBridge:
             return {
                 "success": True,
                 "trade_id": order_id,
+                "fill_price": price,
+                "shares_sold": actual_shares,
             }
         except Exception as exc:
             logger.error("Bridge sell failed: %s", exc)
@@ -597,12 +612,13 @@ class CLOBWeatherBridge:
         clob_side = "BUY" if side.lower() in ("yes", "buy") else "SELL"
 
         try:
+            neg_risk = await self._get_neg_risk(token_id)
             result = await self.clob.post_order(
                 token_id=token_id,
                 side=clob_side,
                 price=price,
                 size=size,
-                neg_risk=True,
+                neg_risk=neg_risk,
                 order_type="GTC",
                 post_only=True,
             )

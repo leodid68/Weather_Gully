@@ -53,6 +53,7 @@ class TestLimitPriceCap(unittest.IsolatedAsyncioTestCase):
         bridge._total_exposure = 0.0
         bridge._position_count = 0
         bridge._known_positions = set()
+        bridge._neg_risk_cache = {}
 
         gm = MagicMock()
         gm.best_ask = float(ask_price)
@@ -65,6 +66,7 @@ class TestLimitPriceCap(unittest.IsolatedAsyncioTestCase):
             "asks": [{"price": ask_price, "size": "100"}],
         })
         bridge.clob.post_order = AsyncMock(return_value={"orderID": "order-1"})
+        bridge.clob.is_neg_risk = AsyncMock(return_value=True)
         return bridge
 
     async def test_limit_price_caps_order(self):

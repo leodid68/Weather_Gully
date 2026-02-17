@@ -10,10 +10,12 @@ def _make_bridge(market_cache=None):
 
     bridge = CLOBWeatherBridge.__new__(CLOBWeatherBridge)
     bridge.clob = AsyncMock()
+    bridge.clob.is_neg_risk.return_value = True
     bridge._market_cache = market_cache or {}
     bridge._total_exposure = 0.0
     bridge._position_count = 0
     bridge._known_positions = set()
+    bridge._neg_risk_cache = {}
     return bridge
 
 

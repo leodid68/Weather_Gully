@@ -413,7 +413,10 @@ async def check_exit_opportunities(
 
                 if result.get("success"):
                     exits_executed += 1
-                    logger.info("Sold %.1f %s shares @ $%.2f", shares, trade.side.upper(), current_price)
+                    pnl = (current_price - (trade.cost_basis or 0)) * shares
+                    logger.info("Sold %.1f %s shares @ $%.2f (P&L $%.2f)", shares, trade.side.upper(), current_price, pnl)
+                    today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+                    state.record_daily_pnl(today_str, pnl)
                     state.remove_trade(market_id)
                     if trade.event_id:
                         state.remove_event_position_market(trade.event_id, market_id)
@@ -592,6 +595,10 @@ async def _check_stop_loss_reversals(
                 result = await client.execute_sell(market_id, fresh_shares, side=fresh_trade.side)
                 if result.get("success"):
                     exits += 1
+                    fill_price = result.get("fill_price", 0)
+                    pnl = (fill_price - (fresh_trade.cost_basis or 0)) * fresh_shares
+                    today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+                    state.record_daily_pnl(today_str, pnl)
                     state.remove_trade(market_id)
                     # Clean up correlation guard
                     if fresh_trade.event_id:
@@ -601,7 +608,7 @@ async def _check_stop_loss_reversals(
                             if market_id in (mids if isinstance(mids, list) else [mids]):
                                 state.remove_event_position_market(eid, market_id)
                                 break
-                    logger.info("Stop-loss executed for %s", fresh_trade.outcome_name)
+                    logger.info("Stop-loss executed for %s (P&L $%.2f)", fresh_trade.outcome_name, pnl)
                 else:
                     logger.error("Stop-loss sell failed: %s", result.get("error", "Unknown"))
 
@@ -715,6 +722,10 @@ async def _emergency_exit_losers(
             result = await client.execute_sell(market_id, trade.shares, side=trade.side)
             if result.get("success"):
                 exits += 1
+                fill_price = result.get("fill_price", 0)
+                pnl = (fill_price - (trade.cost_basis or 0)) * trade.shares
+                today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+                state.record_daily_pnl(today_str, pnl)
                 state.remove_trade(market_id)
                 if trade.event_id:
                     state.remove_event_position_market(trade.event_id, market_id)
@@ -723,7 +734,7 @@ async def _emergency_exit_losers(
                         if market_id in (mids if isinstance(mids, list) else [mids]):
                             state.remove_event_position_market(eid, market_id)
                             break
-                logger.info("[EMERGENCY EXIT] Sold %.1f %s shares of %s", trade.shares, trade.side.upper(), outcome_name)
+                logger.info("[EMERGENCY EXIT] Sold %.1f %s shares of %s (P&L $%.2f)", trade.shares, trade.side.upper(), outcome_name, pnl)
             else:
                 logger.error("[EMERGENCY EXIT] Sell failed for %s: %s", outcome_name, result.get("error", "Unknown"))
 
@@ -1421,6 +1432,9 @@ async def run_weather_strategy(
                             "outcome_name": outcome_name,
                             "forecast_date": date_str,
                             "prob": prob,
+                            "event_id": event_id,
+                            "forecast_temp": forecast_temp,
+                            "metric": metric,
                         }
                         with pending_lock(_pending_path):
                             pending.load()
@@ -1453,9 +1467,10 @@ async def run_weather_strategy(
                         trade_id = result.get("trade_id")
                         logger.info("Bought %.1f shares @ $%.2f", shares, price)
 
-                        # Circuit breaker: record position opened
+                        # Circuit breaker: record position opened and P&L
                         today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
                         state.record_position_opened(today_str)
+                        state.record_daily_pnl(today_str, -position_size)
 
                         # Record in state for dynamic exits
                         state.record_trade(

@@ -106,6 +106,9 @@ async def poll_once(
                     "shares": size_matched or order["size"],
                     "location": order.get("location", ""),
                     "forecast_date": order.get("forecast_date", ""),
+                    "event_id": order.get("event_id", ""),
+                    "forecast_temp": order.get("forecast_temp"),
+                    "metric": order.get("metric", "high"),
                 })
                 to_remove.append(order_id)
                 fills += 1
@@ -122,10 +125,19 @@ async def poll_once(
 
     # Record fills in trading state (outside pending lock to avoid deadlock)
     if to_record:
+        today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         with state_lock(state_path):
             state_data = TradingState.load(state_path)
             for rec in to_record:
                 state_data.record_trade(**rec)
+                # Record P&L: maker fill = money spent
+                amount = rec.get("cost_basis", 0) * rec.get("shares", 0)
+                state_data.record_daily_pnl(today_str, -amount)
+                # Correlation guard: register event → market mapping
+                event_id = rec.get("event_id", "")
+                if event_id:
+                    state_data.record_event_position(event_id, rec["market_id"])
+                state_data.record_position_opened(today_str)
             state_data.save(state_path)
 
     return fills, cancels, errors

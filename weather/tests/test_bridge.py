@@ -54,6 +54,7 @@ class TestFetchWeatherMarkets:
         gamma.fetch_events_with_markets.return_value = ([], [gm])
 
         clob = AsyncMock()
+        clob.is_neg_risk.return_value = True
         bridge = CLOBWeatherBridge(clob_client=clob, gamma_client=gamma)
 
         markets = await bridge.fetch_weather_markets()
@@ -74,6 +75,7 @@ class TestFetchWeatherMarkets:
         gamma.fetch_events_with_markets.return_value = ([], [gm])
 
         clob = AsyncMock()
+        clob.is_neg_risk.return_value = True
         bridge = CLOBWeatherBridge(clob_client=clob, gamma_client=gamma)
 
         markets = await bridge.fetch_weather_markets()
@@ -86,6 +88,7 @@ class TestFetchWeatherMarkets:
         gamma.fetch_events_with_markets.return_value = ([], [gm])
 
         clob = AsyncMock()
+        clob.is_neg_risk.return_value = True
         bridge = CLOBWeatherBridge(clob_client=clob, gamma_client=gamma)
 
         markets = await bridge.fetch_weather_markets()
@@ -145,6 +148,7 @@ class TestExecuteTrade:
     async def test_buy_yes(self):
         gamma = MagicMock()
         clob = AsyncMock()
+        clob.is_neg_risk.return_value = True
         clob.post_order.return_value = {"orderID": "order-123"}
         # Mock orderbook so bridge re-fetches fresh price
         clob.get_orderbook.return_value = {
@@ -181,6 +185,7 @@ class TestExecuteTrade:
     async def test_clob_error_handled(self):
         gamma = MagicMock()
         clob = AsyncMock()
+        clob.is_neg_risk.return_value = True
         clob.post_order.side_effect = Exception("Network error")
         clob.get_orderbook.return_value = {
             "asks": [{"price": "0.50", "size": "100"}],
@@ -202,6 +207,7 @@ class TestExecuteSell:
     async def test_sell(self):
         gamma = MagicMock()
         clob = AsyncMock()
+        clob.is_neg_risk.return_value = True
         clob.post_order.return_value = {"orderID": "sell-456"}
         clob.get_orderbook.return_value = {
             "asks": [{"price": "0.42", "size": "100"}],
@@ -226,6 +232,7 @@ class TestExecuteSell:
         """Selling with side='no' should use clob_token_ids[1]."""
         gamma = MagicMock()
         clob = AsyncMock()
+        clob.is_neg_risk.return_value = True
         clob.post_order.return_value = {"orderID": "sell-no-789"}
         clob.get_orderbook.return_value = {
             "asks": [{"price": "0.60", "size": "100"}],
@@ -249,6 +256,7 @@ class TestExecuteSell:
         """Selling with side='yes' (default) should use clob_token_ids[0]."""
         gamma = MagicMock()
         clob = AsyncMock()
+        clob.is_neg_risk.return_value = True
         clob.post_order.return_value = {"orderID": "sell-yes-789"}
         clob.get_orderbook.return_value = {
             "bids": [{"price": "0.40", "size": "100"}],
@@ -279,6 +287,7 @@ class TestVerifyFill:
     @pytest.mark.asyncio
     async def test_filled_immediately(self):
         clob = AsyncMock()
+        clob.is_neg_risk.return_value = True
         clob.get_order.return_value = {
             "status": "MATCHED",
             "size_matched": 20.0,
@@ -296,6 +305,7 @@ class TestVerifyFill:
     @pytest.mark.asyncio
     async def test_partial_fill(self):
         clob = AsyncMock()
+        clob.is_neg_risk.return_value = True
         clob.get_order.return_value = {
             "status": "CANCELLED",
             "size_matched": 10.0,
@@ -313,6 +323,7 @@ class TestVerifyFill:
     @pytest.mark.asyncio
     async def test_timeout_unfilled(self):
         clob = AsyncMock()
+        clob.is_neg_risk.return_value = True
         clob.get_order.return_value = {
             "status": "LIVE",
             "size_matched": 0,
@@ -329,6 +340,7 @@ class TestVerifyFill:
     @pytest.mark.asyncio
     async def test_api_error_during_poll(self):
         clob = AsyncMock()
+        clob.is_neg_risk.return_value = True
         clob.get_order.side_effect = Exception("API error")
 
         bridge = CLOBWeatherBridge(clob_client=clob, gamma_client=MagicMock())
@@ -343,6 +355,7 @@ class TestCancelOrder:
     @pytest.mark.asyncio
     async def test_cancel_success(self):
         clob = AsyncMock()
+        clob.is_neg_risk.return_value = True
         bridge = CLOBWeatherBridge(clob_client=clob, gamma_client=MagicMock())
 
         result = await bridge.cancel_order("order-1")
@@ -352,6 +365,7 @@ class TestCancelOrder:
     @pytest.mark.asyncio
     async def test_cancel_failure(self):
         clob = AsyncMock()
+        clob.is_neg_risk.return_value = True
         clob.cancel_order.side_effect = Exception("Network error")
 
         bridge = CLOBWeatherBridge(clob_client=clob, gamma_client=MagicMock())
@@ -366,6 +380,7 @@ class TestExecuteTradeWithFillVerification:
         """fill_timeout=0 should behave like the old code."""
         gamma = MagicMock()
         clob = AsyncMock()
+        clob.is_neg_risk.return_value = True
         clob.post_order.return_value = {"orderID": "order-123"}
         clob.get_orderbook.return_value = {
             "asks": [{"price": "0.10", "size": "100"}],
@@ -385,6 +400,7 @@ class TestExecuteTradeWithFillVerification:
     async def test_trade_unfilled_gets_cancelled(self):
         gamma = MagicMock()
         clob = AsyncMock()
+        clob.is_neg_risk.return_value = True
         clob.post_order.return_value = {"orderID": "order-123"}
         clob.get_orderbook.return_value = {
             "asks": [{"price": "0.10", "size": "100"}],
@@ -417,6 +433,7 @@ class TestBestAskInStrategy:
         gamma.fetch_events_with_markets.return_value = ([], [gm])
 
         clob = AsyncMock()
+        clob.is_neg_risk.return_value = True
         bridge = CLOBWeatherBridge(clob_client=clob, gamma_client=gamma)
         markets = await bridge.fetch_weather_markets()
 
