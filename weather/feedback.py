@@ -107,6 +107,32 @@ class FeedbackEntry:
 class FeedbackState:
     """Collection of feedback entries indexed by ``"location|season"``."""
     entries: dict[str, FeedbackEntry] = field(default_factory=dict)
+    model_errors: dict[str, dict[str, float]] = field(default_factory=dict)  # location → {model: ema_error}
+
+    def record_model_error(self, location: str, model: str, error: float) -> None:
+        """Track per-model EMA error for dynamic weighting."""
+        if location not in self.model_errors:
+            self.model_errors[location] = {}
+        prev = self.model_errors[location].get(model, abs(error))
+        self.model_errors[location][model] = _ALPHA * abs(error) + (1 - _ALPHA) * prev
+
+    def get_model_weights(self, location: str, wu_bonus: float = 0.0) -> dict[str, float] | None:
+        """Return normalized weights based on 1/EMA_error^2. Returns None if insufficient data."""
+        errors = self.model_errors.get(location, {})
+        if len(errors) < 2:
+            return None
+        weights: dict[str, float] = {}
+        for model, ema_err in errors.items():
+            if ema_err > 0:
+                weights[model] = 1.0 / (ema_err ** 2)
+        if not weights:
+            return None
+        # Apply WU bonus
+        if "wu" in weights and wu_bonus > 0:
+            weights["wu"] *= (1.0 + wu_bonus)
+        # Normalize
+        total = sum(weights.values())
+        return {m: w / total for m, w in weights.items()}
 
     def record(self, location: str, month: int, forecast_temp: float, actual_temp: float) -> None:
         """Record a resolved trade result."""
@@ -167,13 +193,17 @@ class FeedbackState:
     def save(self, path: str | None = None) -> None:
         """Persist feedback state to JSON (atomic write)."""
         save_path = Path(path) if path else _FEEDBACK_STATE_PATH
-        data = {}
+        data: dict = {}
         for key, entry in self.entries.items():
             data[key] = asdict(entry)
+        # Wrap in envelope so we can store model_errors alongside entries
+        envelope = {"entries": data}
+        if self.model_errors:
+            envelope["model_errors"] = self.model_errors
         fd, tmp = tempfile.mkstemp(dir=str(save_path.parent), suffix=".tmp")
         try:
             with os.fdopen(fd, "w") as f:
-                json.dump(data, f, indent=2)
+                json.dump(envelope, f, indent=2)
             os.replace(tmp, str(save_path))
         except BaseException:
             try:
@@ -185,7 +215,11 @@ class FeedbackState:
 
     @classmethod
     def load(cls, path: str | None = None) -> "FeedbackState":
-        """Load feedback state from JSON. Returns empty state if file missing."""
+        """Load feedback state from JSON. Returns empty state if file missing.
+
+        Handles both legacy (flat dict of entries) and new envelope format
+        with ``entries`` + ``model_errors`` keys.
+        """
         load_path = Path(path) if path else _FEEDBACK_STATE_PATH
         state = cls()
         if not load_path.exists():
@@ -193,7 +227,13 @@ class FeedbackState:
         try:
             with open(load_path) as f:
                 data = json.load(f)
-            for key, entry_data in data.items():
+            # Detect format: envelope has "entries" key, legacy is flat
+            if "entries" in data and isinstance(data["entries"], dict):
+                entries_data = data["entries"]
+                state.model_errors = data.get("model_errors", {})
+            else:
+                entries_data = data  # Legacy flat format
+            for key, entry_data in entries_data.items():
                 state.entries[key] = FeedbackEntry(**entry_data)
             logger.info("Loaded feedback state: %d entries", len(state.entries))
         except (json.JSONDecodeError, IOError, TypeError) as exc:

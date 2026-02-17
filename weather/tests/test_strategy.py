@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from weather.config import Config
 from weather.bridge import CLOBWeatherBridge
@@ -135,7 +135,7 @@ class TestMinProbabilityFilter(unittest.TestCase):
         self.assertGreaterEqual(len(scored_zero), len(scored_default))
 
 
-class TestStrategyIntegration(unittest.TestCase):
+class TestStrategyIntegration(unittest.IsolatedAsyncioTestCase):
     """Full dry-run with mocked bridge."""
 
     def _make_mock_bridge(self) -> MagicMock:
@@ -145,13 +145,20 @@ class TestStrategyIntegration(unittest.TestCase):
             "total_exposure": 10.0,
             "positions_count": 2,
         }
-        bridge.fetch_weather_markets.return_value = _load_fixture("weather_markets.json")["markets"]
+        bridge.fetch_weather_markets = AsyncMock(
+            return_value=_load_fixture("weather_markets.json")["markets"]
+        )
         bridge.get_market_context.return_value = None  # No safeguards blocking
         bridge.get_position.return_value = None
+        bridge.execute_trade = AsyncMock(return_value={"success": False})
+        bridge.execute_sell = AsyncMock(return_value={"success": False})
+        bridge.execute_maker_order = AsyncMock(return_value={"posted": False})
+        bridge.clob = MagicMock()
+        bridge.clob.get_orderbook = AsyncMock(return_value={"bids": [], "asks": []})
         return bridge
 
-    @patch("weather.strategy.get_noaa_forecast")
-    def test_dry_run_no_errors(self, mock_noaa):
+    @patch("weather.strategy.get_noaa_forecast", new_callable=AsyncMock)
+    async def test_dry_run_no_errors(self, mock_noaa):
         """Full strategy in dry-run should complete without errors."""
         mock_noaa.return_value = {
             "2025-03-15": {"high": 52, "low": 38},
@@ -169,7 +176,7 @@ class TestStrategyIntegration(unittest.TestCase):
         state = TradingState()
 
         # Should not raise
-        run_weather_strategy(
+        await run_weather_strategy(
             client=bridge,
             config=config,
             state=state,
@@ -181,8 +188,8 @@ class TestStrategyIntegration(unittest.TestCase):
         bridge.fetch_weather_markets.assert_called_once()
 
     @patch("weather.strategy.FeedbackState")
-    @patch("weather.strategy.get_noaa_forecast")
-    def test_feedback_state_saved(self, mock_noaa, MockFS):
+    @patch("weather.strategy.get_noaa_forecast", new_callable=AsyncMock)
+    async def test_feedback_state_saved(self, mock_noaa, MockFS):
         """run_weather_strategy should persist feedback state."""
         mock_noaa.return_value = {
             "2025-03-15": {"high": 52, "low": 38},
@@ -199,7 +206,7 @@ class TestStrategyIntegration(unittest.TestCase):
         )
         state = TradingState()
 
-        run_weather_strategy(
+        await run_weather_strategy(
             client=bridge,
             config=config,
             state=state,
@@ -209,8 +216,8 @@ class TestStrategyIntegration(unittest.TestCase):
 
         mock_feedback.save.assert_called_once()
 
-    @patch("weather.strategy.get_noaa_forecast")
-    def test_no_trade_when_no_edge(self, mock_noaa):
+    @patch("weather.strategy.get_noaa_forecast", new_callable=AsyncMock)
+    async def test_no_trade_when_no_edge(self, mock_noaa):
         """When all prices are above fair value, no trades."""
         mock_noaa.return_value = {"2025-03-15": {"high": 52, "low": 38}}
 
@@ -220,7 +227,7 @@ class TestStrategyIntegration(unittest.TestCase):
             m["external_price_yes"] = 0.95
 
         bridge = self._make_mock_bridge()
-        bridge.fetch_weather_markets.return_value = markets
+        bridge.fetch_weather_markets = AsyncMock(return_value=markets)
 
         config = Config(
             locations="NYC", adjacent_buckets=True,
@@ -228,7 +235,7 @@ class TestStrategyIntegration(unittest.TestCase):
         )
         state = TradingState()
 
-        run_weather_strategy(
+        await run_weather_strategy(
             client=bridge, config=config, state=state,
             dry_run=True, use_safeguards=False,
         )
@@ -237,26 +244,32 @@ class TestStrategyIntegration(unittest.TestCase):
         bridge.execute_trade.assert_not_called()
 
 
-class TestHealthCheck(unittest.TestCase):
+class TestHealthCheck(unittest.IsolatedAsyncioTestCase):
     """Test that strategy aborts when no weather sources return data."""
 
     @patch("weather.strategy.get_open_meteo_forecast")
-    @patch("weather.strategy.get_noaa_forecast")
-    def test_no_sources_returns_early(self, mock_noaa, mock_om):
+    @patch("weather.strategy.get_noaa_forecast", new_callable=AsyncMock)
+    async def test_no_sources_returns_early(self, mock_noaa, mock_om):
         """If both NOAA and Open-Meteo return empty, strategy should abort."""
         mock_noaa.return_value = {}
         mock_om.return_value = {}
 
         bridge = MagicMock(spec=CLOBWeatherBridge)
         bridge.get_portfolio.return_value = {"balance_usdc": 50.0, "total_exposure": 0, "positions_count": 0}
-        bridge.fetch_weather_markets.return_value = _load_fixture("weather_markets.json")["markets"]
+        bridge.fetch_weather_markets = AsyncMock(
+            return_value=_load_fixture("weather_markets.json")["markets"]
+        )
         bridge.get_position.return_value = None
+        bridge.execute_trade = AsyncMock()
+        bridge.execute_sell = AsyncMock()
+        bridge.clob = MagicMock()
+        bridge.clob.get_orderbook = AsyncMock(return_value={"bids": [], "asks": []})
 
         config = Config(locations="NYC", multi_source=True, max_days_ahead=365,
                         seasonal_adjustments=False, aviation_obs=False)
         state = TradingState()
 
-        run_weather_strategy(
+        await run_weather_strategy(
             client=bridge, config=config, state=state,
             dry_run=True, use_safeguards=False,
         )
@@ -300,14 +313,14 @@ class TestScoreBucketsWithNewParams(unittest.TestCase):
 
         # Add best_ask to one market
         for m in event_markets:
-            if m["outcome_name"] == "50-54°F":
+            if m["outcome_name"] == "50-54\u00b0F":
                 m["best_ask"] = 0.40  # Different from external_price_yes (0.35)
                 break
 
         config = Config(adjacent_buckets=True, seasonal_adjustments=False)
         scored = score_buckets(event_markets, 52, "2025-03-15", config)
 
-        # Find the 50-54°F bucket
+        # Find the 50-54\u00b0F bucket
         center = [s for s in scored if s["bucket"] == (50, 54)]
         self.assertEqual(len(center), 1)
         # Price should be the best_ask (0.40), not external_price_yes (0.35)
@@ -319,7 +332,7 @@ class TestScoreBucketsWithNewParams(unittest.TestCase):
         event_markets = [m for m in markets_data["markets"] if m["event_id"] == "evt-nyc-high-mar15"]
 
         for m in event_markets:
-            if m["outcome_name"] == "50-54°F":
+            if m["outcome_name"] == "50-54\u00b0F":
                 m["best_ask"] = 0  # Zero = not available
                 break
 
@@ -344,7 +357,7 @@ class TestScoreBucketsSigmaOverride(unittest.TestCase):
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         scored_wide = score_buckets(markets, 52.0, today, config, metric="high", sigma_override=20.0)
         scored_narrow = score_buckets(markets, 52.0, today, config, metric="high", sigma_override=2.0)
-        # Compare YES side probabilities: narrow sigma → higher center bucket prob
+        # Compare YES side probabilities: narrow sigma -> higher center bucket prob
         yes_wide = [s for s in scored_wide if s["side"] == "yes"]
         yes_narrow = [s for s in scored_narrow if s["side"] == "yes"]
         if yes_wide and yes_narrow:
@@ -426,7 +439,7 @@ class TestScoreBucketsNO(unittest.TestCase):
     def test_no_side_generated_for_overpriced_bucket(self):
         """A bucket with prob=0.10 and price=0.80 should have a NO opportunity with positive EV."""
         markets = [{
-            "id": "m1", "outcome_name": "90°F or higher",
+            "id": "m1", "outcome_name": "90\u00b0F or higher",
             "best_ask": 0.80, "external_price_yes": 0.80,
         }]
         config = Config()
@@ -444,7 +457,7 @@ class TestScoreBucketsNO(unittest.TestCase):
     def test_yes_side_still_generated(self):
         """YES side should still be scored as before."""
         markets = [{
-            "id": "m1", "outcome_name": "50-54°F",
+            "id": "m1", "outcome_name": "50-54\u00b0F",
             "best_ask": 0.10, "external_price_yes": 0.10,
         }]
         config = Config()
@@ -459,7 +472,7 @@ class TestScoreBucketsNO(unittest.TestCase):
     def test_all_entries_have_side_field(self):
         """Every scored entry must have a 'side' field."""
         markets = [{
-            "id": "m1", "outcome_name": "50-54°F",
+            "id": "m1", "outcome_name": "50-54\u00b0F",
             "best_ask": 0.50, "external_price_yes": 0.50,
         }]
         config = Config()
@@ -473,20 +486,20 @@ class TestScoreBucketsNO(unittest.TestCase):
 
 
 class TestParseBucketUnitConversion(unittest.TestCase):
-    """Test _parse_bucket °C → °F conversion for international markets."""
+    """Test _parse_bucket C -> F conversion for international markets."""
 
     def test_fahrenheit_location_unchanged(self):
-        """NYC (°F) bucket should pass through as floats."""
+        """NYC (F) bucket should pass through as floats."""
         from weather.strategy import _parse_bucket
-        result = _parse_bucket("50-54°F", "NYC")
+        result = _parse_bucket("50-54\u00b0F", "NYC")
         self.assertEqual(result, (50.0, 54.0))
 
     def test_celsius_location_converted(self):
-        """Paris (°C) bucket '15-20' should be converted to °F."""
+        """Paris (C) bucket '15-20' should be converted to F."""
         from weather.strategy import _parse_bucket
         result = _parse_bucket("15-20", "Paris")
         self.assertIsNotNone(result)
-        # 15°C = 59°F, 20°C = 68°F
+        # 15C = 59F, 20C = 68F
         self.assertAlmostEqual(result[0], 59.0, places=1)
         self.assertAlmostEqual(result[1], 68.0, places=1)
 
@@ -496,34 +509,34 @@ class TestParseBucketUnitConversion(unittest.TestCase):
         result = _parse_bucket("10 or below", "London")
         self.assertIsNotNone(result)
         self.assertEqual(result[0], -999.0)
-        self.assertAlmostEqual(result[1], 50.0, places=1)  # 10°C = 50°F
+        self.assertAlmostEqual(result[1], 50.0, places=1)  # 10C = 50F
 
     def test_celsius_open_ended_above(self):
         """Open-ended upper bucket: sentinel 999 preserved."""
         from weather.strategy import _parse_bucket
         result = _parse_bucket("30 or higher", "Seoul")
         self.assertIsNotNone(result)
-        self.assertAlmostEqual(result[0], 86.0, places=1)  # 30°C = 86°F
+        self.assertAlmostEqual(result[0], 86.0, places=1)  # 30C = 86F
         self.assertEqual(result[1], 999.0)
 
     def test_unknown_location_treated_as_fahrenheit(self):
-        """Unknown location defaults to °F (no conversion)."""
+        """Unknown location defaults to F (no conversion)."""
         from weather.strategy import _parse_bucket
         result = _parse_bucket("50-54", "UnknownCity")
         self.assertEqual(result, (50.0, 54.0))
 
     def test_no_location_treated_as_fahrenheit(self):
-        """Empty location defaults to °F."""
+        """Empty location defaults to F."""
         from weather.strategy import _parse_bucket
         result = _parse_bucket("50-54", "")
         self.assertEqual(result, (50.0, 54.0))
 
     def test_negative_celsius(self):
-        """Negative °C should convert correctly."""
+        """Negative C should convert correctly."""
         from weather.strategy import _parse_bucket
         result = _parse_bucket("-5 to 0", "Toronto")
         self.assertIsNotNone(result)
-        # -5°C = 23°F, 0°C = 32°F
+        # -5C = 23F, 0C = 32F
         self.assertAlmostEqual(result[0], 23.0, places=1)
         self.assertAlmostEqual(result[1], 32.0, places=1)
 
@@ -533,7 +546,7 @@ class TestParseBucketUnitConversion(unittest.TestCase):
         self.assertIsNone(_parse_bucket("Sunny weather", "Paris"))
 
     def test_score_buckets_uses_converted_bucket(self):
-        """score_buckets should pass °F-converted bounds to probability function."""
+        """score_buckets should pass F-converted bounds to probability function."""
         from weather.strategy import score_buckets
         markets = [{
             "id": "m1", "outcome_name": "15-20",
@@ -545,13 +558,13 @@ class TestParseBucketUnitConversion(unittest.TestCase):
             with patch("weather.strategy.platt_calibrate", side_effect=lambda p: p):
                 scored = score_buckets(markets, 62.0, "2026-06-15", config,
                                        metric="high", location="Paris")
-        # The mock should have been called with converted °F bounds
+        # The mock should have been called with converted F bounds
         if mock_prob.called:
             call_args = mock_prob.call_args
             bucket_lo = call_args[0][1]  # second positional arg
             bucket_hi = call_args[0][2]  # third positional arg
-            self.assertAlmostEqual(bucket_lo, 59.0, places=1)  # 15°C
-            self.assertAlmostEqual(bucket_hi, 68.0, places=1)  # 20°C
+            self.assertAlmostEqual(bucket_lo, 59.0, places=1)  # 15C
+            self.assertAlmostEqual(bucket_hi, 68.0, places=1)  # 20C
 
 
 class TestExecuteNOTrade(unittest.TestCase):
@@ -655,8 +668,8 @@ class TestEdgeInversionExit(unittest.TestCase):
         ))
 
 
-class TestExitParallelFetch(unittest.TestCase):
-    """Verify that check_exit_opportunities pre-fetches orderbooks in parallel."""
+class TestExitParallelFetch(unittest.IsolatedAsyncioTestCase):
+    """Verify that check_exit_opportunities pre-fetches orderbooks."""
 
     def _make_mock_client(self, market_ids: list[str]) -> MagicMock:
         """Build a mock CLOBWeatherBridge with market cache for given IDs."""
@@ -667,17 +680,20 @@ class TestExitParallelFetch(unittest.TestCase):
             gm.clob_token_ids = [f"token_{mid}"]
             gm.end_date = None
             client._market_cache[mid] = gm
+        client.clob = MagicMock()
+        client.clob.get_orderbook = AsyncMock()
+        client.execute_sell = AsyncMock()
         return client
 
-    def test_exit_parallel_fetch(self):
+    async def test_exit_parallel_fetch(self):
         """All orderbooks should be fetched and positions processed."""
         market_ids = ["m-1", "m-2", "m-3"]
         client = self._make_mock_client(market_ids)
 
         # get_orderbook returns a book with bids above exit threshold
-        client.clob.get_orderbook.return_value = {
+        client.clob.get_orderbook = AsyncMock(return_value={
             "bids": [{"price": "0.90"}],
-        }
+        })
         client.get_market_context.return_value = None
 
         state = TradingState()
@@ -687,7 +703,7 @@ class TestExitParallelFetch(unittest.TestCase):
 
         config = Config(dynamic_exits=False)
 
-        found, executed = check_exit_opportunities(
+        found, executed = await check_exit_opportunities(
             client, config, state, dry_run=True, use_safeguards=False,
         )
 
@@ -696,17 +712,17 @@ class TestExitParallelFetch(unittest.TestCase):
         # get_orderbook should have been called once per market
         self.assertEqual(client.clob.get_orderbook.call_count, 3)
 
-    def test_exit_handles_fetch_failure(self):
+    async def test_exit_handles_fetch_failure(self):
         """If one orderbook fetch fails, other positions should still be processed."""
         market_ids = ["m-ok", "m-fail"]
         client = self._make_mock_client(market_ids)
 
-        def mock_get_orderbook(token_id: str) -> dict:
+        async def mock_get_orderbook(token_id: str) -> dict:
             if token_id == "token_m-fail":
                 raise ConnectionError("timeout")
             return {"bids": [{"price": "0.90"}]}
 
-        client.clob.get_orderbook.side_effect = mock_get_orderbook
+        client.clob.get_orderbook = AsyncMock(side_effect=mock_get_orderbook)
         client.get_market_context.return_value = None
 
         state = TradingState()
@@ -716,7 +732,7 @@ class TestExitParallelFetch(unittest.TestCase):
 
         config = Config(dynamic_exits=False)
 
-        found, executed = check_exit_opportunities(
+        found, executed = await check_exit_opportunities(
             client, config, state, dry_run=True, use_safeguards=False,
         )
 
@@ -726,7 +742,7 @@ class TestExitParallelFetch(unittest.TestCase):
         self.assertEqual(client.clob.get_orderbook.call_count, 2)
 
 
-class TestEmergencyExitLosers(unittest.TestCase):
+class TestEmergencyExitLosers(unittest.IsolatedAsyncioTestCase):
     """Test _emergency_exit_losers sells only losing positions."""
 
     def _make_mock_client(self, market_ids: list[str]) -> MagicMock:
@@ -737,26 +753,28 @@ class TestEmergencyExitLosers(unittest.TestCase):
             gm.clob_token_ids = [f"token_{mid}"]
             gm.end_date = None
             client._market_cache[mid] = gm
+        client.clob = MagicMock()
+        client.clob.get_orderbook = AsyncMock()
+        client.execute_sell = AsyncMock(return_value={"success": True})
         return client
 
-    def test_sells_losing_positions_only(self):
+    async def test_sells_losing_positions_only(self):
         """Positions below cost basis should be sold, winners kept."""
         market_ids = ["m-loser", "m-winner"]
         client = self._make_mock_client(market_ids)
 
-        def mock_get_orderbook(token_id: str) -> dict:
+        async def mock_get_orderbook(token_id: str) -> dict:
             if token_id == "token_m-loser":
                 return {"bids": [{"price": "0.05"}]}  # Below cost basis 0.10
             return {"bids": [{"price": "0.20"}]}  # Above cost basis 0.10
 
-        client.clob.get_orderbook.side_effect = mock_get_orderbook
-        client.execute_sell.return_value = {"success": True}
+        client.clob.get_orderbook = AsyncMock(side_effect=mock_get_orderbook)
 
         state = TradingState()
         state.record_trade("m-loser", "losing_bucket", "yes", 0.10, 20.0, location="NYC")
         state.record_trade("m-winner", "winning_bucket", "yes", 0.10, 20.0, location="NYC")
 
-        exits = _emergency_exit_losers(client, state, dry_run=False)
+        exits = await _emergency_exit_losers(client, state, dry_run=False)
 
         self.assertEqual(exits, 1)
         # Only the loser should have been sold (side="yes" from record_trade)
@@ -764,30 +782,30 @@ class TestEmergencyExitLosers(unittest.TestCase):
         # Winner still in state
         self.assertIn("m-winner", state.trades)
 
-    def test_dry_run_does_not_sell(self):
+    async def test_dry_run_does_not_sell(self):
         """In dry_run mode, no sells should be executed."""
         client = self._make_mock_client(["m-loser"])
-        client.clob.get_orderbook.return_value = {"bids": [{"price": "0.05"}]}
+        client.clob.get_orderbook = AsyncMock(return_value={"bids": [{"price": "0.05"}]})
 
         state = TradingState()
         state.record_trade("m-loser", "losing_bucket", "yes", 0.10, 20.0, location="NYC")
 
-        exits = _emergency_exit_losers(client, state, dry_run=True)
+        exits = await _emergency_exit_losers(client, state, dry_run=True)
 
         self.assertEqual(exits, 0)
         client.execute_sell.assert_not_called()
         # Position should still be in state
         self.assertIn("m-loser", state.trades)
 
-    def test_no_trades_returns_zero(self):
+    async def test_no_trades_returns_zero(self):
         """With no open trades, should return 0."""
         client = self._make_mock_client([])
         state = TradingState()
-        exits = _emergency_exit_losers(client, state, dry_run=False)
+        exits = await _emergency_exit_losers(client, state, dry_run=False)
         self.assertEqual(exits, 0)
 
 
-class TestStopLossNoSide(unittest.TestCase):
+class TestStopLossNoSide(unittest.IsolatedAsyncioTestCase):
     """Verify stop-loss handles YES and NO positions correctly."""
 
     def _make_mock_client(self) -> MagicMock:
@@ -796,10 +814,10 @@ class TestStopLossNoSide(unittest.TestCase):
         gm = MagicMock()
         gm.clob_token_ids = ["yes_tok", "no_tok"]
         client._market_cache["m-1"] = gm
-        client.execute_sell.return_value = {"success": True}
+        client.execute_sell = AsyncMock(return_value={"success": True})
         return client
 
-    def test_stop_loss_yes_triggers_outside_bucket(self):
+    async def test_stop_loss_yes_triggers_outside_bucket(self):
         """YES position: stop-loss should trigger when forecast moves OUTSIDE bucket."""
         client = self._make_mock_client()
         state = TradingState()
@@ -811,12 +829,12 @@ class TestStopLossNoSide(unittest.TestCase):
         config = Config(stop_loss_reversal=True, stop_loss_reversal_threshold=5.0, multi_source=False)
         noaa_cache = {"NYC": {"2026-02-20": {"high": 45.0}}}
 
-        exits = _check_stop_loss_reversals(
+        exits = await _check_stop_loss_reversals(
             client, config, state, noaa_cache, {}, dry_run=False,
         )
         self.assertEqual(exits, 1)
 
-    def test_stop_loss_yes_no_trigger_inside_bucket(self):
+    async def test_stop_loss_yes_no_trigger_inside_bucket(self):
         """YES position: no stop-loss when forecast stays in bucket."""
         client = self._make_mock_client()
         state = TradingState()
@@ -827,16 +845,16 @@ class TestStopLossNoSide(unittest.TestCase):
         config = Config(stop_loss_reversal=True, stop_loss_reversal_threshold=5.0, multi_source=False)
         noaa_cache = {"NYC": {"2026-02-20": {"high": 33.0}}}  # Still in bucket
 
-        exits = _check_stop_loss_reversals(
+        exits = await _check_stop_loss_reversals(
             client, config, state, noaa_cache, {}, dry_run=False,
         )
         self.assertEqual(exits, 0)
 
-    def test_stop_loss_no_triggers_inside_bucket(self):
+    async def test_stop_loss_no_triggers_inside_bucket(self):
         """NO position: stop-loss should trigger when forecast moves INTO bucket."""
         client = self._make_mock_client()
         state = TradingState()
-        # Bet NO on bucket 30-35. Forecast was 45 (outside), now 32 (inside) — we're losing
+        # Bet NO on bucket 30-35. Forecast was 45 (outside), now 32 (inside) -- we're losing
         state.record_trade("m-1", "30 to 35", "no", 0.10, 20.0,
                            location="NYC", forecast_date="2026-02-20",
                            forecast_temp=45.0)
@@ -844,18 +862,18 @@ class TestStopLossNoSide(unittest.TestCase):
         config = Config(stop_loss_reversal=True, stop_loss_reversal_threshold=5.0, multi_source=False)
         noaa_cache = {"NYC": {"2026-02-20": {"high": 32.0}}}  # Now in bucket, shift=13
 
-        exits = _check_stop_loss_reversals(
+        exits = await _check_stop_loss_reversals(
             client, config, state, noaa_cache, {}, dry_run=False,
         )
         self.assertEqual(exits, 1)
         # Should sell with side="no"
         client.execute_sell.assert_called_once_with("m-1", 20.0, side="no")
 
-    def test_stop_loss_no_no_trigger_outside_bucket(self):
+    async def test_stop_loss_no_no_trigger_outside_bucket(self):
         """NO position: no stop-loss when forecast stays OUTSIDE bucket (we're winning)."""
         client = self._make_mock_client()
         state = TradingState()
-        # Bet NO on bucket 30-35. Forecast was 45, now 50 (still outside) — we're winning
+        # Bet NO on bucket 30-35. Forecast was 45, now 50 (still outside) -- we're winning
         state.record_trade("m-1", "30 to 35", "no", 0.10, 20.0,
                            location="NYC", forecast_date="2026-02-20",
                            forecast_temp=45.0)
@@ -863,7 +881,7 @@ class TestStopLossNoSide(unittest.TestCase):
         config = Config(stop_loss_reversal=True, stop_loss_reversal_threshold=5.0, multi_source=False)
         noaa_cache = {"NYC": {"2026-02-20": {"high": 50.0}}}  # Still outside bucket
 
-        exits = _check_stop_loss_reversals(
+        exits = await _check_stop_loss_reversals(
             client, config, state, noaa_cache, {}, dry_run=False,
         )
         self.assertEqual(exits, 0)
@@ -882,7 +900,7 @@ class TestMarketOverlapGuard(unittest.TestCase):
         self.assertIn("m-1", state.trades)
 
 
-class TestNoSideExits(unittest.TestCase):
+class TestNoSideExits(unittest.IsolatedAsyncioTestCase):
     """Verify that NO-side positions use the correct token for exits."""
 
     def _make_mock_client(self, market_ids: list[str]) -> MagicMock:
@@ -893,14 +911,17 @@ class TestNoSideExits(unittest.TestCase):
             gm.clob_token_ids = [f"yes_{mid}", f"no_{mid}"]
             gm.end_date = None
             client._market_cache[mid] = gm
+        client.clob = MagicMock()
+        client.clob.get_orderbook = AsyncMock()
+        client.execute_sell = AsyncMock(return_value={"success": True})
         return client
 
-    def test_exit_no_position_fetches_no_token_orderbook(self):
+    async def test_exit_no_position_fetches_no_token_orderbook(self):
         """For a NO position, orderbook should be fetched for the NO token."""
         client = self._make_mock_client(["m-no"])
-        client.clob.get_orderbook.return_value = {
+        client.clob.get_orderbook = AsyncMock(return_value={
             "bids": [{"price": "0.85"}],
-        }
+        })
         client.get_market_context.return_value = None
 
         state = TradingState()
@@ -908,7 +929,7 @@ class TestNoSideExits(unittest.TestCase):
                            location="NYC", forecast_date="2026-02-20")
 
         config = Config(dynamic_exits=False)
-        found, _ = check_exit_opportunities(
+        found, _ = await check_exit_opportunities(
             client, config, state, dry_run=True, use_safeguards=False,
         )
 
@@ -916,12 +937,12 @@ class TestNoSideExits(unittest.TestCase):
         # Should have fetched the NO token orderbook
         client.clob.get_orderbook.assert_called_once_with("no_m-no")
 
-    def test_exit_yes_position_fetches_yes_token_orderbook(self):
+    async def test_exit_yes_position_fetches_yes_token_orderbook(self):
         """For a YES position, orderbook should be fetched for the YES token."""
         client = self._make_mock_client(["m-yes"])
-        client.clob.get_orderbook.return_value = {
+        client.clob.get_orderbook = AsyncMock(return_value={
             "bids": [{"price": "0.85"}],
-        }
+        })
         client.get_market_context.return_value = None
 
         state = TradingState()
@@ -929,45 +950,43 @@ class TestNoSideExits(unittest.TestCase):
                            location="NYC", forecast_date="2026-02-20")
 
         config = Config(dynamic_exits=False)
-        found, _ = check_exit_opportunities(
+        found, _ = await check_exit_opportunities(
             client, config, state, dry_run=True, use_safeguards=False,
         )
 
         self.assertEqual(found, 1)
         client.clob.get_orderbook.assert_called_once_with("yes_m-yes")
 
-    def test_exit_sell_passes_no_side(self):
+    async def test_exit_sell_passes_no_side(self):
         """execute_sell should receive side='no' for NO positions."""
         client = self._make_mock_client(["m-no"])
-        client.clob.get_orderbook.return_value = {
+        client.clob.get_orderbook = AsyncMock(return_value={
             "bids": [{"price": "0.85"}],
-        }
+        })
         client.get_market_context.return_value = None
-        client.execute_sell.return_value = {"success": True}
 
         state = TradingState()
         state.record_trade("m-no", "bucket_test", "no", 0.10, 20.0,
                            location="NYC", forecast_date="2026-02-20")
 
         config = Config(dynamic_exits=False)
-        check_exit_opportunities(
+        await check_exit_opportunities(
             client, config, state, dry_run=False, use_safeguards=False,
         )
 
         client.execute_sell.assert_called_once_with("m-no", 20.0, side="no")
 
-    def test_emergency_exit_no_position(self):
+    async def test_emergency_exit_no_position(self):
         """Emergency exit should use NO token for NO-side positions."""
         client = self._make_mock_client(["m-no"])
-        client.clob.get_orderbook.return_value = {
+        client.clob.get_orderbook = AsyncMock(return_value={
             "bids": [{"price": "0.05"}],  # Below cost basis
-        }
-        client.execute_sell.return_value = {"success": True}
+        })
 
         state = TradingState()
         state.record_trade("m-no", "losing_no", "no", 0.10, 20.0, location="NYC")
 
-        exits = _emergency_exit_losers(client, state, dry_run=False)
+        exits = await _emergency_exit_losers(client, state, dry_run=False)
 
         self.assertEqual(exits, 1)
         # Should fetch the NO token orderbook
@@ -985,7 +1004,7 @@ class TestAdaptiveSlippage(unittest.TestCase):
         config = Config(slippage_max_pct=0.15, slippage_edge_ratio=0.5)
         context = {
             "slippage": {"estimates": [{"slippage_pct": 0.10}]},
-            "edge": {"user_edge": 0.25},  # 25% edge → threshold = 12.5%
+            "edge": {"user_edge": 0.25},  # 25% edge -> threshold = 12.5%
         }
         ok, reasons = check_context_safeguards(context, config)
         assert ok  # 10% < 12.5%
@@ -997,7 +1016,7 @@ class TestAdaptiveSlippage(unittest.TestCase):
         config = Config(slippage_max_pct=0.15, slippage_edge_ratio=0.5)
         context = {
             "slippage": {"estimates": [{"slippage_pct": 0.10}]},
-            "edge": {"user_edge": 0.05},  # 5% edge → threshold = 2.5%
+            "edge": {"user_edge": 0.05},  # 5% edge -> threshold = 2.5%
         }
         ok, reasons = check_context_safeguards(context, config)
         assert not ok  # 10% > 2.5%
@@ -1009,7 +1028,7 @@ class TestAdaptiveSlippage(unittest.TestCase):
         config = Config(slippage_max_pct=0.15, slippage_edge_ratio=0.5)
         context = {
             "slippage": {"estimates": [{"slippage_pct": 0.14}]},
-            "edge": {"user_edge": 0.50},  # 50% edge → 25%, capped at 15%
+            "edge": {"user_edge": 0.50},  # 50% edge -> 25%, capped at 15%
         }
         ok, reasons = check_context_safeguards(context, config)
         assert ok  # 14% < 15%

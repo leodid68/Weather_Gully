@@ -3,8 +3,8 @@
 Uses CLOBWeatherBridge for all market data and order execution (CLOB direct).
 """
 
+import asyncio
 import logging
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 
 from .aviation import get_aviation_daily_data
@@ -299,7 +299,7 @@ def score_buckets(
 # Exit strategy
 # --------------------------------------------------------------------------
 
-def check_exit_opportunities(
+async def check_exit_opportunities(
     client: CLOBWeatherBridge,
     config: Config,
     state: TradingState,
@@ -333,17 +333,17 @@ def check_exit_opportunities(
 
     orderbooks: dict[str, dict] = {}  # market_id → orderbook
     if orderbook_targets:
-        with ThreadPoolExecutor(max_workers=min(len(orderbook_targets), 8)) as pool:
-            futures = {
-                pool.submit(client.clob.get_orderbook, tid): mid
-                for mid, tid in orderbook_targets
-            }
-            for fut in as_completed(futures):
-                mid = futures[fut]
-                try:
-                    orderbooks[mid] = fut.result()
-                except Exception:
-                    logger.debug("Orderbook fetch failed for %s", mid, exc_info=True)
+        async def _fetch_ob(mid: str, tid: str) -> tuple[str, dict | None]:
+            try:
+                return mid, await client.clob.get_orderbook(tid)
+            except Exception:
+                logger.debug("Orderbook fetch failed for %s", mid, exc_info=True)
+                return mid, None
+
+        ob_results = await asyncio.gather(*[_fetch_ob(mid, tid) for mid, tid in orderbook_targets])
+        for mid, book in ob_results:
+            if book:
+                orderbooks[mid] = book
 
     for market_id, trade in list(state.trades.items()):
         shares = trade.shares
@@ -409,7 +409,7 @@ def check_exit_opportunities(
                 logger.info("[DRY RUN] Would sell %.1f shares of %s", shares, outcome_name)
             else:
                 logger.info("Selling %.1f shares of %s...", shares, outcome_name)
-                result = client.execute_sell(market_id, shares, side=trade.side)
+                result = await client.execute_sell(market_id, shares, side=trade.side)
 
                 if result.get("success"):
                     exits_executed += 1
@@ -472,7 +472,7 @@ def should_exit_on_edge_inversion(
 # Stop-loss on forecast reversal
 # --------------------------------------------------------------------------
 
-def _check_stop_loss_reversals(
+async def _check_stop_loss_reversals(
     client: CLOBWeatherBridge,
     config: Config,
     state: TradingState,
@@ -589,7 +589,7 @@ def _check_stop_loss_reversals(
                 logger.info("[DRY RUN] Would stop-loss sell %.1f shares of %s", fresh_shares, fresh_trade.outcome_name)
             else:
                 logger.info("Stop-loss selling %.1f shares of %s...", fresh_shares, fresh_trade.outcome_name)
-                result = client.execute_sell(market_id, fresh_shares, side=fresh_trade.side)
+                result = await client.execute_sell(market_id, fresh_shares, side=fresh_trade.side)
                 if result.get("success"):
                     exits += 1
                     state.remove_trade(market_id)
@@ -646,7 +646,7 @@ def _apply_correlation_discount(
 # Emergency exit (circuit breaker)
 # --------------------------------------------------------------------------
 
-def _emergency_exit_losers(
+async def _emergency_exit_losers(
     client: CLOBWeatherBridge,
     state: TradingState,
     dry_run: bool,
@@ -675,17 +675,18 @@ def _emergency_exit_losers(
         return 0
 
     orderbooks: dict[str, dict] = {}
-    with ThreadPoolExecutor(max_workers=min(len(orderbook_targets), 8)) as pool:
-        futures = {
-            pool.submit(client.clob.get_orderbook, tid): mid
-            for mid, tid in orderbook_targets
-        }
-        for fut in as_completed(futures):
-            mid = futures[fut]
-            try:
-                orderbooks[mid] = fut.result()
-            except Exception:
-                logger.debug("Emergency exit: orderbook fetch failed for %s", mid, exc_info=True)
+
+    async def _fetch_ob(mid: str, tid: str) -> tuple[str, dict | None]:
+        try:
+            return mid, await client.clob.get_orderbook(tid)
+        except Exception:
+            logger.debug("Emergency exit: orderbook fetch failed for %s", mid, exc_info=True)
+            return mid, None
+
+    ob_results = await asyncio.gather(*[_fetch_ob(mid, tid) for mid, tid in orderbook_targets])
+    for mid, book in ob_results:
+        if book:
+            orderbooks[mid] = book
 
     exits = 0
     for market_id, trade in list(state.trades.items()):
@@ -711,7 +712,7 @@ def _emergency_exit_losers(
         if dry_run:
             logger.info("[DRY RUN] Would emergency sell %.1f shares of %s", trade.shares, outcome_name)
         else:
-            result = client.execute_sell(market_id, trade.shares, side=trade.side)
+            result = await client.execute_sell(market_id, trade.shares, side=trade.side)
             if result.get("success"):
                 exits += 1
                 state.remove_trade(market_id)
@@ -733,7 +734,7 @@ def _emergency_exit_losers(
 # Main strategy
 # --------------------------------------------------------------------------
 
-def run_weather_strategy(
+async def run_weather_strategy(
     client: CLOBWeatherBridge,
     config: Config,
     state: TradingState,
@@ -814,7 +815,7 @@ def run_weather_strategy(
         logger.warning("CIRCUIT BREAKER: %s", reason)
         state.last_circuit_break = datetime.now(timezone.utc).isoformat()
         # Emergency exit: sell losing positions to limit drawdown
-        emergency_exits = _emergency_exit_losers(client, state, dry_run)
+        emergency_exits = await _emergency_exit_losers(client, state, dry_run)
         if emergency_exits:
             logger.warning("Emergency exited %d losing position(s)", emergency_exits)
         save_path = state_path or config.state_file
@@ -842,13 +843,10 @@ def run_weather_strategy(
     # Sync bridge exposure from persisted state
     client.sync_exposure_from_state(state.trades)
 
-    # Parallel fetch: portfolio + markets
-    logger.info("Fetching portfolio and markets in parallel...")
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        fut_portfolio = pool.submit(client.get_portfolio)
-        fut_markets = pool.submit(client.fetch_weather_markets)
-        portfolio = fut_portfolio.result()
-        markets = fut_markets.result()
+    # Fetch portfolio (sync) and markets (async)
+    logger.info("Fetching portfolio and markets...")
+    portfolio = client.get_portfolio()
+    markets = await client.fetch_weather_markets()
 
     balance = portfolio.get("balance_usdc", 0) if portfolio else 0
     if portfolio:
@@ -886,71 +884,70 @@ def run_weather_strategy(
     logger.info("Pre-fetching forecasts for %d locations (%s) in parallel...",
                 len(active_locs), " + ".join(sources))
 
-    def _fetch_noaa(loc_name: str) -> tuple[str, dict]:
-        return loc_name, get_noaa_forecast(
+    async def _fetch_noaa(loc_name: str) -> tuple[str, dict]:
+        return loc_name, await get_noaa_forecast(
             loc_name, LOCATIONS,
             max_retries=config.max_retries,
             base_delay=config.retry_base_delay,
         )
 
-    def _fetch_aviation() -> dict[str, dict]:
-        return get_aviation_daily_data(
+    async def _fetch_aviation() -> dict[str, dict]:
+        return await get_aviation_daily_data(
             active_locs,
             hours=config.aviation_hours,
             max_retries=config.max_retries,
             base_delay=config.retry_base_delay,
         )
 
-    def _fetch_open_meteo_all() -> dict[str, dict[str, dict]]:
+    async def _fetch_open_meteo_all() -> dict[str, dict[str, dict]]:
         loc_subset = {k: v for k, v in LOCATIONS.items() if k in active_locs}
-        return get_open_meteo_forecast_multi(
+        return await get_open_meteo_forecast_multi(
             loc_subset,
             max_retries=config.max_retries,
             base_delay=config.retry_base_delay,
         )
 
-    max_workers = len(active_locs) + 2  # NOAA per location + 1 Open-Meteo + 1 aviation
-    with ThreadPoolExecutor(max_workers=max_workers) as pool:
-        # Submit all NOAA fetches (still per-location)
-        noaa_futures = {pool.submit(_fetch_noaa, loc): loc for loc in active_locs}
-        # Submit single Open-Meteo multi-location fetch
-        om_future = None
-        if config.multi_source:
-            om_future = pool.submit(_fetch_open_meteo_all)
-        # Submit aviation fetch (single call for all stations)
-        aviation_future = None
-        if config.aviation_obs:
-            aviation_future = pool.submit(_fetch_aviation)
+    # Parallel fetch with asyncio.gather
+    noaa_tasks = [_fetch_noaa(loc) for loc in active_locs]
+    extra_tasks: list = []
+    if config.multi_source:
+        extra_tasks.append(_fetch_open_meteo_all())
+    if config.aviation_obs:
+        extra_tasks.append(_fetch_aviation())
 
-        for fut in as_completed(list(noaa_futures)):
-            loc = noaa_futures.get(fut, "?")
-            try:
-                loc_name, data = fut.result()
-                noaa_cache[loc_name] = data
-                if not data:
-                    logger.warning("NOAA returned empty forecast for %s", loc_name)
-            except Exception as exc:
-                logger.error("NOAA fetch crashed for %s: %s", loc, exc)
+    all_results = await asyncio.gather(*noaa_tasks, *extra_tasks, return_exceptions=True)
 
-        # Collect Open-Meteo results (single batch)
-        if om_future is not None:
-            try:
-                open_meteo_cache = om_future.result()
-            except Exception as exc:
-                logger.error("Open-Meteo multi-location fetch crashed: %s", exc)
+    # Parse NOAA results (first N entries)
+    for i, result in enumerate(all_results[:len(noaa_tasks)]):
+        if isinstance(result, Exception):
+            logger.error("NOAA fetch crashed for %s: %s", list(active_locs)[i], result)
+        else:
+            loc_name, data = result
+            noaa_cache[loc_name] = data
+            if not data:
+                logger.warning("NOAA returned empty forecast for %s", loc_name)
 
-        # Collect aviation results
-        if aviation_future is not None:
-            try:
-                aviation_cache = aviation_future.result()
-                if aviation_cache:
-                    for loc, dates in aviation_cache.items():
-                        for date_str, obs in dates.items():
-                            state.update_daily_obs(loc, date_str, obs)
-                else:
-                    logger.warning("Aviation API returned no observations")
-            except Exception as exc:
-                logger.error("Aviation fetch crashed: %s", exc)
+    # Parse extra results
+    extra_idx = len(noaa_tasks)
+    if config.multi_source:
+        om_result = all_results[extra_idx]
+        if isinstance(om_result, Exception):
+            logger.error("Open-Meteo multi-location fetch crashed: %s", om_result)
+        else:
+            open_meteo_cache = om_result
+        extra_idx += 1
+
+    if config.aviation_obs:
+        av_result = all_results[extra_idx]
+        if isinstance(av_result, Exception):
+            logger.error("Aviation fetch crashed: %s", av_result)
+        elif av_result:
+            aviation_cache = av_result
+            for loc, dates in aviation_cache.items():
+                for date_str, obs in dates.items():
+                    state.update_daily_obs(loc, date_str, obs)
+        else:
+            logger.warning("Aviation API returned no observations")
 
     logger.info("Forecasts ready: NOAA=%d, Open-Meteo=%d, METAR=%d",
                 len(noaa_cache), len(open_meteo_cache), len(aviation_cache))
@@ -1102,7 +1099,7 @@ def run_weather_strategy(
         adaptive_sigma_value = None
         if config.adaptive_sigma:
             loc_data = LOCATIONS.get(location, {})
-            ensemble_result = fetch_ensemble_spread(
+            ensemble_result = await fetch_ensemble_spread(
                 loc_data.get("lat", 0), loc_data.get("lon", 0),
                 date_str, metric,
             )
@@ -1379,7 +1376,7 @@ def run_weather_strategy(
                 best_ask = price
                 if gm and gm.clob_token_ids:
                     try:
-                        book = client.clob.get_orderbook(gm.clob_token_ids[0])
+                        book = await client.clob.get_orderbook(gm.clob_token_ids[0])
                         bids = book.get("bids") or []
                         asks = book.get("asks") or []
                         if bids:
@@ -1408,7 +1405,7 @@ def run_weather_strategy(
                     # --- MAKER path: post GTC postOnly bid ---
                     logger.info("Posting MAKER %s $%.2f @ $%.2f on '%s'...",
                                 side.upper(), position_size, maker_price, outcome_name)
-                    result = client.execute_maker_order(market_id, side, position_size, maker_price)
+                    result = await client.execute_maker_order(market_id, side, position_size, maker_price)
                     if result.get("posted"):
                         order_entry = {
                             "order_id": result["order_id"],
@@ -1441,7 +1438,7 @@ def run_weather_strategy(
                 if use_taker:
                     # --- TAKER path: immediate fill (existing behavior) ---
                     logger.info("Executing TAKER trade: %s $%.2f on '%s'...", side.upper(), position_size, outcome_name)
-                    result = client.execute_trade(
+                    result = await client.execute_trade(
                         market_id, side, position_size,
                         fill_timeout=config.fill_timeout_seconds,
                         fill_poll_interval=config.fill_poll_interval,
@@ -1526,11 +1523,11 @@ def run_weather_strategy(
 
     # Stop-loss: check if forecast has reversed away from our held positions
     if config.stop_loss_reversal:
-        _check_stop_loss_reversals(client, config, state, noaa_cache, open_meteo_cache, dry_run,
-                                    aviation_cache=aviation_cache or None)
+        await _check_stop_loss_reversals(client, config, state, noaa_cache, open_meteo_cache, dry_run,
+                                          aviation_cache=aviation_cache or None)
 
     # Check exits
-    exits_found, exits_executed = check_exit_opportunities(
+    exits_found, exits_executed = await check_exit_opportunities(
         client, config, state, dry_run, use_safeguards,
         price_tracker=price_tracker,
     )
