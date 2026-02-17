@@ -97,13 +97,14 @@ class TestFetchWeatherMarkets:
 
 class TestGetPortfolio:
 
-    def test_returns_max_exposure_as_balance(self):
+    @pytest.mark.asyncio
+    async def test_returns_max_exposure_as_balance(self):
         bridge = CLOBWeatherBridge(
             clob_client=MagicMock(),
             gamma_client=MagicMock(),
             max_exposure=100.0,
         )
-        portfolio = bridge.get_portfolio()
+        portfolio = await bridge.get_portfolio()
         assert portfolio["balance_usdc"] == 100.0
 
 

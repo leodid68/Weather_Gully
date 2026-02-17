@@ -43,7 +43,7 @@ def _setup_logging(level: str = "INFO") -> None:
     root.addHandler(handler)
 
 
-def _resolve_predictions(state: TradingState, gamma) -> int:
+async def _resolve_predictions(state: TradingState, gamma) -> int:
     """Resolve pending predictions via Gamma API.
 
     Returns the number of newly resolved predictions.
@@ -52,7 +52,7 @@ def _resolve_predictions(state: TradingState, gamma) -> int:
     for market_id, pred in list(state.predictions.items()):
         if pred.resolved:
             continue
-        result = gamma.check_resolution(market_id)
+        result = await gamma.check_resolution(market_id)
         if result and result.get("resolved"):
             pred.resolved = True
             pred.actual_outcome = result["outcome"]
@@ -130,11 +130,25 @@ async def _async_main(
     config: Config,
     paper_bridge: PaperBridge,
     state: TradingState,
+    gamma,
     explain: bool,
     use_safeguards: bool,
 ) -> None:
-    """Async entry point — runs strategy and cleans up HTTP session."""
+    """Async entry point — resolves predictions, runs strategy, cleans up."""
     try:
+        # Resolve past predictions (must be in same event loop as gamma client)
+        await _resolve_predictions(state, gamma)
+
+        # Feed feedback from resolved predictions
+        feedback = FeedbackState.load()
+        from .kalman import KalmanState
+        kalman = KalmanState.load() if config.kalman_sigma else None
+        _feed_feedback(state, feedback, kalman=kalman)
+        feedback.save()
+        if kalman is not None:
+            kalman.save()
+        _print_pnl_summary(state)
+
         # Run strategy with PaperBridge — dry_run=False so trades go through
         # the bridge (which simulates them), not skipped as dry_run
         await run_weather_strategy(
@@ -215,21 +229,11 @@ def main() -> None:
         logger.info("Loaded paper state: %d trades, %d predictions",
                     len(state.trades), len(state.predictions))
 
-        # Resolve past predictions and feed feedback
-        _resolve_predictions(state, gamma)
-        feedback = FeedbackState.load()
-        from .kalman import KalmanState
-        kalman = KalmanState.load() if config.kalman_sigma else None
-        _feed_feedback(state, feedback, kalman=kalman)
-        feedback.save()
-        if kalman is not None:
-            kalman.save()
-        _print_pnl_summary(state)
-
         asyncio.run(_async_main(
             config=config,
             paper_bridge=paper_bridge,
             state=state,
+            gamma=gamma,
             explain=args.explain,
             use_safeguards=not args.no_safeguards,
         ))

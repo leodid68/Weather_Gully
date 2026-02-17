@@ -17,7 +17,7 @@ class TestExplainFlagImpliesDryRun(unittest.IsolatedAsyncioTestCase):
         mock_noaa.return_value = {"2025-03-15": {"high": 52, "low": 38}}
 
         bridge = MagicMock()
-        bridge.get_portfolio.return_value = {"balance_usdc": 50.0, "total_exposure": 0, "positions_count": 0}
+        bridge.get_portfolio = AsyncMock(return_value={"balance_usdc": 50.0, "total_exposure": 0, "positions_count": 0})
         bridge.fetch_weather_markets = AsyncMock(return_value=[])
         bridge._market_cache = {}
         bridge.execute_trade = AsyncMock()
@@ -45,7 +45,7 @@ class TestExplainStatsAccumulation(unittest.IsolatedAsyncioTestCase):
         mock_noaa.return_value = {"2025-03-15": {"high": 52, "low": 38}}
 
         bridge = MagicMock()
-        bridge.get_portfolio.return_value = {"balance_usdc": 50.0, "total_exposure": 0, "positions_count": 0}
+        bridge.get_portfolio = AsyncMock(return_value={"balance_usdc": 50.0, "total_exposure": 0, "positions_count": 0})
         # Load real fixture markets to generate scoring
         import json
         from pathlib import Path
@@ -90,7 +90,7 @@ class TestExplainFilterReasonsTracking(unittest.IsolatedAsyncioTestCase):
         mock_noaa.return_value = {"2025-03-15": {"high": 52, "low": 38}}
 
         bridge = MagicMock()
-        bridge.get_portfolio.return_value = {"balance_usdc": 50.0, "total_exposure": 0, "positions_count": 0}
+        bridge.get_portfolio = AsyncMock(return_value={"balance_usdc": 50.0, "total_exposure": 0, "positions_count": 0})
         import json
         from pathlib import Path
         fixtures = Path(__file__).parent / "fixtures"
@@ -130,7 +130,7 @@ class TestExplainSummaryFormat(unittest.IsolatedAsyncioTestCase):
         mock_noaa.return_value = {"2025-03-15": {"high": 52, "low": 38}}
 
         bridge = MagicMock()
-        bridge.get_portfolio.return_value = {"balance_usdc": 50.0, "total_exposure": 0, "positions_count": 0}
+        bridge.get_portfolio = AsyncMock(return_value={"balance_usdc": 50.0, "total_exposure": 0, "positions_count": 0})
         import json
         from pathlib import Path
         fixtures = Path(__file__).parent / "fixtures"

@@ -140,11 +140,11 @@ class TestStrategyIntegration(unittest.IsolatedAsyncioTestCase):
 
     def _make_mock_bridge(self) -> MagicMock:
         bridge = MagicMock(spec=CLOBWeatherBridge)
-        bridge.get_portfolio.return_value = {
+        bridge.get_portfolio = AsyncMock(return_value={
             "balance_usdc": 50.0,
             "total_exposure": 10.0,
             "positions_count": 2,
-        }
+        })
         bridge.fetch_weather_markets = AsyncMock(
             return_value=_load_fixture("weather_markets.json")["markets"]
         )
@@ -255,7 +255,7 @@ class TestHealthCheck(unittest.IsolatedAsyncioTestCase):
         mock_om.return_value = {}
 
         bridge = MagicMock(spec=CLOBWeatherBridge)
-        bridge.get_portfolio.return_value = {"balance_usdc": 50.0, "total_exposure": 0, "positions_count": 0}
+        bridge.get_portfolio = AsyncMock(return_value={"balance_usdc": 50.0, "total_exposure": 0, "positions_count": 0})
         bridge.fetch_weather_markets = AsyncMock(
             return_value=_load_fixture("weather_markets.json")["markets"]
         )

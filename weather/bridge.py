@@ -190,7 +190,7 @@ class CLOBWeatherBridge:
     # Portfolio & positions
     # ------------------------------------------------------------------
 
-    def get_portfolio(self) -> dict:
+    async def get_portfolio(self) -> dict:
         """Derive portfolio info from max_exposure minus tracked positions.
 
         Deducts exposure from open positions tracked via record_exposure().

@@ -854,10 +854,12 @@ async def run_weather_strategy(
     # Sync bridge exposure from persisted state
     client.sync_exposure_from_state(state.trades)
 
-    # Fetch portfolio (sync) and markets (async)
+    # Fetch portfolio and markets
     logger.info("Fetching portfolio and markets...")
-    portfolio = client.get_portfolio()
-    markets = await client.fetch_weather_markets()
+    portfolio, markets = await asyncio.gather(
+        client.get_portfolio(),
+        client.fetch_weather_markets(),
+    )
 
     balance = portfolio.get("balance_usdc", 0) if portfolio else 0
     if portfolio:
