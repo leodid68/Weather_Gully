@@ -68,6 +68,7 @@ def check_context_safeguards(
     context: dict | None,
     config: Config,
     use_edge: bool = True,
+    will_use_maker: bool = False,
 ) -> tuple[bool, list[str]]:
     """Check market context for deal-breakers. Returns ``(should_trade, reasons)``."""
     if not context:
@@ -98,19 +99,21 @@ def check_context_safeguards(
             return False, [f"Resolves in {hours}h — too soon"]
 
     # Slippage (adaptive: edge-proportional tolerance)
-    estimates = slippage.get("estimates", []) if slippage else []
-    if estimates:
-        slippage_pct = estimates[0].get("slippage_pct", 0)
-        # Edge-proportional threshold: high-EV trades tolerate worse liquidity
-        user_edge_val = edge.get("user_edge", 0) if edge else 0
-        if user_edge_val and config.slippage_edge_ratio > 0:
-            adaptive_threshold = min(config.slippage_max_pct,
-                                     abs(user_edge_val) * config.slippage_edge_ratio)
-            effective_threshold = max(adaptive_threshold, 0.01)  # Floor at 1%
-        else:
-            effective_threshold = config.slippage_max_pct
-        if slippage_pct > effective_threshold:
-            return False, [f"Slippage too high: {slippage_pct:.1%} (threshold {effective_threshold:.1%})"]
+    # Skip for maker orders — we set our own price, spread is irrelevant.
+    if not will_use_maker:
+        estimates = slippage.get("estimates", []) if slippage else []
+        if estimates:
+            slippage_pct = estimates[0].get("slippage_pct", 0)
+            # Edge-proportional: high-edge trades tolerate worse liquidity.
+            # Use max(base, edge*ratio) so high-edge widens the threshold.
+            user_edge_val = edge.get("user_edge", 0) if edge else 0
+            if user_edge_val and config.slippage_edge_ratio > 0:
+                edge_based = abs(user_edge_val) * config.slippage_edge_ratio
+                effective_threshold = max(config.slippage_max_pct, edge_based)
+            else:
+                effective_threshold = config.slippage_max_pct
+            if slippage_pct > effective_threshold:
+                return False, [f"Slippage too high: {slippage_pct:.1%} (threshold {effective_threshold:.1%})"]
 
     # Edge recommendation
     if use_edge and edge:
@@ -1271,10 +1274,12 @@ async def run_weather_strategy(
                     logger.info("  [EXPLAIN] Filtered: YES price $%.2f > threshold $%.2f", price, config.entry_threshold)
                 continue
 
-            # Safeguards
+            # Safeguards — detect likely maker path so slippage check is skipped
             if use_safeguards:
+                gm_ctx = client._market_cache.get(market_id)
+                likely_maker = (gm_ctx and gm_ctx.spread >= config.maker_spread_threshold) if gm_ctx else False
                 context = client.get_market_context(market_id, my_probability=prob)
-                should_trade, reasons = check_context_safeguards(context, config)
+                should_trade, reasons = check_context_safeguards(context, config, will_use_maker=likely_maker)
                 if not should_trade:
                     logger.info("Safeguard blocked: %s", "; ".join(reasons))
                     if explain:

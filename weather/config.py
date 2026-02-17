@@ -88,7 +88,7 @@ class Config:
     dynamic_exits: bool = True
 
     # Context safeguards
-    slippage_max_pct: float = 0.15
+    slippage_max_pct: float = 0.25
     time_to_resolution_min_hours: int = 2
 
     # Multi-source forecasting (Open-Meteo)

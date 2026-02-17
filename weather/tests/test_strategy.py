@@ -69,11 +69,23 @@ class TestCheckContextSafeguards(unittest.TestCase):
             "warnings": [],
             "market": {},
             "discipline": {},
-            "slippage": {"estimates": [{"slippage_pct": 0.20}]},
+            "slippage": {"estimates": [{"slippage_pct": 0.30}]},
             "edge": {},
         }
         ok, _ = check_context_safeguards(ctx, Config())
         self.assertFalse(ok)
+
+    def test_slippage_skipped_for_maker(self):
+        """Maker orders bypass slippage check entirely."""
+        ctx = {
+            "warnings": [],
+            "market": {},
+            "discipline": {},
+            "slippage": {"estimates": [{"slippage_pct": 0.90}]},
+            "edge": {},
+        }
+        ok, _ = check_context_safeguards(ctx, Config(), will_use_maker=True)
+        self.assertTrue(ok)
 
 
 class TestScoreBuckets(unittest.TestCase):
@@ -1009,29 +1021,41 @@ class TestAdaptiveSlippage(unittest.TestCase):
         ok, reasons = check_context_safeguards(context, config)
         assert ok  # 10% < 12.5%
 
-    def test_adaptive_slippage_low_edge_blocked(self):
-        """Low-edge trade has low slippage tolerance."""
+    def test_adaptive_slippage_low_edge_uses_base(self):
+        """Low-edge trade uses base threshold (not lowered)."""
         from weather.strategy import check_context_safeguards
         from weather.config import Config
         config = Config(slippage_max_pct=0.15, slippage_edge_ratio=0.5)
         context = {
             "slippage": {"estimates": [{"slippage_pct": 0.10}]},
-            "edge": {"user_edge": 0.05},  # 5% edge -> threshold = 2.5%
+            "edge": {"user_edge": 0.05},  # 5% edge -> edge_based=2.5%, max(15%, 2.5%)=15%
         }
         ok, reasons = check_context_safeguards(context, config)
-        assert not ok  # 10% > 2.5%
+        assert ok  # 10% < 15% (base threshold)
 
-    def test_adaptive_slippage_capped_at_max(self):
-        """Adaptive threshold never exceeds slippage_max_pct."""
+    def test_adaptive_slippage_low_edge_blocked_above_base(self):
+        """Slippage above base threshold blocks even with low edge."""
         from weather.strategy import check_context_safeguards
         from weather.config import Config
         config = Config(slippage_max_pct=0.15, slippage_edge_ratio=0.5)
         context = {
-            "slippage": {"estimates": [{"slippage_pct": 0.14}]},
-            "edge": {"user_edge": 0.50},  # 50% edge -> 25%, capped at 15%
+            "slippage": {"estimates": [{"slippage_pct": 0.20}]},
+            "edge": {"user_edge": 0.05},  # 5% edge -> max(15%, 2.5%)=15%
         }
         ok, reasons = check_context_safeguards(context, config)
-        assert ok  # 14% < 15%
+        assert not ok  # 20% > 15%
+
+    def test_adaptive_slippage_high_edge_widens_threshold(self):
+        """High-edge trade widens threshold beyond base."""
+        from weather.strategy import check_context_safeguards
+        from weather.config import Config
+        config = Config(slippage_max_pct=0.15, slippage_edge_ratio=0.5)
+        context = {
+            "slippage": {"estimates": [{"slippage_pct": 0.20}]},
+            "edge": {"user_edge": 0.50},  # 50% edge -> edge_based=25%, max(15%, 25%)=25%
+        }
+        ok, reasons = check_context_safeguards(context, config)
+        assert ok  # 20% < 25% (widened by edge)
 
     def test_adaptive_slippage_no_edge_uses_fixed(self):
         """Without edge data, falls back to fixed threshold."""

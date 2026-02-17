@@ -93,16 +93,16 @@ class TestAdaptiveSlippageIntegration:
         ok, _ = check_context_safeguards(context, config)
         assert ok
 
-    def test_low_edge_blocks_slippage(self):
+    def test_low_edge_uses_base_threshold(self):
         from weather.strategy import check_context_safeguards
         config = Config(slippage_max_pct=0.15, slippage_edge_ratio=0.5)
-        # 5% edge → 2.5% adaptive threshold
+        # 5% edge → max(15%, 2.5%) = 15% base threshold
         context = {
-            "slippage": {"estimates": [{"slippage_pct": 0.10}]},
+            "slippage": {"estimates": [{"slippage_pct": 0.20}]},
             "edge": {"user_edge": 0.05},
         }
         ok, _ = check_context_safeguards(context, config)
-        assert not ok
+        assert not ok  # 20% > 15%
 
 
 class TestCorrelationIntegration:
