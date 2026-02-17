@@ -1,79 +1,64 @@
-"""NOAA Weather API client with retry and exponential backoff."""
+"""NOAA Weather API client — async with disk cache."""
+
+from __future__ import annotations
 
 import json
 import logging
-import random
+import os
+import tempfile
 import time
-from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
+from pathlib import Path
 
-from ._ssl import SSL_CTX as _SSL_CTX
+from .http_client import fetch_json
 
 logger = logging.getLogger(__name__)
 
 NOAA_API_BASE = "https://api.weather.gov"
 _USER_AGENT = "WeatherGully/1.0"
 
-_RETRYABLE_CODES = {429, 500, 502, 503, 504}
+_CACHE_DIR = Path(__file__).parent / "cache" / "noaa"
+_DEFAULT_TTL = 900  # 15 min
 
 
-def _fetch_json(
-    url: str,
-    headers: dict | None = None,
-    max_retries: int = 3,
-    base_delay: float = 1.0,
-) -> dict | None:
-    """Fetch JSON from *url* with retry on transient errors."""
-    hdrs = {"User-Agent": _USER_AGENT, "Accept": "application/geo+json"}
-    if headers:
-        hdrs.update(headers)
+def _cache_path(cache_dir: Path, lat: float, lon: float) -> Path:
+    return cache_dir / f"{lat:.2f}_{lon:.2f}.json"
 
-    for attempt in range(max_retries + 1):
+
+def _read_cache(path: Path, ttl: int) -> dict | None:
+    try:
+        if not path.exists():
+            return None
+        age = time.time() - path.stat().st_mtime
+        if age > ttl:
+            return None
+        with open(path) as f:
+            return json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return None
+
+
+def _write_cache(path: Path, data: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(data, f)
+        os.replace(tmp, str(path))
+    except BaseException:
         try:
-            req = Request(url, headers=hdrs)
-            with urlopen(req, timeout=30, context=_SSL_CTX) as resp:
-                return json.loads(resp.read().decode())
-        except HTTPError as exc:
-            if exc.code in _RETRYABLE_CODES and attempt < max_retries:
-                delay = base_delay * (2 ** attempt) * (0.5 + random.random())
-                logger.warning(
-                    "NOAA HTTP %d on %s — retry %d/%d in %.1fs",
-                    exc.code, url, attempt + 1, max_retries, delay,
-                )
-                time.sleep(delay)
-                continue
-            logger.error("NOAA HTTP %d: %s", exc.code, url)
-            return None
-        except URLError as exc:
-            if attempt < max_retries:
-                delay = base_delay * (2 ** attempt) * (0.5 + random.random())
-                logger.warning(
-                    "NOAA URL error %s — retry %d/%d in %.1fs",
-                    exc.reason, attempt + 1, max_retries, delay,
-                )
-                time.sleep(delay)
-                continue
-            logger.error("NOAA URL error: %s", exc.reason)
-            return None
-        except TimeoutError:
-            if attempt < max_retries:
-                delay = base_delay * (2 ** attempt) * (0.5 + random.random())
-                logger.warning(
-                    "NOAA timeout on %s — retry %d/%d in %.1fs",
-                    url, attempt + 1, max_retries, delay,
-                )
-                time.sleep(delay)
-                continue
-            logger.error("NOAA timeout: %s", url)
-            return None
-    return None
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
 
-def get_noaa_forecast(
+async def get_noaa_forecast(
     location: str,
     locations: dict,
     max_retries: int = 3,
     base_delay: float = 1.0,
+    cache_ttl: int = _DEFAULT_TTL,
+    cache_dir: Path | None = None,
 ) -> dict[str, dict]:
     """Get NOAA forecast for a location.
 
@@ -82,6 +67,8 @@ def get_noaa_forecast(
         locations: ``LOCATIONS`` dict from config.
         max_retries: Number of retries on transient failures.
         base_delay: Base delay for exponential backoff.
+        cache_ttl: Cache time-to-live in seconds (default 900).
+        cache_dir: Override cache directory (useful for tests).
 
     Returns:
         ``{date_str: {"high": int|None, "low": int|None}}``
@@ -91,8 +78,23 @@ def get_noaa_forecast(
         return {}
 
     loc = locations[location]
-    points_url = f"{NOAA_API_BASE}/points/{loc['lat']},{loc['lon']}"
-    points_data = _fetch_json(points_url, max_retries=max_retries, base_delay=base_delay)
+    lat, lon = loc["lat"], loc["lon"]
+
+    # --- cache check ---
+    cdir = cache_dir or _CACHE_DIR
+    cp = _cache_path(cdir, lat, lon)
+    cached = _read_cache(cp, cache_ttl)
+    if cached is not None:
+        logger.debug("NOAA cache hit for %s (%.2f,%.2f)", location, lat, lon)
+        return cached
+
+    # --- points lookup ---
+    headers = {"User-Agent": _USER_AGENT, "Accept": "application/geo+json"}
+    points_url = f"{NOAA_API_BASE}/points/{lat},{lon}"
+    points_data = await fetch_json(
+        points_url, headers=headers,
+        max_retries=max_retries, base_delay=base_delay,
+    )
 
     if not points_data or "properties" not in points_data:
         logger.error("Failed to get NOAA grid for %s", location)
@@ -103,7 +105,11 @@ def get_noaa_forecast(
         logger.error("No forecast URL for %s", location)
         return {}
 
-    forecast_data = _fetch_json(forecast_url, max_retries=max_retries, base_delay=base_delay)
+    # --- forecast fetch ---
+    forecast_data = await fetch_json(
+        forecast_url, headers=headers,
+        max_retries=max_retries, base_delay=base_delay,
+    )
     if not forecast_data or "properties" not in forecast_data:
         logger.error("Failed to get NOAA forecast for %s", location)
         return {}
@@ -127,6 +133,10 @@ def get_noaa_forecast(
             forecasts[date_str]["high"] = temp
         else:
             forecasts[date_str]["low"] = temp
+
+    # --- cache write ---
+    if forecasts:
+        _write_cache(cp, forecasts)
 
     logger.info("NOAA forecast for %s: %d days", location, len(forecasts))
     return forecasts
