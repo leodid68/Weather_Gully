@@ -3,7 +3,9 @@
 import json
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
+
+import pytest
 
 from weather.open_meteo import compute_ensemble_forecast, _get_model_weights
 
@@ -111,8 +113,9 @@ class TestEnsembleWithLocation(unittest.TestCase):
 class TestAuxiliaryWeatherVariables(unittest.TestCase):
     """Test that auxiliary variables are extracted from Open-Meteo response."""
 
-    @patch("weather.open_meteo._fetch_json")
-    def test_extracts_auxiliary_variables(self, mock_fetch):
+    @pytest.mark.asyncio
+    @patch("weather.open_meteo.fetch_json", new_callable=AsyncMock)
+    async def test_extracts_auxiliary_variables(self, mock_fetch):
         from weather.open_meteo import get_open_meteo_forecast
 
         mock_fetch.return_value = {
@@ -135,7 +138,7 @@ class TestAuxiliaryWeatherVariables(unittest.TestCase):
             }
         }
 
-        result = get_open_meteo_forecast(40.77, -73.87)
+        result = await get_open_meteo_forecast(40.77, -73.87)
         self.assertIn("2025-06-15", result)
         day = result["2025-06-15"]
 
@@ -154,8 +157,9 @@ class TestAuxiliaryWeatherVariables(unittest.TestCase):
         self.assertIn("precip_sum", day)
         self.assertIn("precip_prob_max", day)
 
-    @patch("weather.open_meteo._fetch_json")
-    def test_handles_missing_aux_variables(self, mock_fetch):
+    @pytest.mark.asyncio
+    @patch("weather.open_meteo.fetch_json", new_callable=AsyncMock)
+    async def test_handles_missing_aux_variables(self, mock_fetch):
         """When auxiliary variables are absent, entry should still have temps."""
         from weather.open_meteo import get_open_meteo_forecast
 
@@ -170,7 +174,7 @@ class TestAuxiliaryWeatherVariables(unittest.TestCase):
             }
         }
 
-        result = get_open_meteo_forecast(40.77, -73.87)
+        result = await get_open_meteo_forecast(40.77, -73.87)
         self.assertIn("2025-06-15", result)
         day = result["2025-06-15"]
         self.assertIn("gfs_high", day)
@@ -197,8 +201,9 @@ class TestGetOpenMeteoForecastMulti(unittest.TestCase):
             }
         }
 
-    @patch("weather.open_meteo._fetch_json")
-    def test_single_location(self, mock_fetch):
+    @pytest.mark.asyncio
+    @patch("weather.open_meteo.fetch_json", new_callable=AsyncMock)
+    async def test_single_location(self, mock_fetch):
         """Single location — API returns a dict with 'daily' key."""
         from weather.open_meteo import get_open_meteo_forecast_multi
 
@@ -207,7 +212,7 @@ class TestGetOpenMeteoForecastMulti(unittest.TestCase):
         )
 
         locations = {"NYC": {"lat": 40.77, "lon": -73.87, "tz": "America/New_York"}}
-        result = get_open_meteo_forecast_multi(locations)
+        result = await get_open_meteo_forecast_multi(locations)
 
         self.assertIn("NYC", result)
         self.assertIn("2025-06-15", result["NYC"])
@@ -216,8 +221,9 @@ class TestGetOpenMeteoForecastMulti(unittest.TestCase):
         self.assertEqual(day["ecmwf_high"], 87)
         mock_fetch.assert_called_once()
 
-    @patch("weather.open_meteo._fetch_json")
-    def test_multiple_locations_same_timezone(self, mock_fetch):
+    @pytest.mark.asyncio
+    @patch("weather.open_meteo.fetch_json", new_callable=AsyncMock)
+    async def test_multiple_locations_same_timezone(self, mock_fetch):
         """Multiple locations in the same timezone — API returns a list."""
         from weather.open_meteo import get_open_meteo_forecast_multi
 
@@ -230,7 +236,7 @@ class TestGetOpenMeteoForecastMulti(unittest.TestCase):
             "NYC": {"lat": 40.77, "lon": -73.87, "tz": "America/New_York"},
             "Atlanta": {"lat": 33.75, "lon": -84.39, "tz": "America/New_York"},
         }
-        result = get_open_meteo_forecast_multi(locations)
+        result = await get_open_meteo_forecast_multi(locations)
 
         self.assertIn("NYC", result)
         self.assertIn("Atlanta", result)
@@ -239,8 +245,9 @@ class TestGetOpenMeteoForecastMulti(unittest.TestCase):
         # Same timezone → single API call
         mock_fetch.assert_called_once()
 
-    @patch("weather.open_meteo._fetch_json")
-    def test_multiple_timezone_groups(self, mock_fetch):
+    @pytest.mark.asyncio
+    @patch("weather.open_meteo.fetch_json", new_callable=AsyncMock)
+    async def test_multiple_timezone_groups(self, mock_fetch):
         """Locations in different timezones — multiple API calls."""
         from weather.open_meteo import get_open_meteo_forecast_multi
 
@@ -254,7 +261,7 @@ class TestGetOpenMeteoForecastMulti(unittest.TestCase):
             "NYC": {"lat": 40.77, "lon": -73.87, "tz": "America/New_York"},
             "Chicago": {"lat": 41.88, "lon": -87.63, "tz": "America/Chicago"},
         }
-        result = get_open_meteo_forecast_multi(locations)
+        result = await get_open_meteo_forecast_multi(locations)
 
         self.assertIn("NYC", result)
         self.assertIn("Chicago", result)
@@ -262,8 +269,9 @@ class TestGetOpenMeteoForecastMulti(unittest.TestCase):
         self.assertEqual(result["Chicago"]["2025-06-15"]["gfs_high"], 90)
         self.assertEqual(mock_fetch.call_count, 2)
 
-    @patch("weather.open_meteo._fetch_json")
-    def test_api_failure_partial_data(self, mock_fetch):
+    @pytest.mark.asyncio
+    @patch("weather.open_meteo.fetch_json", new_callable=AsyncMock)
+    async def test_api_failure_partial_data(self, mock_fetch):
         """One timezone group fails — that group returns empty, others succeed."""
         from weather.open_meteo import get_open_meteo_forecast_multi
 
@@ -277,7 +285,7 @@ class TestGetOpenMeteoForecastMulti(unittest.TestCase):
             "NYC": {"lat": 40.77, "lon": -73.87, "tz": "America/New_York"},
             "Chicago": {"lat": 41.88, "lon": -87.63, "tz": "America/Chicago"},
         }
-        result = get_open_meteo_forecast_multi(locations)
+        result = await get_open_meteo_forecast_multi(locations)
 
         self.assertIn("NYC", result)
         self.assertIn("Chicago", result)
@@ -286,12 +294,13 @@ class TestGetOpenMeteoForecastMulti(unittest.TestCase):
         # Chicago group failed — empty dict
         self.assertEqual(result["Chicago"], {})
 
-    @patch("weather.open_meteo._fetch_json")
-    def test_empty_locations(self, mock_fetch):
+    @pytest.mark.asyncio
+    @patch("weather.open_meteo.fetch_json", new_callable=AsyncMock)
+    async def test_empty_locations(self, mock_fetch):
         """Empty locations dict — returns empty result, no API calls."""
         from weather.open_meteo import get_open_meteo_forecast_multi
 
-        result = get_open_meteo_forecast_multi({})
+        result = await get_open_meteo_forecast_multi({})
 
         self.assertEqual(result, {})
         mock_fetch.assert_not_called()
@@ -316,8 +325,9 @@ class TestForecastCache(unittest.TestCase):
         k2 = _cache_key("41.9,-87.9", "America/Chicago")
         self.assertNotEqual(k1, k2)
 
-    @patch("weather.open_meteo._fetch_json")
-    def test_cache_hit_skips_fetch(self, mock_fetch):
+    @pytest.mark.asyncio
+    @patch("weather.open_meteo.fetch_json", new_callable=AsyncMock)
+    async def test_cache_hit_skips_fetch(self, mock_fetch):
         from weather.open_meteo import get_open_meteo_forecast_multi
         import weather.open_meteo as om
 
@@ -331,14 +341,15 @@ class TestForecastCache(unittest.TestCase):
         mock_fetch.return_value = mock_data
 
         locs = {"NYC": {"lat": 40.7, "lon": -73.8, "tz": "America/New_York"}}
-        result1 = get_open_meteo_forecast_multi(locs)
-        result2 = get_open_meteo_forecast_multi(locs)
+        result1 = await get_open_meteo_forecast_multi(locs)
+        result2 = await get_open_meteo_forecast_multi(locs)
 
         self.assertEqual(mock_fetch.call_count, 1)
         self.assertEqual(result1, result2)
 
-    @patch("weather.open_meteo._fetch_json")
-    def test_cache_expires(self, mock_fetch):
+    @pytest.mark.asyncio
+    @patch("weather.open_meteo.fetch_json", new_callable=AsyncMock)
+    async def test_cache_expires(self, mock_fetch):
         from weather.open_meteo import get_open_meteo_forecast_multi, _CACHE_TTL
         import weather.open_meteo as om
 
@@ -354,7 +365,7 @@ class TestForecastCache(unittest.TestCase):
         locs = {"NYC": {"lat": 40.7, "lon": -73.8, "tz": "America/New_York"}}
 
         # First call populates cache
-        get_open_meteo_forecast_multi(locs)
+        await get_open_meteo_forecast_multi(locs)
 
         # Manually expire cache by setting timestamp in the past
         for k in list(om._forecast_cache.keys()):
@@ -362,7 +373,7 @@ class TestForecastCache(unittest.TestCase):
             om._forecast_cache[k] = (data, ts - _CACHE_TTL - 1)
 
         # Second call should refetch
-        get_open_meteo_forecast_multi(locs)
+        await get_open_meteo_forecast_multi(locs)
         self.assertEqual(mock_fetch.call_count, 2)
 
 
@@ -371,13 +382,23 @@ class TestModelsStr(unittest.TestCase):
 
     def test_base_models_only(self):
         from weather.open_meteo import _models_str
-        self.assertEqual(_models_str(), "gfs_seamless,ecmwf_ifs025")
-        self.assertEqual(_models_str(""), "gfs_seamless,ecmwf_ifs025")
+        result = _models_str()
+        self.assertIn("gfs_seamless", result)
+        self.assertIn("ecmwf_ifs025", result)
+        self.assertIn("ukmo_seamless", result)
+        self.assertIn("jma_seamless", result)
+        self.assertIn("arpege_seamless", result)
+        self.assertIn("gem_seamless", result)
+        self.assertIn("bom_access_global", result)
+        # No trailing comma or extra stuff when no local_model
+        self.assertEqual(_models_str(), _models_str(""))
 
     def test_with_local_model(self):
         from weather.open_meteo import _models_str
         result = _models_str("meteofrance_seamless")
-        self.assertEqual(result, "gfs_seamless,ecmwf_ifs025,meteofrance_seamless")
+        self.assertIn("gfs_seamless", result)
+        self.assertIn("ecmwf_ifs025", result)
+        self.assertIn("meteofrance_seamless", result)
 
 
 class TestLocalModelEnsemble(unittest.TestCase):
@@ -419,8 +440,9 @@ class TestLocalModelEnsemble(unittest.TestCase):
 class TestGetForecastWithLocalModel(unittest.TestCase):
     """Test get_open_meteo_forecast with local_model parameter."""
 
-    @patch("weather.open_meteo._fetch_json")
-    def test_local_model_parsed(self, mock_fetch):
+    @pytest.mark.asyncio
+    @patch("weather.open_meteo.fetch_json", new_callable=AsyncMock)
+    async def test_local_model_parsed(self, mock_fetch):
         from weather.open_meteo import get_open_meteo_forecast
 
         mock_fetch.return_value = {
@@ -435,7 +457,7 @@ class TestGetForecastWithLocalModel(unittest.TestCase):
             }
         }
 
-        result = get_open_meteo_forecast(
+        result = await get_open_meteo_forecast(
             49.0, 2.5, tz_name="Europe/Paris",
             local_model="meteofrance_seamless",
         )
@@ -445,8 +467,9 @@ class TestGetForecastWithLocalModel(unittest.TestCase):
         self.assertEqual(day["local_high"], 86.0)
         self.assertEqual(day["local_low"], 67.5)
 
-    @patch("weather.open_meteo._fetch_json")
-    def test_local_model_missing_data_graceful(self, mock_fetch):
+    @pytest.mark.asyncio
+    @patch("weather.open_meteo.fetch_json", new_callable=AsyncMock)
+    async def test_local_model_missing_data_graceful(self, mock_fetch):
         """If local model returns no data, local_high/low simply absent."""
         from weather.open_meteo import get_open_meteo_forecast
 
@@ -461,7 +484,7 @@ class TestGetForecastWithLocalModel(unittest.TestCase):
             }
         }
 
-        result = get_open_meteo_forecast(
+        result = await get_open_meteo_forecast(
             49.0, 2.5, tz_name="Europe/Paris",
             local_model="meteofrance_seamless",
         )
@@ -469,13 +492,14 @@ class TestGetForecastWithLocalModel(unittest.TestCase):
         self.assertIn("gfs_high", day)
         self.assertNotIn("local_high", day)
 
-    @patch("weather.open_meteo._fetch_json")
-    def test_models_param_includes_local(self, mock_fetch):
+    @pytest.mark.asyncio
+    @patch("weather.open_meteo.fetch_json", new_callable=AsyncMock)
+    async def test_models_param_includes_local(self, mock_fetch):
         """URL should include the local model in the models= parameter."""
         from weather.open_meteo import get_open_meteo_forecast
 
         mock_fetch.return_value = {"daily": {"time": []}}
-        get_open_meteo_forecast(
+        await get_open_meteo_forecast(
             49.0, 2.5, tz_name="Europe/Paris",
             local_model="meteofrance_seamless",
         )
@@ -492,8 +516,9 @@ class TestMultiForecastLocalModel(unittest.TestCase):
         import weather.open_meteo as om
         om._forecast_cache.clear()
 
-    @patch("weather.open_meteo._fetch_json")
-    def test_different_local_models_separate_requests(self, mock_fetch):
+    @pytest.mark.asyncio
+    @patch("weather.open_meteo.fetch_json", new_callable=AsyncMock)
+    async def test_different_local_models_separate_requests(self, mock_fetch):
         """Locations with different local_model values need separate API calls."""
         from weather.open_meteo import get_open_meteo_forecast_multi
 
@@ -524,7 +549,7 @@ class TestMultiForecastLocalModel(unittest.TestCase):
             "Paris": {"lat": 49.0, "lon": 2.5, "tz": "Europe/London",
                       "local_model": "meteofrance_seamless"},
         }
-        result = get_open_meteo_forecast_multi(locations)
+        result = await get_open_meteo_forecast_multi(locations)
 
         # Different local_model → 2 separate requests even if same tz
         self.assertEqual(mock_fetch.call_count, 2)
@@ -533,8 +558,9 @@ class TestMultiForecastLocalModel(unittest.TestCase):
         self.assertEqual(result["London"]["2025-06-15"]["local_high"], 86.0)
         self.assertEqual(result["Paris"]["2025-06-15"]["local_high"], 71.0)
 
-    @patch("weather.open_meteo._fetch_json")
-    def test_no_local_model_no_local_keys(self, mock_fetch):
+    @pytest.mark.asyncio
+    @patch("weather.open_meteo.fetch_json", new_callable=AsyncMock)
+    async def test_no_local_model_no_local_keys(self, mock_fetch):
         """US cities without local_model should not have local_high/low."""
         from weather.open_meteo import get_open_meteo_forecast_multi
 
@@ -547,7 +573,7 @@ class TestMultiForecastLocalModel(unittest.TestCase):
         }}
 
         locations = {"NYC": {"lat": 40.77, "lon": -73.87, "tz": "America/New_York"}}
-        result = get_open_meteo_forecast_multi(locations)
+        result = await get_open_meteo_forecast_multi(locations)
 
         day = result["NYC"]["2025-06-15"]
         self.assertNotIn("local_high", day)

@@ -4,15 +4,11 @@ Fetches GFS, ECMWF and optional regional NWP model forecasts
 and returns a combined/ensemble view.
 """
 
-import json
 import logging
-import random
 import time
 from pathlib import Path
-from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
 
-from ._ssl import SSL_CTX as _SSL_CTX
+from .http_client import fetch_json
 
 logger = logging.getLogger(__name__)
 
@@ -52,7 +48,10 @@ def _get_model_weights(location: str = "") -> dict[str, float]:
                 return loc_weights
     return MODEL_WEIGHTS
 
-_BASE_MODELS = "gfs_seamless,ecmwf_ifs025"
+_BASE_MODELS = (
+    "gfs_seamless,ecmwf_ifs025,"
+    "ukmo_seamless,jma_seamless,arpege_seamless,gem_seamless,bom_access_global"
+)
 
 
 def _models_str(local_model: str = "") -> str:
@@ -62,35 +61,7 @@ def _models_str(local_model: str = "") -> str:
     return _BASE_MODELS
 
 
-_USER_AGENT = "WeatherGully/1.0"
-
-
-def _fetch_json(url: str, max_retries: int = 3, base_delay: float = 1.0) -> dict | None:
-    """Fetch JSON with retry."""
-    for attempt in range(max_retries + 1):
-        try:
-            req = Request(url, headers={
-                "Accept": "application/json",
-                "User-Agent": _USER_AGENT,
-            })
-            with urlopen(req, timeout=30, context=_SSL_CTX) as resp:
-                return json.loads(resp.read().decode())
-        except (HTTPError, URLError, TimeoutError) as exc:
-            if attempt < max_retries:
-                delay = base_delay * (2 ** attempt) * (0.5 + random.random())
-                logger.warning("Open-Meteo error — retry %d/%d in %.1fs: %s",
-                               attempt + 1, max_retries, delay, exc)
-                time.sleep(delay)
-                continue
-            logger.error("Open-Meteo failed after %d retries: %s", max_retries, exc)
-            return None
-        except json.JSONDecodeError as exc:
-            logger.error("Open-Meteo JSON parse error: %s", exc)
-            return None
-    return None
-
-
-def get_open_meteo_forecast(
+async def get_open_meteo_forecast(
     lat: float,
     lon: float,
     max_retries: int = 3,
@@ -132,7 +103,7 @@ def get_open_meteo_forecast(
         f"&forecast_days=10"
     )
 
-    data = _fetch_json(url, max_retries=max_retries, base_delay=base_delay)
+    data = await fetch_json(url, max_retries=max_retries, base_delay=base_delay)
     if not data or "daily" not in data:
         logger.error("Open-Meteo returned no daily data")
         return {}
@@ -161,6 +132,16 @@ def get_open_meteo_forecast(
         if ecmwf_low is not None:
             entry["ecmwf_low"] = round(ecmwf_low, 1)
 
+        # Additional global models
+        for model_name in ("ukmo_seamless", "jma_seamless", "arpege_seamless",
+                           "gem_seamless", "bom_access_global"):
+            m_high = _safe_get(daily, f"temperature_2m_max_{model_name}", i)
+            m_low = _safe_get(daily, f"temperature_2m_min_{model_name}", i)
+            if m_high is not None:
+                entry[f"{model_name}_high"] = round(m_high, 1)
+            if m_low is not None:
+                entry[f"{model_name}_low"] = round(m_low, 1)
+
         # Regional NWP model (international cities)
         if local_model:
             local_high = _safe_get(daily, f"temperature_2m_max_{local_model}", i)
@@ -171,7 +152,9 @@ def get_open_meteo_forecast(
                 entry["local_low"] = round(local_low, 1)
 
         # Auxiliary weather variables (average across models where applicable)
-        model_suffixes = ["_gfs_seamless", "_ecmwf_ifs025"]
+        model_suffixes = ["_gfs_seamless", "_ecmwf_ifs025",
+                          "_ukmo_seamless", "_jma_seamless", "_arpege_seamless",
+                          "_gem_seamless", "_bom_access_global"]
         if local_model:
             model_suffixes.append(f"_{local_model}")
         for aux_key, entry_key in [
@@ -206,7 +189,7 @@ def get_open_meteo_forecast(
     return forecasts
 
 
-def get_open_meteo_forecast_multi(
+async def get_open_meteo_forecast_multi(
     locations: dict[str, dict],
     max_retries: int = 3,
     base_delay: float = 1.0,
@@ -268,7 +251,7 @@ def get_open_meteo_forecast_multi(
             f"&forecast_days=10"
         )
 
-        data = _fetch_json(url, max_retries=max_retries, base_delay=base_delay)
+        data = await fetch_json(url, max_retries=max_retries, base_delay=base_delay)
         if not data:
             for name, _ in group:
                 result[name] = {}
@@ -312,6 +295,16 @@ def get_open_meteo_forecast_multi(
                 if ecmwf_low is not None:
                     entry["ecmwf_low"] = round(ecmwf_low, 1)
 
+                # Additional global models
+                for model_name in ("ukmo_seamless", "jma_seamless", "arpege_seamless",
+                                   "gem_seamless", "bom_access_global"):
+                    m_high = _safe_get(daily, f"temperature_2m_max_{model_name}", i)
+                    m_low = _safe_get(daily, f"temperature_2m_min_{model_name}", i)
+                    if m_high is not None:
+                        entry[f"{model_name}_high"] = round(m_high, 1)
+                    if m_low is not None:
+                        entry[f"{model_name}_low"] = round(m_low, 1)
+
                 # Regional NWP model
                 if local_model:
                     lm_high = _safe_get(daily, f"temperature_2m_max_{local_model}", i)
@@ -321,7 +314,9 @@ def get_open_meteo_forecast_multi(
                     if lm_low is not None:
                         entry["local_low"] = round(lm_low, 1)
 
-                model_suffixes = ["_gfs_seamless", "_ecmwf_ifs025"]
+                model_suffixes = ["_gfs_seamless", "_ecmwf_ifs025",
+                                  "_ukmo_seamless", "_jma_seamless", "_arpege_seamless",
+                                  "_gem_seamless", "_bom_access_global"]
                 if local_model:
                     model_suffixes.append(f"_{local_model}")
                 for aux_key, entry_key in [
