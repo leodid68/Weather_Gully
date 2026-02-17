@@ -819,6 +819,24 @@ def run_weather_strategy(
         state.save(save_path)
         return
 
+    # Auto-cleanup expired positions
+    today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    stale_ids = [
+        mid for mid, t in state.trades.items()
+        if t.forecast_date and t.forecast_date < today_str
+    ]
+    if stale_ids:
+        for mid in stale_ids:
+            trade = state.trades[mid]
+            logger.warning(
+                "Removing expired position: %s %s (date %s < %s)",
+                trade.location, trade.outcome_name[:40], trade.forecast_date, today_str,
+            )
+            if trade.event_id:
+                state.remove_event_position_market(trade.event_id, mid)
+            state.remove_trade(mid)
+        logger.info("Cleaned up %d expired position(s)", len(stale_ids))
+
     # Sync bridge exposure from persisted state
     client.sync_exposure_from_state(state.trades)
 
