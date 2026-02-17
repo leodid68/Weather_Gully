@@ -41,7 +41,7 @@
   "ar_autocorrelation": true,
   "kalman_sigma": true,
   "mean_reversion": true,
-  "maker_edge_threshold": 0.05,
+  "maker_edge_threshold": 0.02,
   "maker_spread_threshold": 0.10,
   "maker_ttl_seconds": 900,
   "maker_tick_buffer": 1
