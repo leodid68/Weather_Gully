@@ -6,6 +6,7 @@ routing all operations through the Polymarket CLOB and Gamma APIs.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from datetime import datetime, timezone
@@ -124,14 +125,14 @@ class CLOBWeatherBridge:
     # Markets
     # ------------------------------------------------------------------
 
-    def fetch_weather_markets(self) -> list[dict]:
+    async def fetch_weather_markets(self) -> list[dict]:
         """Fetch active weather markets via Gamma API.
 
         Returns list of dicts compatible with the weather strategy:
             {id, event_id, event_name, outcome_name, external_price_yes,
              token_id_yes, token_id_no, end_date, best_bid, best_ask, status}
         """
-        events, gamma_markets = self.gamma.fetch_events_with_markets(
+        events, gamma_markets = await self.gamma.fetch_events_with_markets(
             tag_slug="weather", limit=100,
         )
 
@@ -256,7 +257,7 @@ class CLOBWeatherBridge:
     # Fill verification
     # ------------------------------------------------------------------
 
-    def verify_fill(
+    async def verify_fill(
         self,
         order_id: str,
         timeout_seconds: float = 30.0,
@@ -275,9 +276,9 @@ class CLOBWeatherBridge:
 
         while time.monotonic() < deadline:
             try:
-                order = self.clob.get_order(order_id)
+                order = await self.clob.get_order(order_id)
                 if not order:
-                    time.sleep(poll_interval)
+                    await asyncio.sleep(poll_interval)
                     continue
 
                 last_status = order.get("status", "UNKNOWN")
@@ -303,7 +304,7 @@ class CLOBWeatherBridge:
             except Exception as exc:
                 logger.debug("verify_fill poll error: %s", exc)
 
-            time.sleep(poll_interval)
+            await asyncio.sleep(poll_interval)
 
         # Timeout — check if partially filled
         return {
@@ -314,10 +315,10 @@ class CLOBWeatherBridge:
             "status": f"TIMEOUT ({last_status})",
         }
 
-    def cancel_order(self, order_id: str) -> bool:
+    async def cancel_order(self, order_id: str) -> bool:
         """Cancel an open order. Returns True if cancellation succeeded."""
         try:
-            self.clob.cancel_order(order_id)
+            await self.clob.cancel_order(order_id)
             logger.info("Cancelled order %s", order_id)
             return True
         except Exception as exc:
@@ -328,7 +329,7 @@ class CLOBWeatherBridge:
     # Trading
     # ------------------------------------------------------------------
 
-    def execute_trade(
+    async def execute_trade(
         self,
         market_id: str,
         side: str,
@@ -370,7 +371,7 @@ class CLOBWeatherBridge:
 
         # Re-fetch fresh price from orderbook
         try:
-            book = self.clob.get_orderbook(token_id)
+            book = await self.clob.get_orderbook(token_id)
             asks = book.get("asks") or []
             if asks:
                 # Depth-aware sizing: cap amount to available liquidity
@@ -415,7 +416,7 @@ class CLOBWeatherBridge:
         shares = amount / price
 
         try:
-            result = self.clob.post_order(
+            result = await self.clob.post_order(
                 token_id=token_id,
                 side="BUY",
                 price=price,
@@ -430,7 +431,7 @@ class CLOBWeatherBridge:
 
             # Fill verification
             if fill_timeout > 0 and order_id:
-                fill = self.verify_fill(order_id, fill_timeout, fill_poll_interval)
+                fill = await self.verify_fill(order_id, fill_timeout, fill_poll_interval)
                 if fill["filled"] and not fill["partial"]:
                     actual_shares = fill["size_matched"]
                     logger.info("Order %s fully filled: %.1f shares", order_id, actual_shares)
@@ -439,11 +440,11 @@ class CLOBWeatherBridge:
                     actual_shares = fill["size_matched"]
                     logger.warning("Order %s partially filled: %.1f/%.1f shares — cancelling remainder",
                                    order_id, actual_shares, fill["original_size"])
-                    self.cancel_order(order_id)
+                    await self.cancel_order(order_id)
                     shares = actual_shares
                 else:
                     logger.warning("Order %s not filled within %.1fs — cancelling", order_id, fill_timeout)
-                    self.cancel_order(order_id)
+                    await self.cancel_order(order_id)
                     return {
                         "success": False,
                         "error": f"Order not filled within {fill_timeout}s",
@@ -465,7 +466,7 @@ class CLOBWeatherBridge:
             logger.error("Bridge trade failed: %s", exc)
             return {"error": str(exc), "success": False}
 
-    def execute_sell(
+    async def execute_sell(
         self,
         market_id: str,
         shares: float,
@@ -505,7 +506,7 @@ class CLOBWeatherBridge:
 
         # Re-fetch fresh price from orderbook
         try:
-            book = self.clob.get_orderbook(token_id)
+            book = await self.clob.get_orderbook(token_id)
             bids = book.get("bids") or []
             if bids:
                 price = float(bids[0]["price"])
@@ -523,7 +524,7 @@ class CLOBWeatherBridge:
             return {"error": "Invalid bid price", "success": False}
 
         try:
-            result = self.clob.post_order(
+            result = await self.clob.post_order(
                 token_id=token_id,
                 side="SELL",
                 price=price,
@@ -539,7 +540,7 @@ class CLOBWeatherBridge:
             # Fill verification
             actual_shares = shares
             if fill_timeout > 0 and order_id:
-                fill = self.verify_fill(order_id, fill_timeout, fill_poll_interval)
+                fill = await self.verify_fill(order_id, fill_timeout, fill_poll_interval)
                 if fill["filled"] and not fill["partial"]:
                     actual_shares = fill["size_matched"]
                     logger.info("Sell order %s fully filled: %.1f shares", order_id, actual_shares)
@@ -547,10 +548,10 @@ class CLOBWeatherBridge:
                     actual_shares = fill["size_matched"]
                     logger.warning("Sell order %s partially filled: %.1f/%.1f — cancelling remainder",
                                    order_id, actual_shares, fill["original_size"])
-                    self.cancel_order(order_id)
+                    await self.cancel_order(order_id)
                 else:
                     logger.warning("Sell order %s not filled within %.1fs — cancelling", order_id, fill_timeout)
-                    self.cancel_order(order_id)
+                    await self.cancel_order(order_id)
                     return {
                         "success": False,
                         "error": f"Sell order not filled within {fill_timeout}s",
@@ -570,7 +571,7 @@ class CLOBWeatherBridge:
             logger.error("Bridge sell failed: %s", exc)
             return {"error": str(exc), "success": False}
 
-    def execute_maker_order(
+    async def execute_maker_order(
         self,
         market_id: str,
         side: str,
@@ -596,7 +597,7 @@ class CLOBWeatherBridge:
         clob_side = "BUY" if side.lower() in ("yes", "buy") else "SELL"
 
         try:
-            result = self.clob.post_order(
+            result = await self.clob.post_order(
                 token_id=token_id,
                 side=clob_side,
                 price=price,

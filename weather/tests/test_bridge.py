@@ -2,7 +2,9 @@
 
 import unittest
 from dataclasses import dataclass
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
 
 from weather.bridge import CLOBWeatherBridge
 
@@ -43,51 +45,54 @@ def _make_gamma_market(**overrides):
     return gm
 
 
-class TestFetchWeatherMarkets(unittest.TestCase):
+class TestFetchWeatherMarkets:
 
-    def test_returns_formatted_markets(self):
-        gamma = MagicMock()
+    @pytest.mark.asyncio
+    async def test_returns_formatted_markets(self):
+        gamma = AsyncMock()
         gm = _make_gamma_market()
         gamma.fetch_events_with_markets.return_value = ([], [gm])
 
-        clob = MagicMock()
+        clob = AsyncMock()
         bridge = CLOBWeatherBridge(clob_client=clob, gamma_client=gamma)
 
-        markets = bridge.fetch_weather_markets()
-        self.assertEqual(len(markets), 1)
+        markets = await bridge.fetch_weather_markets()
+        assert len(markets) == 1
         m = markets[0]
-        self.assertEqual(m["id"], "cond-1")
-        self.assertEqual(m["event_id"], "evt-1")
-        self.assertEqual(m["outcome_name"], "50-54°F")
-        self.assertAlmostEqual(m["external_price_yes"], 0.35)
-        self.assertEqual(m["token_id_yes"], "token-yes-1")
-        self.assertEqual(m["token_id_no"], "token-no-1")
-        self.assertEqual(m["status"], "active")
+        assert m["id"] == "cond-1"
+        assert m["event_id"] == "evt-1"
+        assert m["outcome_name"] == "50-54°F"
+        assert abs(m["external_price_yes"] - 0.35) < 1e-6
+        assert m["token_id_yes"] == "token-yes-1"
+        assert m["token_id_no"] == "token-no-1"
+        assert m["status"] == "active"
 
-    def test_skips_closed_markets(self):
-        gamma = MagicMock()
+    @pytest.mark.asyncio
+    async def test_skips_closed_markets(self):
+        gamma = AsyncMock()
         gm = _make_gamma_market(closed=True)
         gamma.fetch_events_with_markets.return_value = ([], [gm])
 
-        clob = MagicMock()
+        clob = AsyncMock()
         bridge = CLOBWeatherBridge(clob_client=clob, gamma_client=gamma)
 
-        markets = bridge.fetch_weather_markets()
-        self.assertEqual(len(markets), 0)
+        markets = await bridge.fetch_weather_markets()
+        assert len(markets) == 0
 
-    def test_skips_no_token_ids(self):
-        gamma = MagicMock()
+    @pytest.mark.asyncio
+    async def test_skips_no_token_ids(self):
+        gamma = AsyncMock()
         gm = _make_gamma_market(clob_token_ids=[])
         gamma.fetch_events_with_markets.return_value = ([], [gm])
 
-        clob = MagicMock()
+        clob = AsyncMock()
         bridge = CLOBWeatherBridge(clob_client=clob, gamma_client=gamma)
 
-        markets = bridge.fetch_weather_markets()
-        self.assertEqual(len(markets), 0)
+        markets = await bridge.fetch_weather_markets()
+        assert len(markets) == 0
 
 
-class TestGetPortfolio(unittest.TestCase):
+class TestGetPortfolio:
 
     def test_returns_max_exposure_as_balance(self):
         bridge = CLOBWeatherBridge(
@@ -96,20 +101,20 @@ class TestGetPortfolio(unittest.TestCase):
             max_exposure=100.0,
         )
         portfolio = bridge.get_portfolio()
-        self.assertEqual(portfolio["balance_usdc"], 100.0)
+        assert portfolio["balance_usdc"] == 100.0
 
 
-class TestGetPosition(unittest.TestCase):
+class TestGetPosition:
 
     def test_get_position_returns_none(self):
         bridge = CLOBWeatherBridge(
             clob_client=MagicMock(),
             gamma_client=MagicMock(),
         )
-        self.assertIsNone(bridge.get_position("any-id"))
+        assert bridge.get_position("any-id") is None
 
 
-class TestGetMarketContext(unittest.TestCase):
+class TestGetMarketContext:
 
     def test_returns_context_with_time(self):
         gamma = MagicMock()
@@ -121,24 +126,25 @@ class TestGetMarketContext(unittest.TestCase):
         bridge._market_cache["cond-1"] = gm
 
         context = bridge.get_market_context("cond-1")
-        self.assertIsNotNone(context)
-        self.assertIn("market", context)
-        self.assertIn("slippage", context)
-        self.assertIn("warnings", context)
+        assert context is not None
+        assert "market" in context
+        assert "slippage" in context
+        assert "warnings" in context
 
     def test_unknown_market_returns_none(self):
         bridge = CLOBWeatherBridge(
             clob_client=MagicMock(),
             gamma_client=MagicMock(),
         )
-        self.assertIsNone(bridge.get_market_context("unknown"))
+        assert bridge.get_market_context("unknown") is None
 
 
-class TestExecuteTrade(unittest.TestCase):
+class TestExecuteTrade:
 
-    def test_buy_yes(self):
+    @pytest.mark.asyncio
+    async def test_buy_yes(self):
         gamma = MagicMock()
-        clob = MagicMock()
+        clob = AsyncMock()
         clob.post_order.return_value = {"orderID": "order-123"}
         # Mock orderbook so bridge re-fetches fresh price
         clob.get_orderbook.return_value = {
@@ -150,29 +156,31 @@ class TestExecuteTrade(unittest.TestCase):
         gm = _make_gamma_market(best_ask=0.10)
         bridge._market_cache["cond-1"] = gm
 
-        result = bridge.execute_trade("cond-1", "yes", 2.00, fill_timeout=0)
-        self.assertTrue(result["success"])
-        self.assertEqual(result["trade_id"], "order-123")
-        self.assertAlmostEqual(result["shares_bought"], 2.00 / 0.10)
+        result = await bridge.execute_trade("cond-1", "yes", 2.00, fill_timeout=0)
+        assert result["success"] is True
+        assert result["trade_id"] == "order-123"
+        assert abs(result["shares_bought"] - 2.00 / 0.10) < 1e-6
 
         # Verify CLOB was called correctly
         clob.post_order.assert_called_once()
         call_kwargs = clob.post_order.call_args
-        self.assertEqual(call_kwargs[1]["token_id"], "token-yes-1")
-        self.assertEqual(call_kwargs[1]["side"], "BUY")
-        self.assertTrue(call_kwargs[1]["neg_risk"])
+        assert call_kwargs[1]["token_id"] == "token-yes-1"
+        assert call_kwargs[1]["side"] == "BUY"
+        assert call_kwargs[1]["neg_risk"] is True
 
-    def test_unknown_market(self):
+    @pytest.mark.asyncio
+    async def test_unknown_market(self):
         bridge = CLOBWeatherBridge(
-            clob_client=MagicMock(),
+            clob_client=AsyncMock(),
             gamma_client=MagicMock(),
         )
-        result = bridge.execute_trade("unknown", "yes", 1.0, fill_timeout=0)
-        self.assertFalse(result["success"])
+        result = await bridge.execute_trade("unknown", "yes", 1.0, fill_timeout=0)
+        assert result["success"] is False
 
-    def test_clob_error_handled(self):
+    @pytest.mark.asyncio
+    async def test_clob_error_handled(self):
         gamma = MagicMock()
-        clob = MagicMock()
+        clob = AsyncMock()
         clob.post_order.side_effect = Exception("Network error")
         clob.get_orderbook.return_value = {
             "asks": [{"price": "0.50", "size": "100"}],
@@ -183,16 +191,17 @@ class TestExecuteTrade(unittest.TestCase):
         gm = _make_gamma_market()
         bridge._market_cache["cond-1"] = gm
 
-        result = bridge.execute_trade("cond-1", "yes", 2.00, fill_timeout=0)
-        self.assertFalse(result["success"])
-        self.assertIn("Network error", result["error"])
+        result = await bridge.execute_trade("cond-1", "yes", 2.00, fill_timeout=0)
+        assert result["success"] is False
+        assert "Network error" in result["error"]
 
 
-class TestExecuteSell(unittest.TestCase):
+class TestExecuteSell:
 
-    def test_sell(self):
+    @pytest.mark.asyncio
+    async def test_sell(self):
         gamma = MagicMock()
-        clob = MagicMock()
+        clob = AsyncMock()
         clob.post_order.return_value = {"orderID": "sell-456"}
         clob.get_orderbook.return_value = {
             "asks": [{"price": "0.42", "size": "100"}],
@@ -203,19 +212,20 @@ class TestExecuteSell(unittest.TestCase):
         gm = _make_gamma_market(best_bid=0.40)
         bridge._market_cache["cond-1"] = gm
 
-        result = bridge.execute_sell("cond-1", 10.0, fill_timeout=0)
-        self.assertTrue(result["success"])
-        self.assertEqual(result["trade_id"], "sell-456")
+        result = await bridge.execute_sell("cond-1", 10.0, fill_timeout=0)
+        assert result["success"] is True
+        assert result["trade_id"] == "sell-456"
 
         clob.post_order.assert_called_once()
         call_kwargs = clob.post_order.call_args
-        self.assertEqual(call_kwargs[1]["side"], "SELL")
-        self.assertAlmostEqual(call_kwargs[1]["size"], 10.0)
+        assert call_kwargs[1]["side"] == "SELL"
+        assert abs(call_kwargs[1]["size"] - 10.0) < 1e-6
 
-    def test_sell_no_side_uses_no_token(self):
+    @pytest.mark.asyncio
+    async def test_sell_no_side_uses_no_token(self):
         """Selling with side='no' should use clob_token_ids[1]."""
         gamma = MagicMock()
-        clob = MagicMock()
+        clob = AsyncMock()
         clob.post_order.return_value = {"orderID": "sell-no-789"}
         clob.get_orderbook.return_value = {
             "asks": [{"price": "0.60", "size": "100"}],
@@ -226,18 +236,19 @@ class TestExecuteSell(unittest.TestCase):
         gm = _make_gamma_market(best_bid=0.58)
         bridge._market_cache["cond-1"] = gm
 
-        result = bridge.execute_sell("cond-1", 10.0, side="no", fill_timeout=0)
-        self.assertTrue(result["success"])
+        result = await bridge.execute_sell("cond-1", 10.0, side="no", fill_timeout=0)
+        assert result["success"] is True
 
         call_kwargs = clob.post_order.call_args
         # Should use the NO token (token-no-1)
-        self.assertEqual(call_kwargs[1]["token_id"], "token-no-1")
-        self.assertEqual(call_kwargs[1]["side"], "SELL")
+        assert call_kwargs[1]["token_id"] == "token-no-1"
+        assert call_kwargs[1]["side"] == "SELL"
 
-    def test_sell_yes_side_uses_yes_token(self):
+    @pytest.mark.asyncio
+    async def test_sell_yes_side_uses_yes_token(self):
         """Selling with side='yes' (default) should use clob_token_ids[0]."""
         gamma = MagicMock()
-        clob = MagicMock()
+        clob = AsyncMock()
         clob.post_order.return_value = {"orderID": "sell-yes-789"}
         clob.get_orderbook.return_value = {
             "bids": [{"price": "0.40", "size": "100"}],
@@ -247,25 +258,27 @@ class TestExecuteSell(unittest.TestCase):
         gm = _make_gamma_market(best_bid=0.40)
         bridge._market_cache["cond-1"] = gm
 
-        result = bridge.execute_sell("cond-1", 10.0, side="yes", fill_timeout=0)
-        self.assertTrue(result["success"])
+        result = await bridge.execute_sell("cond-1", 10.0, side="yes", fill_timeout=0)
+        assert result["success"] is True
 
         call_kwargs = clob.post_order.call_args
-        self.assertEqual(call_kwargs[1]["token_id"], "token-yes-1")
+        assert call_kwargs[1]["token_id"] == "token-yes-1"
 
-    def test_unknown_market(self):
+    @pytest.mark.asyncio
+    async def test_unknown_market(self):
         bridge = CLOBWeatherBridge(
-            clob_client=MagicMock(),
+            clob_client=AsyncMock(),
             gamma_client=MagicMock(),
         )
-        result = bridge.execute_sell("unknown", 10.0, fill_timeout=0)
-        self.assertFalse(result["success"])
+        result = await bridge.execute_sell("unknown", 10.0, fill_timeout=0)
+        assert result["success"] is False
 
 
-class TestVerifyFill(unittest.TestCase):
+class TestVerifyFill:
 
-    def test_filled_immediately(self):
-        clob = MagicMock()
+    @pytest.mark.asyncio
+    async def test_filled_immediately(self):
+        clob = AsyncMock()
         clob.get_order.return_value = {
             "status": "MATCHED",
             "size_matched": 20.0,
@@ -273,15 +286,16 @@ class TestVerifyFill(unittest.TestCase):
         }
 
         bridge = CLOBWeatherBridge(clob_client=clob, gamma_client=MagicMock())
-        result = bridge.verify_fill("order-1", timeout_seconds=5, poll_interval=0.1)
+        result = await bridge.verify_fill("order-1", timeout_seconds=5, poll_interval=0.1)
 
-        self.assertTrue(result["filled"])
-        self.assertFalse(result["partial"])
-        self.assertAlmostEqual(result["size_matched"], 20.0)
-        self.assertEqual(result["status"], "MATCHED")
+        assert result["filled"] is True
+        assert result["partial"] is False
+        assert abs(result["size_matched"] - 20.0) < 1e-6
+        assert result["status"] == "MATCHED"
 
-    def test_partial_fill(self):
-        clob = MagicMock()
+    @pytest.mark.asyncio
+    async def test_partial_fill(self):
+        clob = AsyncMock()
         clob.get_order.return_value = {
             "status": "CANCELLED",
             "size_matched": 10.0,
@@ -289,15 +303,16 @@ class TestVerifyFill(unittest.TestCase):
         }
 
         bridge = CLOBWeatherBridge(clob_client=clob, gamma_client=MagicMock())
-        result = bridge.verify_fill("order-1", timeout_seconds=5, poll_interval=0.1)
+        result = await bridge.verify_fill("order-1", timeout_seconds=5, poll_interval=0.1)
 
-        self.assertTrue(result["filled"])
-        self.assertTrue(result["partial"])
-        self.assertAlmostEqual(result["size_matched"], 10.0)
-        self.assertAlmostEqual(result["original_size"], 20.0)
+        assert result["filled"] is True
+        assert result["partial"] is True
+        assert abs(result["size_matched"] - 10.0) < 1e-6
+        assert abs(result["original_size"] - 20.0) < 1e-6
 
-    def test_timeout_unfilled(self):
-        clob = MagicMock()
+    @pytest.mark.asyncio
+    async def test_timeout_unfilled(self):
+        clob = AsyncMock()
         clob.get_order.return_value = {
             "status": "LIVE",
             "size_matched": 0,
@@ -305,48 +320,52 @@ class TestVerifyFill(unittest.TestCase):
         }
 
         bridge = CLOBWeatherBridge(clob_client=clob, gamma_client=MagicMock())
-        result = bridge.verify_fill("order-1", timeout_seconds=0.3, poll_interval=0.1)
+        result = await bridge.verify_fill("order-1", timeout_seconds=0.3, poll_interval=0.1)
 
-        self.assertFalse(result["filled"])
-        self.assertFalse(result["partial"])
-        self.assertIn("TIMEOUT", result["status"])
+        assert result["filled"] is False
+        assert result["partial"] is False
+        assert "TIMEOUT" in result["status"]
 
-    def test_api_error_during_poll(self):
-        clob = MagicMock()
+    @pytest.mark.asyncio
+    async def test_api_error_during_poll(self):
+        clob = AsyncMock()
         clob.get_order.side_effect = Exception("API error")
 
         bridge = CLOBWeatherBridge(clob_client=clob, gamma_client=MagicMock())
-        result = bridge.verify_fill("order-1", timeout_seconds=0.3, poll_interval=0.1)
+        result = await bridge.verify_fill("order-1", timeout_seconds=0.3, poll_interval=0.1)
 
         # Should timeout gracefully
-        self.assertFalse(result["filled"])
+        assert result["filled"] is False
 
 
-class TestCancelOrder(unittest.TestCase):
+class TestCancelOrder:
 
-    def test_cancel_success(self):
-        clob = MagicMock()
+    @pytest.mark.asyncio
+    async def test_cancel_success(self):
+        clob = AsyncMock()
         bridge = CLOBWeatherBridge(clob_client=clob, gamma_client=MagicMock())
 
-        result = bridge.cancel_order("order-1")
-        self.assertTrue(result)
+        result = await bridge.cancel_order("order-1")
+        assert result is True
         clob.cancel_order.assert_called_once_with("order-1")
 
-    def test_cancel_failure(self):
-        clob = MagicMock()
+    @pytest.mark.asyncio
+    async def test_cancel_failure(self):
+        clob = AsyncMock()
         clob.cancel_order.side_effect = Exception("Network error")
 
         bridge = CLOBWeatherBridge(clob_client=clob, gamma_client=MagicMock())
-        result = bridge.cancel_order("order-1")
-        self.assertFalse(result)
+        result = await bridge.cancel_order("order-1")
+        assert result is False
 
 
-class TestExecuteTradeWithFillVerification(unittest.TestCase):
+class TestExecuteTradeWithFillVerification:
 
-    def test_trade_with_fill_timeout_zero_skips_verification(self):
+    @pytest.mark.asyncio
+    async def test_trade_with_fill_timeout_zero_skips_verification(self):
         """fill_timeout=0 should behave like the old code."""
         gamma = MagicMock()
-        clob = MagicMock()
+        clob = AsyncMock()
         clob.post_order.return_value = {"orderID": "order-123"}
         clob.get_orderbook.return_value = {
             "asks": [{"price": "0.10", "size": "100"}],
@@ -357,14 +376,15 @@ class TestExecuteTradeWithFillVerification(unittest.TestCase):
         gm = _make_gamma_market(best_ask=0.10)
         bridge._market_cache["cond-1"] = gm
 
-        result = bridge.execute_trade("cond-1", "yes", 2.00, fill_timeout=0)
-        self.assertTrue(result["success"])
+        result = await bridge.execute_trade("cond-1", "yes", 2.00, fill_timeout=0)
+        assert result["success"] is True
         # get_order should NOT have been called
         clob.get_order.assert_not_called()
 
-    def test_trade_unfilled_gets_cancelled(self):
+    @pytest.mark.asyncio
+    async def test_trade_unfilled_gets_cancelled(self):
         gamma = MagicMock()
-        clob = MagicMock()
+        clob = AsyncMock()
         clob.post_order.return_value = {"orderID": "order-123"}
         clob.get_orderbook.return_value = {
             "asks": [{"price": "0.10", "size": "100"}],
@@ -379,28 +399,29 @@ class TestExecuteTradeWithFillVerification(unittest.TestCase):
         gm = _make_gamma_market(best_ask=0.10)
         bridge._market_cache["cond-1"] = gm
 
-        result = bridge.execute_trade("cond-1", "yes", 2.00,
+        result = await bridge.execute_trade("cond-1", "yes", 2.00,
                                        fill_timeout=0.3, fill_poll_interval=0.1)
-        self.assertFalse(result["success"])
+        assert result["success"] is False
         # Should have tried to cancel
         clob.cancel_order.assert_called_once_with("order-123")
 
 
-class TestBestAskInStrategy(unittest.TestCase):
+class TestBestAskInStrategy:
     """Verify that best_ask from bridge is used in scoring."""
 
-    def test_best_ask_field_in_market(self):
+    @pytest.mark.asyncio
+    async def test_best_ask_field_in_market(self):
         """Bridge fetch_weather_markets should include best_ask."""
-        gamma = MagicMock()
+        gamma = AsyncMock()
         gm = _make_gamma_market(best_ask=0.37)
         gamma.fetch_events_with_markets.return_value = ([], [gm])
 
-        clob = MagicMock()
+        clob = AsyncMock()
         bridge = CLOBWeatherBridge(clob_client=clob, gamma_client=gamma)
-        markets = bridge.fetch_weather_markets()
+        markets = await bridge.fetch_weather_markets()
 
-        self.assertEqual(len(markets), 1)
-        self.assertAlmostEqual(markets[0]["best_ask"], 0.37)
+        assert len(markets) == 1
+        assert abs(markets[0]["best_ask"] - 0.37) < 1e-6
 
 
 if __name__ == "__main__":

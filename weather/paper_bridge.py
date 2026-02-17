@@ -65,9 +65,9 @@ class PaperBridge:
     # Delegated read methods
     # ------------------------------------------------------------------
 
-    def fetch_weather_markets(self) -> list[dict]:
+    async def fetch_weather_markets(self) -> list[dict]:
         """Delegate to real bridge and record price snapshots."""
-        markets = self._real.fetch_weather_markets()
+        markets = await self._real.fetch_weather_markets()
         self._record_snapshots(markets)
         return markets
 
@@ -84,7 +84,7 @@ class PaperBridge:
             return {"shares_yes": pos["shares"], "shares": pos["shares"]}
         return None
 
-    def get_portfolio(self) -> dict:
+    async def get_portfolio(self) -> dict:
         return {
             "balance_usdc": max(0.0, self._real.max_exposure - self._total_exposure),
             "total_exposure": self._total_exposure,
@@ -116,7 +116,7 @@ class PaperBridge:
     # Simulated write methods
     # ------------------------------------------------------------------
 
-    def execute_trade(
+    async def execute_trade(
         self,
         market_id: str,
         side: str,
@@ -175,7 +175,7 @@ class PaperBridge:
             "trade_id": f"paper-{market_id[:8]}-{int(datetime.now(timezone.utc).timestamp())}",
         }
 
-    def execute_sell(
+    async def execute_sell(
         self,
         market_id: str,
         shares: float,
@@ -216,7 +216,7 @@ class PaperBridge:
             "trade_id": f"paper-sell-{market_id[:8]}-{int(datetime.now(timezone.utc).timestamp())}",
         }
 
-    def execute_maker_order(
+    async def execute_maker_order(
         self,
         market_id: str,
         side: str,
@@ -251,7 +251,7 @@ class PaperBridge:
             "token_id": gm.clob_token_ids[0] if gm.clob_token_ids else "",
         }
 
-    def verify_fill(self, order_id: str, **kwargs) -> dict:
+    async def verify_fill(self, order_id: str, **kwargs) -> dict:
         return {
             "filled": True,
             "partial": False,
@@ -260,7 +260,7 @@ class PaperBridge:
             "status": "PAPER_FILLED",
         }
 
-    def cancel_order(self, order_id: str) -> bool:
+    async def cancel_order(self, order_id: str) -> bool:
         return True
 
     # ------------------------------------------------------------------
