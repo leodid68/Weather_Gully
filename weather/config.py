@@ -163,6 +163,17 @@ class Config:
     maker_ttl_seconds: int = 900           # 15 min before cancel
     maker_tick_buffer: int = 1             # Ticks above best bid
 
+    # Weather Underground
+    wu_api_key: str = ""            # From creds.json or env var
+    wu_cache_ttl: int = 3600        # 60 min cache
+
+    # NOAA caching
+    noaa_cache_ttl: int = 900       # 15 min cache
+
+    # Dynamic model weighting
+    dynamic_weights: bool = True    # Use performance-based weights
+    wu_weight_bonus: float = 0.20   # +20% bonus for WU (resolution source)
+
     @property
     def active_locations(self) -> list[str]:
         """Return canonical location keys matching LOCATIONS dict keys.

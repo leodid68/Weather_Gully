@@ -44,5 +44,10 @@
   "maker_edge_threshold": 0.02,
   "maker_spread_threshold": 0.10,
   "maker_ttl_seconds": 900,
-  "maker_tick_buffer": 1
+  "maker_tick_buffer": 1,
+  "wu_api_key": "",
+  "wu_cache_ttl": 3600,
+  "noaa_cache_ttl": 900,
+  "dynamic_weights": true,
+  "wu_weight_bonus": 0.20
 }
