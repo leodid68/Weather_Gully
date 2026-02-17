@@ -1352,6 +1352,9 @@ def run_weather_strategy(
                         event_id=event_id,
                     )
 
+                    # Update exposure for budget-aware sizing within this run
+                    current_exposure += position_size
+
                     # Correlation guard: record event → market mapping
                     if config.correlation_guard:
                         state.record_event_position(event_id, market_id)

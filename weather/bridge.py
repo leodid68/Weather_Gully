@@ -364,10 +364,15 @@ class CLOBWeatherBridge:
                         logger.info("Depth cap: $%.2f → $%.2f (%.0f%% of $%.2f depth)",
                                     amount, max_from_depth, depth_fill_ratio * 100, depth)
                         amount = max_from_depth
+                    # Abort if depth-capped amount is too small for viable order
+                    if amount < 0.05:
+                        return {"error": "Depth too thin for minimum order", "success": False}
 
                 # VWAP pricing across multiple levels
                 if vwap_max_levels > 1:
                     price = compute_vwap(asks[:vwap_max_levels], amount)
+                    if price <= 0:
+                        price = float(asks[0]["price"])  # Fallback if VWAP failed
                 else:
                     price = float(asks[0]["price"])
             else:
