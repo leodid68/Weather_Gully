@@ -69,7 +69,13 @@ def _print_summary(state: dict, snapshots: int, duration: float) -> None:
 def main() -> None:
     args = [
         sys.executable, "-m", "weather.paper_trade",
-        "--set", "entry_threshold=0.30",
+        "--set", "entry_threshold=0.35",
+        "--set", "exit_threshold=0.40",
+        "--set", "kelly_fraction=0.35",
+        "--set", "min_ev_threshold=0.02",
+        "--set", "max_trades_per_run=8",
+        "--set", "max_open_positions=25",
+        "--set", "time_to_resolution_min_hours=1",
         "--no-safeguards",
     ]
     run_count = 0
