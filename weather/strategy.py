@@ -1036,6 +1036,9 @@ def run_weather_strategy(
                                 obs_data.get("obs_count", 0),
                                 obs_data.get("latest_obs_time", "?"))
 
+        # Model disagreement flag (set in detection block below)
+        model_disagreement = False
+
         # Multi-source ensemble forecast (now with optional aviation obs)
         om_data = open_meteo_cache.get(location, {}).get(date_str)
         if config.multi_source and (noaa_temp is not None or om_data or aviation_obs_temp is not None):
@@ -1072,6 +1075,18 @@ def run_weather_strategy(
             logger.warning("No forecast available for %s %s", location, date_str)
             continue
 
+        # Model disagreement detection (NOAA vs Open-Meteo)
+        if config.multi_source and noaa_temp is not None and om_data:
+            om_only_temp, _ = compute_ensemble_forecast(None, om_data, metric, location=location)
+            if om_only_temp is not None:
+                noaa_om_spread = abs(noaa_temp - om_only_temp)
+                if noaa_om_spread >= config.model_disagreement_threshold:
+                    model_disagreement = True
+                    logger.warning(
+                        "Model disagreement: NOAA=%.0f°F vs Open-Meteo=%.0f°F (spread=%.1f°F > %.1f°F)",
+                        noaa_temp, om_only_temp, noaa_om_spread, config.model_disagreement_threshold,
+                    )
+
         # Adaptive sigma: compute from ensemble spread + model spread + feedback EMA
         adaptive_sigma_value = None
         if config.adaptive_sigma:
@@ -1097,6 +1112,11 @@ def run_weather_strategy(
                 final_sigma=adaptive_sigma_value,
                 forecast_temp=forecast_temp,
             )
+
+        if model_disagreement and adaptive_sigma_value is not None:
+            old_sigma = adaptive_sigma_value
+            adaptive_sigma_value *= config.model_disagreement_multiplier
+            logger.info("Sigma boosted for model disagreement: %.2f → %.2f", old_sigma, adaptive_sigma_value)
 
         # Feedback bias correction (before delta detection so both use corrected temp)
         forecast_month = int(date_str.split("-")[1])
@@ -1344,6 +1364,7 @@ def run_weather_strategy(
                     fill_poll_interval=config.fill_poll_interval,
                     depth_fill_ratio=config.depth_fill_ratio,
                     vwap_max_levels=config.vwap_max_levels,
+                    limit_price=prob,
                 )
 
                 if result.get("success"):

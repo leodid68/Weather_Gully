@@ -133,6 +133,9 @@ class PaperBridge:
         price = gm.best_ask if gm.best_ask > 0 else (
             gm.outcome_prices[0] if gm.outcome_prices else 0.5
         )
+        limit_price = kwargs.get("limit_price", 0.0)
+        if limit_price > 0 and price > limit_price:
+            price = limit_price
         if price <= 0:
             return {"error": "Invalid price", "success": False}
 

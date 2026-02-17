@@ -153,6 +153,10 @@ class Config:
     same_location_discount: float = 0.5
     same_location_horizon_window: int = 2
 
+    # Model disagreement (NOAA vs Open-Meteo)
+    model_disagreement_threshold: float = 3.0   # °F — boost sigma when models diverge more than this
+    model_disagreement_multiplier: float = 1.5  # sigma multiplier when disagreement detected
+
     @property
     def active_locations(self) -> list[str]:
         """Return canonical location keys matching LOCATIONS dict keys.

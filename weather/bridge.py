@@ -228,10 +228,24 @@ class CLOBWeatherBridge:
         mid = bid_ask_sum / 2 if bid_ask_sum > 0 else 0.0
         slippage_pct = spread / mid if mid > 0 else 0.0
 
+        # Edge computation for adaptive slippage
+        my_probability = kwargs.get("my_probability")
+        edge_dict: dict = {}
+        if my_probability is not None:
+            market_price = gm.best_ask if gm.best_ask > 0 else (
+                gm.outcome_prices[0] if gm.outcome_prices else 0.5
+            )
+            user_edge = my_probability - market_price
+            edge_dict = {
+                "user_edge": user_edge,
+                "recommendation": "TRADE" if user_edge > 0.02 else ("HOLD" if user_edge > 0 else "SKIP"),
+                "suggested_threshold": 0.02,
+            }
+
         return {
             "market": {"time_to_resolution": time_str},
             "slippage": {"estimates": [{"slippage_pct": slippage_pct}]},
-            "edge": {},
+            "edge": edge_dict,
             "warnings": [],
             "discipline": {},
         }
@@ -321,6 +335,7 @@ class CLOBWeatherBridge:
         fill_poll_interval: float = 2.0,
         depth_fill_ratio: float = 0.0,
         vwap_max_levels: int = 0,
+        limit_price: float = 0.0,
     ) -> dict:
         """Execute a buy trade via CLOB limit order at fresh best ask.
 
@@ -385,6 +400,12 @@ class CLOBWeatherBridge:
                 gm.outcome_prices[0] if gm.outcome_prices else 0.5
             )
             logger.warning("Could not refresh price for %s, using cached %.4f", token_id[:16], price)
+
+        # Apply limit price cap (fair value from model)
+        if limit_price > 0 and price > limit_price:
+            logger.info("Limit cap: ask=$%.4f → limit=$%.4f (saving %.1f%%)",
+                        price, limit_price, (price - limit_price) / price * 100)
+            price = limit_price
 
         if price <= 0:
             return {"error": "Invalid price", "success": False}
