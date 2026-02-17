@@ -988,6 +988,10 @@ async def run_weather_strategy(
         pending = PendingOrders(_pending_path)
         with pending_lock(_pending_path):
             pending.load()
+            expired = pending.cleanup_expired()
+            if expired:
+                pending.save()
+                logger.info("Cleaned up %d expired pending order(s)", expired)
 
     # Compute current exposure for budget-aware sizing (include pending maker orders)
     current_exposure = sum(

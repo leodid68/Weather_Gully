@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import tempfile
+from datetime import datetime, timezone
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -80,6 +81,29 @@ class PendingOrders:
     def has_market(self, market_id: str) -> bool:
         """Check if there's a pending order for this market."""
         return any(o.get("market_id") == market_id for o in self._orders)
+
+    def cleanup_expired(self) -> int:
+        """Remove orders whose TTL has elapsed. Returns count removed."""
+        now = datetime.now(timezone.utc)
+        kept: list[dict] = []
+        removed = 0
+        for o in self._orders:
+            submitted = o.get("submitted_at", "")
+            ttl = o.get("ttl_seconds", 900)
+            try:
+                ts = datetime.fromisoformat(submitted)
+                elapsed = (now - ts).total_seconds()
+                if elapsed > ttl:
+                    removed += 1
+                    logger.info("Expired pending order %s (%.0fs old, ttl=%ds)",
+                                o.get("order_id", "?"), elapsed, ttl)
+                    continue
+            except (ValueError, TypeError):
+                removed += 1
+                continue
+            kept.append(o)
+        self._orders = kept
+        return removed
 
     def total_exposure(self) -> float:
         """Sum of all pending order amounts."""
