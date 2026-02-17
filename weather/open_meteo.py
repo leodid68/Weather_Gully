@@ -354,6 +354,41 @@ async def get_open_meteo_forecast_multi(
     return result
 
 
+def get_dominant_model_info(
+    location: str,
+    noaa_temp: float | None,
+    om_data: dict | None,
+    metric: str = "high",
+) -> tuple[str, float | None, float]:
+    """Return (model_name, model_temp, model_weight) for the highest-weight model.
+
+    Returns ("", None, 0.0) if no model has weight >= 0.4.
+    """
+    weights = _get_model_weights(location)
+    best_name, best_weight = "", 0.0
+    for name, w in weights.items():
+        if w > best_weight:
+            best_name, best_weight = name, w
+
+    if best_weight < 0.4:
+        return "", None, 0.0
+
+    # Get the dominant model's temperature
+    if best_name == "noaa" and noaa_temp is not None:
+        return best_name, noaa_temp, best_weight
+    if om_data:
+        if best_name == "gfs_seamless":
+            key = f"gfs_{metric}"
+        elif best_name == "ecmwf_ifs025":
+            key = f"ecmwf_{metric}"
+        else:
+            key = f"local_{metric}"
+        temp = om_data.get(key)
+        if temp is not None:
+            return best_name, temp, best_weight
+    return best_name, None, best_weight
+
+
 def _safe_get(daily: dict, key: str, index: int) -> float | None:
     """Safely get a value from the daily arrays."""
     arr = daily.get(key)

@@ -60,6 +60,68 @@ logger = logging.getLogger(__name__)
 _TRADE_SOURCE = "clob:weather"
 
 
+def detect_cross_temporal_signals(
+    events: dict[str, list[dict]],
+    location: str,
+    metric: str,
+) -> list[dict]:
+    """Detect cross-temporal pricing anomalies for a location.
+
+    Compares the same bucket across different forecast dates. If a farther
+    date is priced >=85% of a nearer date (for significant buckets), it may
+    be overpriced -- sigma growth should reduce the probability at longer horizons.
+
+    Returns list of signal dicts for logging.
+    """
+    # Group buckets by (lo, hi) across dates
+    bucket_prices: dict[tuple, list[tuple[str, float]]] = {}  # bucket -> [(date, price)]
+
+    for event_id, event_markets in events.items():
+        for m in event_markets:
+            event_info = parse_weather_event(m.get("event_name", ""))
+            if not event_info:
+                continue
+            if event_info["location"] != location or event_info["metric"] != metric:
+                continue
+            bucket = _parse_bucket(m.get("outcome_name", ""), location)
+            if not bucket:
+                continue
+            ask_str = m.get("best_ask")
+            if not ask_str:
+                continue
+            try:
+                price = float(ask_str)
+            except (ValueError, TypeError):
+                continue
+            if price <= 0:
+                continue
+            bucket_prices.setdefault(bucket, []).append((event_info["date"], price))
+
+    signals = []
+    for bucket, date_prices in bucket_prices.items():
+        if len(date_prices) < 2:
+            continue
+        date_prices.sort()  # Sort by date (chronological)
+        for i in range(len(date_prices) - 1):
+            date_near, price_near = date_prices[i]
+            date_far, price_far = date_prices[i + 1]
+            # Only check if near price is significant (> $0.05)
+            if price_near < 0.05:
+                continue
+            ratio = price_far / price_near if price_near > 0 else 0
+            # If far date >= 85% of near date and far price > $0.10, flag it
+            if ratio > 0.85 and price_far > 0.10:
+                signals.append({
+                    "bucket": bucket,
+                    "date_near": date_near,
+                    "date_far": date_far,
+                    "price_near": price_near,
+                    "price_far": price_far,
+                    "ratio": ratio,
+                })
+    return signals
+
+
 def compute_yes_sum_deviation(event_markets: list[dict]) -> tuple[float, float, int]:
     """Compute sum of YES prices and deviation from $1.00.
 
@@ -1177,6 +1239,16 @@ async def run_weather_strategy(
                         noaa_temp, om_only_temp, noaa_om_spread, config.model_disagreement_threshold,
                     )
 
+        # Model conviction: identify dominant model temperature
+        dom_model_name, dom_model_temp, dom_model_weight = "", None, 0.0
+        if model_disagreement and config.multi_source:
+            from .open_meteo import get_dominant_model_info
+            dom_model_name, dom_model_temp, dom_model_weight = get_dominant_model_info(
+                location, noaa_temp, om_data, metric)
+            if dom_model_temp is not None and dom_model_weight >= 0.5:
+                logger.info("Model conviction: %s=%.0f°F (weight=%.2f)",
+                             dom_model_name, dom_model_temp, dom_model_weight)
+
         # Adaptive sigma: compute from ensemble spread + model spread + feedback EMA
         adaptive_sigma_value = None
         loc_data = LOCATIONS.get(location, {})
@@ -1417,6 +1489,24 @@ async def run_weather_strategy(
                     position_size = round(position_size * mr_mult, 2)
                     logger.info("Mean-reversion: z-mult=%.2f -> $%.2f", mr_mult, position_size)
 
+            # Model conviction sizing adjustment
+            if dom_model_temp is not None and dom_model_weight >= 0.5 and model_disagreement:
+                bucket = entry.get("bucket")
+                if bucket and adaptive_sigma_value and adaptive_sigma_value > 0:
+                    _lo, _hi = bucket
+                    bc = _hi if _lo < -900 else (_lo if _hi > 900 else (_lo + _hi) / 2.0)
+                    dist = abs(dom_model_temp - bc)
+                    if dist <= adaptive_sigma_value * 0.5:
+                        # Dominant model agrees -> 1.5x conviction boost
+                        position_size = round(position_size * 1.5, 2)
+                        logger.info("Model conviction boost (1.5x): %s agrees with %s",
+                                     dom_model_name, outcome_name)
+                    elif dist > adaptive_sigma_value * 1.5:
+                        # Dominant model strongly disagrees -> 0.5x reduction
+                        position_size = round(position_size * 0.5, 2)
+                        logger.info("Model conviction penalty (0.5x): %s disagrees with %s",
+                                     dom_model_name, outcome_name)
+
             if position_size <= 0:
                 logger.info("Kelly says no bet (no edge at this price)")
                 continue
@@ -1622,6 +1712,20 @@ async def run_weather_strategy(
                         balance = max(0.0, balance - position_size)
                     else:
                         logger.error("Trade failed: %s", result.get("error", "Unknown"))
+
+    # Cross-temporal arbitrage signals (informational logging)
+    for ct_location in config.active_locations:
+        for ct_metric in config.active_metrics:
+            ct_signals = detect_cross_temporal_signals(events, ct_location, ct_metric)
+            for sig in ct_signals:
+                logger.info(
+                    "Cross-temporal signal %s %s: bucket %s — near=%s $%.2f vs far=%s $%.2f (ratio=%.2f)",
+                    ct_location, ct_metric,
+                    f"{sig['bucket'][0]}-{sig['bucket'][1]}",
+                    sig["date_near"], sig["price_near"],
+                    sig["date_far"], sig["price_far"],
+                    sig["ratio"],
+                )
 
     # Stop-loss: check if forecast has reversed away from our held positions
     if config.stop_loss_reversal:
