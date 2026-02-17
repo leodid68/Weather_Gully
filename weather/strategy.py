@@ -1324,6 +1324,8 @@ def run_weather_strategy(
                     market_id, side, position_size,
                     fill_timeout=config.fill_timeout_seconds,
                     fill_poll_interval=config.fill_poll_interval,
+                    depth_fill_ratio=config.depth_fill_ratio,
+                    vwap_max_levels=config.vwap_max_levels,
                 )
 
                 if result.get("success"):
