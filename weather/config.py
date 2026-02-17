@@ -33,7 +33,7 @@ LOCATIONS = {
 }
 
 # Polymarket constraints
-MIN_SHARES_PER_ORDER = 5.0
+MIN_SHARES_PER_ORDER = 2.0
 MIN_TICK_SIZE = 0.01
 
 # Environment variable mapping
@@ -57,7 +57,7 @@ class Config:
     # Entry / exit
     entry_threshold: float = 0.15
     exit_threshold: float = 0.45
-    max_position_usd: float = 2.00
+    max_position_usd: float = 5.00
     sizing_pct: float = 0.05
 
     # Kelly
@@ -150,7 +150,7 @@ class Config:
     trade_metrics: str = "high"
 
     # Portfolio: same-location sizing discount
-    same_location_discount: float = 0.5
+    same_location_discount: float = 0.7
     same_location_horizon_window: int = 2
 
     # Model disagreement (NOAA vs Open-Meteo)

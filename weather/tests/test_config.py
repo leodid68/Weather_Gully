@@ -23,7 +23,7 @@ def test_new_execution_config_defaults():
     assert cfg.depth_fill_ratio == 0.5
     assert cfg.vwap_max_levels == 5
     assert cfg.trade_metrics == "high"
-    assert cfg.same_location_discount == 0.5
+    assert cfg.same_location_discount == 0.7
     assert cfg.same_location_horizon_window == 2
     assert cfg.correlation_threshold == 0.3
 
