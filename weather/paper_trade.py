@@ -149,6 +149,18 @@ async def _async_main(
             kalman.save()
         _print_pnl_summary(state)
 
+        # Clear all pending orders — in paper mode no order_manager runs,
+        # so maker orders from previous runs permanently block re-entry.
+        from .pending_state import PendingOrders, pending_lock
+        _pending_path = str(Path(_PKG_DIR) / "pending_orders.json")
+        with pending_lock(_pending_path):
+            pending = PendingOrders(_pending_path)
+            pending.load()
+            if len(pending) > 0:
+                logger.info("Clearing %d stale pending order(s) from previous paper run", len(pending))
+                pending._orders.clear()
+                pending.save()
+
         # Run strategy with PaperBridge — dry_run=False so trades go through
         # the bridge (which simulates them), not skipped as dry_run
         await run_weather_strategy(
