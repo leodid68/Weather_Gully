@@ -142,7 +142,7 @@ class Config:
     mean_reversion: bool = True
 
     # Adaptive execution (VWAP, depth sizing, edge-proportional slippage)
-    slippage_edge_ratio: float = 0.5
+    slippage_edge_ratio: float = 0.8
     depth_fill_ratio: float = 0.5
     vwap_max_levels: int = 5
 

@@ -130,9 +130,16 @@ class PaperBridge:
         if not gm:
             return {"error": f"Unknown market {market_id}", "success": False}
 
-        price = gm.best_ask if gm.best_ask > 0 else (
-            gm.outcome_prices[0] if gm.outcome_prices else 0.5
-        )
+        if side.lower() == "no":
+            # NO price ≈ 1 - YES best_bid (neg-risk market)
+            yes_bid = gm.best_bid if gm.best_bid > 0 else (
+                gm.outcome_prices[0] if gm.outcome_prices else 0.5
+            )
+            price = 1.0 - yes_bid
+        else:
+            price = gm.best_ask if gm.best_ask > 0 else (
+                gm.outcome_prices[0] if gm.outcome_prices else 0.5
+            )
         limit_price = kwargs.get("limit_price", 0.0)
         if limit_price > 0 and price > limit_price:
             price = limit_price

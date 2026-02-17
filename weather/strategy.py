@@ -1238,15 +1238,16 @@ def run_weather_strategy(
                 outcome_name, price, prob * 100, ev,
             )
 
-            # Compare YES token price against threshold (for NO, yes_price = 1 - price)
+            # Entry threshold: only applies to YES side (don't buy expensive YES).
+            # NO trades are the opposite: profitable when YES is overpriced.
+            # The EV filter (min_ev_threshold) already guards NO profitability.
             side = entry.get("side", "yes")
-            yes_price_check = price if side == "yes" else (1.0 - price)
-            if yes_price_check >= config.entry_threshold:
-                logger.info("YES price $%.2f above entry threshold $%.2f — skip", yes_price_check, config.entry_threshold)
+            if side == "yes" and price >= config.entry_threshold:
+                logger.info("YES price $%.2f above entry threshold $%.2f — skip", price, config.entry_threshold)
                 if explain:
                     explain_stats["buckets_filtered"] += 1
                     explain_stats["filter_reasons"]["price_above_threshold"] = explain_stats["filter_reasons"].get("price_above_threshold", 0) + 1
-                    logger.info("  [EXPLAIN] Filtered: YES price $%.2f > threshold $%.2f", yes_price_check, config.entry_threshold)
+                    logger.info("  [EXPLAIN] Filtered: YES price $%.2f > threshold $%.2f", price, config.entry_threshold)
                 continue
 
             # Safeguards
