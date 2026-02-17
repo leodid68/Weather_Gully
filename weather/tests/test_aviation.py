@@ -3,7 +3,9 @@
 import json
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
+
+import pytest
 
 from weather.aviation import (
     STATION_MAP,
@@ -59,12 +61,13 @@ class TestCelsiusToFahrenheit(unittest.TestCase):
 
 class TestGetMetarObservations(unittest.TestCase):
 
-    @patch("weather.aviation._fetch_json")
-    def test_parses_fixture_correctly(self, mock_fetch):
+    @pytest.mark.asyncio
+    @patch("weather.aviation.fetch_json", new_callable=AsyncMock)
+    async def test_parses_fixture_correctly(self, mock_fetch):
         fixture = _load_fixture("metar_response.json")
         mock_fetch.return_value = fixture
 
-        result = get_metar_observations(["NYC", "Chicago"])
+        result = await get_metar_observations(["NYC", "Chicago"])
 
         self.assertIn("NYC", result)
         self.assertIn("Chicago", result)
@@ -74,12 +77,13 @@ class TestGetMetarObservations(unittest.TestCase):
         # Chicago should have 3 observations
         self.assertEqual(len(result["Chicago"]), 3)
 
-    @patch("weather.aviation._fetch_json")
-    def test_temps_converted_to_fahrenheit(self, mock_fetch):
+    @pytest.mark.asyncio
+    @patch("weather.aviation.fetch_json", new_callable=AsyncMock)
+    async def test_temps_converted_to_fahrenheit(self, mock_fetch):
         fixture = _load_fixture("metar_response.json")
         mock_fetch.return_value = fixture
 
-        result = get_metar_observations(["NYC"])
+        result = await get_metar_observations(["NYC"])
 
         # First observation (by time) for NYC is 3°C at 05:51
         # Sorted ascending: earliest first
@@ -87,31 +91,35 @@ class TestGetMetarObservations(unittest.TestCase):
         # 8°C (Mar 14 22:51) → 46.4°F
         self.assertAlmostEqual(earliest["temp_f"], 46.4, places=1)
 
-    @patch("weather.aviation._fetch_json")
-    def test_sorted_by_time_ascending(self, mock_fetch):
+    @pytest.mark.asyncio
+    @patch("weather.aviation.fetch_json", new_callable=AsyncMock)
+    async def test_sorted_by_time_ascending(self, mock_fetch):
         fixture = _load_fixture("metar_response.json")
         mock_fetch.return_value = fixture
 
-        result = get_metar_observations(["NYC"])
+        result = await get_metar_observations(["NYC"])
         times = [obs["time"] for obs in result["NYC"]]
         self.assertEqual(times, sorted(times))
 
-    @patch("weather.aviation._fetch_json")
-    def test_unknown_location_skipped(self, mock_fetch):
+    @pytest.mark.asyncio
+    @patch("weather.aviation.fetch_json", new_callable=AsyncMock)
+    async def test_unknown_location_skipped(self, mock_fetch):
         mock_fetch.return_value = []
-        result = get_metar_observations(["UnknownCity"])
+        result = await get_metar_observations(["UnknownCity"])
         self.assertEqual(result, {})
 
-    @patch("weather.aviation._fetch_json")
-    def test_api_failure_returns_empty(self, mock_fetch):
+    @pytest.mark.asyncio
+    @patch("weather.aviation.fetch_json", new_callable=AsyncMock)
+    async def test_api_failure_returns_empty(self, mock_fetch):
         mock_fetch.return_value = None
-        result = get_metar_observations(["NYC"])
+        result = await get_metar_observations(["NYC"])
         self.assertEqual(result, {})
 
-    @patch("weather.aviation._fetch_json")
-    def test_single_api_call_for_multiple_stations(self, mock_fetch):
+    @pytest.mark.asyncio
+    @patch("weather.aviation.fetch_json", new_callable=AsyncMock)
+    async def test_single_api_call_for_multiple_stations(self, mock_fetch):
         mock_fetch.return_value = []
-        get_metar_observations(["NYC", "Chicago", "Miami"])
+        await get_metar_observations(["NYC", "Chicago", "Miami"])
         # Should be called exactly once (batched)
         mock_fetch.assert_called_once()
         call_url = mock_fetch.call_args[0][0]
@@ -120,21 +128,23 @@ class TestGetMetarObservations(unittest.TestCase):
         self.assertIn("KORD", call_url)
         self.assertIn("KMIA", call_url)
 
-    @patch("weather.aviation._fetch_json")
-    def test_skips_obs_with_missing_temp(self, mock_fetch):
+    @pytest.mark.asyncio
+    @patch("weather.aviation.fetch_json", new_callable=AsyncMock)
+    async def test_skips_obs_with_missing_temp(self, mock_fetch):
         mock_fetch.return_value = [
             {"icaoId": "KLGA", "reportTime": "2025-03-15T12:00:00Z", "temp": None},
             {"icaoId": "KLGA", "reportTime": "2025-03-15T13:00:00Z", "temp": 10.0},
         ]
-        result = get_metar_observations(["NYC"])
+        result = await get_metar_observations(["NYC"])
         self.assertEqual(len(result["NYC"]), 1)
 
-    @patch("weather.aviation._fetch_json")
-    def test_skips_obs_with_missing_time(self, mock_fetch):
+    @pytest.mark.asyncio
+    @patch("weather.aviation.fetch_json", new_callable=AsyncMock)
+    async def test_skips_obs_with_missing_time(self, mock_fetch):
         mock_fetch.return_value = [
             {"icaoId": "KLGA", "temp": 10.0},
         ]
-        result = get_metar_observations(["NYC"])
+        result = await get_metar_observations(["NYC"])
         self.assertEqual(len(result["NYC"]), 0)
 
 
@@ -188,8 +198,9 @@ class TestComputeDailyExtremes(unittest.TestCase):
 
 class TestGetAviationDailyData(unittest.TestCase):
 
-    @patch("weather.aviation.get_metar_observations")
-    def test_aggregates_by_date(self, mock_obs):
+    @pytest.mark.asyncio
+    @patch("weather.aviation.get_metar_observations", new_callable=AsyncMock)
+    async def test_aggregates_by_date(self, mock_obs):
         mock_obs.return_value = {
             "NYC": [
                 {"time": "2025-03-15T05:00:00Z", "temp_f": 37.4},
@@ -198,7 +209,7 @@ class TestGetAviationDailyData(unittest.TestCase):
             ],
         }
 
-        result = get_aviation_daily_data(["NYC"])
+        result = await get_aviation_daily_data(["NYC"])
 
         self.assertIn("NYC", result)
         self.assertIn("2025-03-15", result["NYC"])
@@ -209,15 +220,17 @@ class TestGetAviationDailyData(unittest.TestCase):
         self.assertAlmostEqual(mar15["obs_low"], 37.4)
         self.assertEqual(mar15["obs_count"], 2)
 
-    @patch("weather.aviation.get_metar_observations")
-    def test_empty_observations_excluded(self, mock_obs):
+    @pytest.mark.asyncio
+    @patch("weather.aviation.get_metar_observations", new_callable=AsyncMock)
+    async def test_empty_observations_excluded(self, mock_obs):
         mock_obs.return_value = {"NYC": []}
 
-        result = get_aviation_daily_data(["NYC"])
+        result = await get_aviation_daily_data(["NYC"])
         self.assertNotIn("NYC", result)
 
-    @patch("weather.aviation.get_metar_observations")
-    def test_multiple_locations(self, mock_obs):
+    @pytest.mark.asyncio
+    @patch("weather.aviation.get_metar_observations", new_callable=AsyncMock)
+    async def test_multiple_locations(self, mock_obs):
         mock_obs.return_value = {
             "NYC": [
                 {"time": "2025-03-15T14:00:00Z", "temp_f": 53.6},
@@ -227,17 +240,18 @@ class TestGetAviationDailyData(unittest.TestCase):
             ],
         }
 
-        result = get_aviation_daily_data(["NYC", "Chicago"])
+        result = await get_aviation_daily_data(["NYC", "Chicago"])
         self.assertIn("NYC", result)
         self.assertIn("Chicago", result)
 
-    @patch("weather.aviation._fetch_json")
-    def test_end_to_end_with_fixture(self, mock_fetch):
+    @pytest.mark.asyncio
+    @patch("weather.aviation.fetch_json", new_callable=AsyncMock)
+    async def test_end_to_end_with_fixture(self, mock_fetch):
         """Full pipeline: fixture → observations → daily data."""
         fixture = _load_fixture("metar_response.json")
         mock_fetch.return_value = fixture
 
-        result = get_aviation_daily_data(["NYC", "Chicago"])
+        result = await get_aviation_daily_data(["NYC", "Chicago"])
 
         self.assertIn("NYC", result)
         self.assertIn("Chicago", result)
@@ -342,8 +356,9 @@ class TestComputeDailyExtremesWithTimezone(unittest.TestCase):
 class TestGetAviationDailyDataWithTimezone(unittest.TestCase):
     """Test that get_aviation_daily_data uses local timezone for date grouping."""
 
-    @patch("weather.aviation.get_metar_observations")
-    def test_utc_midnight_crossing_grouped_correctly(self, mock_obs):
+    @pytest.mark.asyncio
+    @patch("weather.aviation.get_metar_observations", new_callable=AsyncMock)
+    async def test_utc_midnight_crossing_grouped_correctly(self, mock_obs):
         """Observations near UTC midnight should be grouped by local date, not UTC."""
         mock_obs.return_value = {
             "NYC": [
@@ -356,7 +371,7 @@ class TestGetAviationDailyDataWithTimezone(unittest.TestCase):
             ],
         }
 
-        result = get_aviation_daily_data(["NYC"])
+        result = await get_aviation_daily_data(["NYC"])
 
         self.assertIn("NYC", result)
         # Jan 15 should have 1 obs (the 03:00Z one)

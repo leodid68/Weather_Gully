@@ -9,21 +9,17 @@ import json
 import logging
 import math
 import os
-import random
 import re
 import tempfile
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
 
-from ._ssl import SSL_CTX as _SSL_CTX
+from .http_client import fetch_json
 
 logger = logging.getLogger(__name__)
 
 ENSEMBLE_API_BASE = "https://ensemble-api.open-meteo.com/v1/ensemble"
-_USER_AGENT = "WeatherGully/1.0"
 
 _CACHE_DIR = Path(__file__).parent / "cache" / "ensemble"
 
@@ -129,43 +125,6 @@ def _read_cache(
         return None
 
 
-# ---------------------------------------------------------------------------
-# API client
-# ---------------------------------------------------------------------------
-
-
-def _fetch_ensemble_json(
-    url: str, timeout: int = 5, max_retries: int = 1
-) -> dict | list | None:
-    """HTTP GET *url*, parse JSON, return result or ``None`` on failure.
-
-    Uses exponential back-off with jitter between retries.
-    """
-    for attempt in range(max_retries + 1):
-        try:
-            req = Request(url, headers={
-                "Accept": "application/json",
-                "User-Agent": _USER_AGENT,
-            })
-            with urlopen(req, timeout=timeout, context=_SSL_CTX) as resp:
-                return json.loads(resp.read().decode())
-        except (HTTPError, URLError, TimeoutError) as exc:
-            if attempt < max_retries:
-                delay = (2 ** attempt) * (0.5 + random.random())
-                logger.warning(
-                    "Ensemble API error — retry %d/%d in %.1fs: %s",
-                    attempt + 1, max_retries, delay, exc,
-                )
-                time.sleep(delay)
-                continue
-            logger.error("Ensemble API failed after %d retries: %s", max_retries, exc)
-            return None
-        except json.JSONDecodeError as exc:
-            logger.error("Ensemble API JSON parse error: %s", exc)
-            return None
-    return None
-
-
 def _stddev(values: list[float]) -> float:
     """Bessel-corrected sample standard deviation.
 
@@ -179,7 +138,7 @@ def _stddev(values: list[float]) -> float:
     return math.sqrt(variance)
 
 
-def fetch_ensemble_spread(
+async def fetch_ensemble_spread(
     lat: float,
     lon: float,
     target_date: str,
@@ -219,7 +178,7 @@ def fetch_ensemble_spread(
         f"&start_date={target_date}&end_date={target_date}"
     )
 
-    raw = _fetch_ensemble_json(url)
+    raw = await fetch_json(url)
     if raw is None:
         return EnsembleResult.empty()
 

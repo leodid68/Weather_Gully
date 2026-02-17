@@ -5,7 +5,9 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
+
+import pytest
 
 from weather.ensemble import (
     EnsembleResult,
@@ -176,8 +178,9 @@ class TestCache(unittest.TestCase):
 
 class TestFetchEnsembleSpread(unittest.TestCase):
 
-    @patch("weather.ensemble._fetch_ensemble_json")
-    def test_basic_fetch(self, mock_fetch):
+    @pytest.mark.asyncio
+    @patch("weather.ensemble.fetch_json", new_callable=AsyncMock)
+    async def test_basic_fetch(self, mock_fetch):
         """Mock API returns member temps, verify stddev computed."""
         with tempfile.TemporaryDirectory() as tmpdir:
             # Return a response simulating 5 ECMWF + 3 GFS members
@@ -185,29 +188,30 @@ class TestFetchEnsembleSpread(unittest.TestCase):
                 {"daily": {"time": ["2026-02-15"], "temperature_2m_max_member0": [50.0], "temperature_2m_max_member1": [52.0], "temperature_2m_max_member2": [54.0], "temperature_2m_max_member3": [48.0], "temperature_2m_max_member4": [56.0]}, "model": "ecmwf_ifs025"},
                 {"daily": {"time": ["2026-02-15"], "temperature_2m_max_member0": [49.0], "temperature_2m_max_member1": [53.0], "temperature_2m_max_member2": [51.0]}, "model": "gfs025"},
             ]
-            result = fetch_ensemble_spread(40.77, -73.87, "2026-02-15", "high",
+            result = await fetch_ensemble_spread(40.77, -73.87, "2026-02-15", "high",
                                             cache_dir=tmpdir)
             self.assertGreater(result.n_members, 0)
             self.assertGreater(result.ensemble_stddev, 0)
             self.assertEqual(result.n_members, 8)
 
-    @patch("weather.ensemble._fetch_ensemble_json")
-    def test_api_failure_returns_empty(self, mock_fetch):
+    @pytest.mark.asyncio
+    @patch("weather.ensemble.fetch_json", new_callable=AsyncMock)
+    async def test_api_failure_returns_empty(self, mock_fetch):
         with tempfile.TemporaryDirectory() as tmpdir:
             mock_fetch.return_value = None
-            result = fetch_ensemble_spread(40.77, -73.87, "2026-02-15", "high",
+            result = await fetch_ensemble_spread(40.77, -73.87, "2026-02-15", "high",
                                             cache_dir=tmpdir)
             self.assertEqual(result.n_members, 0)
 
-    @patch("weather.ensemble._fetch_ensemble_json")
-    def test_cache_hit_skips_api(self, mock_fetch):
+    @pytest.mark.asyncio
+    @patch("weather.ensemble.fetch_json", new_callable=AsyncMock)
+    async def test_cache_hit_skips_api(self, mock_fetch):
         with tempfile.TemporaryDirectory() as tmpdir:
-            from weather.ensemble import _write_cache, EnsembleResult
             cached = EnsembleResult(member_temps=[50.0, 52.0], ensemble_mean=51.0,
                                      ensemble_stddev=1.41, ecmwf_stddev=1.0,
                                      gfs_stddev=1.5, n_members=2)
             _write_cache(Path(tmpdir), 40.77, -73.87, "2026-02-15", "high", cached)
-            result = fetch_ensemble_spread(40.77, -73.87, "2026-02-15", "high", cache_dir=tmpdir)
+            result = await fetch_ensemble_spread(40.77, -73.87, "2026-02-15", "high", cache_dir=tmpdir)
             mock_fetch.assert_not_called()
             self.assertAlmostEqual(result.ensemble_stddev, 1.41)
 
@@ -223,8 +227,9 @@ class TestFetchEnsembleSpread(unittest.TestCase):
         from weather.ensemble import _stddev
         self.assertEqual(_stddev([]), 0.0)
 
-    @patch("weather.ensemble._fetch_ensemble_json")
-    def test_new_api_format_model_in_key(self, mock_fetch):
+    @pytest.mark.asyncio
+    @patch("weather.ensemble.fetch_json", new_callable=AsyncMock)
+    async def test_new_api_format_model_in_key(self, mock_fetch):
         """New Open-Meteo format: model name embedded in member key suffix."""
         with tempfile.TemporaryDirectory() as tmpdir:
             mock_fetch.return_value = {
@@ -239,21 +244,22 @@ class TestFetchEnsembleSpread(unittest.TestCase):
                     "temperature_2m_max_ncep_gefs025": [43.6],
                 },
             }
-            result = fetch_ensemble_spread(40.78, -73.87, "2026-02-17", "high",
+            result = await fetch_ensemble_spread(40.78, -73.87, "2026-02-17", "high",
                                             cache_dir=tmpdir)
             # 3 ECMWF members + 2 GFS members (mean keys excluded by regex)
             self.assertEqual(result.n_members, 5)
             self.assertGreater(result.ecmwf_stddev, 0)
             self.assertGreater(result.gfs_stddev, 0)
 
-    @patch("weather.ensemble._fetch_ensemble_json")
-    def test_low_metric_uses_min(self, mock_fetch):
+    @pytest.mark.asyncio
+    @patch("weather.ensemble.fetch_json", new_callable=AsyncMock)
+    async def test_low_metric_uses_min(self, mock_fetch):
         """Metric 'low' should query temperature_2m_min."""
         with tempfile.TemporaryDirectory() as tmpdir:
             mock_fetch.return_value = [
                 {"daily": {"time": ["2026-02-15"], "temperature_2m_min_member0": [30.0], "temperature_2m_min_member1": [32.0]}, "model": "ecmwf_ifs025"},
             ]
-            result = fetch_ensemble_spread(40.77, -73.87, "2026-02-15", "low",
+            result = await fetch_ensemble_spread(40.77, -73.87, "2026-02-15", "low",
                                             cache_dir=tmpdir)
             self.assertEqual(result.n_members, 2)
 

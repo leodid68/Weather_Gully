@@ -5,16 +5,12 @@ These are the same stations used by Polymarket for resolution,
 making this the ground-truth data source.
 """
 
-import json
 import logging
-import time
 from datetime import datetime, timezone
-from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
 from zoneinfo import ZoneInfo
 
-from ._ssl import SSL_CTX as _SSL_CTX
 from .config import LOCATIONS
+from .http_client import fetch_json
 
 logger = logging.getLogger(__name__)
 
@@ -41,60 +37,6 @@ STATION_MAP: dict[str, str] = {
     "Wellington": "NZWN",    # Wellington International
 }
 
-_RETRYABLE_CODES = {429, 500, 502, 503, 504}
-
-
-def _fetch_json(
-    url: str,
-    max_retries: int = 3,
-    base_delay: float = 1.0,
-) -> list | None:
-    """Fetch JSON from Aviation Weather API with retry on transient errors."""
-    for attempt in range(max_retries + 1):
-        try:
-            req = Request(url, headers={
-                "Accept": "application/json",
-                "User-Agent": _USER_AGENT,
-            })
-            with urlopen(req, timeout=30, context=_SSL_CTX) as resp:
-                return json.loads(resp.read().decode())
-        except HTTPError as exc:
-            if exc.code in _RETRYABLE_CODES and attempt < max_retries:
-                delay = base_delay * (2 ** attempt)
-                logger.warning(
-                    "Aviation API HTTP %d — retry %d/%d in %.1fs",
-                    exc.code, attempt + 1, max_retries, delay,
-                )
-                time.sleep(delay)
-                continue
-            logger.error("Aviation API HTTP %d: %s", exc.code, url)
-            return None
-        except URLError as exc:
-            if attempt < max_retries:
-                delay = base_delay * (2 ** attempt)
-                logger.warning(
-                    "Aviation API URL error — retry %d/%d in %.1fs: %s",
-                    attempt + 1, max_retries, delay, exc.reason,
-                )
-                time.sleep(delay)
-                continue
-            logger.error("Aviation API URL error: %s", exc.reason)
-            return None
-        except TimeoutError:
-            if attempt < max_retries:
-                delay = base_delay * (2 ** attempt)
-                logger.warning(
-                    "Aviation API timeout — retry %d/%d in %.1fs",
-                    attempt + 1, max_retries, delay,
-                )
-                time.sleep(delay)
-                continue
-            logger.error("Aviation API timeout: %s", url)
-            return None
-        except json.JSONDecodeError as exc:
-            logger.error("Aviation API JSON parse error: %s", exc)
-            return None
-    return None
 
 
 def _celsius_to_fahrenheit(c: float) -> float:
@@ -102,7 +44,7 @@ def _celsius_to_fahrenheit(c: float) -> float:
     return round(c * 9.0 / 5.0 + 32.0, 1)
 
 
-def get_metar_observations(
+async def get_metar_observations(
     locations: list[str],
     hours: int = 24,
     max_retries: int = 3,
@@ -135,7 +77,7 @@ def get_metar_observations(
     ids_param = ",".join(stations.keys())
     url = f"{AVIATION_API_BASE}?ids={ids_param}&format=json&hours={hours}"
 
-    data = _fetch_json(url, max_retries=max_retries, base_delay=base_delay)
+    data = await fetch_json(url, max_retries=max_retries, base_delay=base_delay)
     if data is None:
         logger.error("Aviation API returned no data")
         return {}
@@ -236,7 +178,7 @@ def compute_daily_extremes(
     }
 
 
-def get_aviation_daily_data(
+async def get_aviation_daily_data(
     locations: list[str],
     hours: int = 24,
     max_retries: int = 3,
@@ -248,7 +190,7 @@ def get_aviation_daily_data(
         ``{location: {date_str: {"obs_high": float, "obs_low": float,
         "obs_count": int, "latest_obs_time": str}}}``
     """
-    all_obs = get_metar_observations(
+    all_obs = await get_metar_observations(
         locations, hours=hours,
         max_retries=max_retries, base_delay=base_delay,
     )
