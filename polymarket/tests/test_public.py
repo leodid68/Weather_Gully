@@ -1,6 +1,6 @@
-"""Tests for polymarket.public — PublicClient with retry."""
+"""Tests for polymarket.public — async PublicClient with retry."""
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import httpx
 import pytest
@@ -8,73 +8,71 @@ import pytest
 from polymarket.public import PublicClient
 
 
+def _mock_response(status_code=200, json_data=None):
+    """Create a mock httpx.Response."""
+    resp = MagicMock(spec=httpx.Response)
+    resp.status_code = status_code
+    resp.json.return_value = json_data if json_data is not None else {}
+    resp.raise_for_status = MagicMock()
+    return resp
+
+
 class TestPublicClientRetry:
 
-    def test_success_no_retry(self):
+    @pytest.mark.asyncio
+    async def test_success_no_retry(self):
         """Successful request should not retry."""
         client = PublicClient(base_delay=0.01)
-        ok_resp = MagicMock()
-        ok_resp.status_code = 200
-        ok_resp.json.return_value = {"bids": [], "asks": []}
-        ok_resp.raise_for_status = MagicMock()
+        ok_resp = _mock_response(200, {"bids": [], "asks": []})
 
-        with patch.object(client._http, "request", return_value=ok_resp) as mock_req:
-            result = client.get_orderbook("token-1")
-            assert result == {"bids": [], "asks": []}
-            assert mock_req.call_count == 1
+        client._http = AsyncMock()
+        client._http.request.return_value = ok_resp
 
-        client.close()
+        result = await client.get_orderbook("token-1")
+        assert result == {"bids": [], "asks": []}
+        assert client._http.request.call_count == 1
 
-    def test_retry_on_429(self):
+    @pytest.mark.asyncio
+    async def test_retry_on_429(self):
         """429 should trigger retry and eventually succeed."""
         client = PublicClient(base_delay=0.01)
 
-        retry_resp = MagicMock()
-        retry_resp.status_code = 429
+        retry_resp = _mock_response(429)
+        ok_resp = _mock_response(200, {"bids": [{"price": 0.5}], "asks": []})
 
-        ok_resp = MagicMock()
-        ok_resp.status_code = 200
-        ok_resp.json.return_value = {"bids": [{"price": 0.5}], "asks": []}
-        ok_resp.raise_for_status = MagicMock()
+        client._http = AsyncMock()
+        client._http.request.side_effect = [retry_resp, ok_resp]
 
-        with patch.object(client._http, "request", side_effect=[retry_resp, ok_resp]) as mock_req:
-            result = client.get_orderbook("token-1")
-            assert result["bids"][0]["price"] == 0.5
-            assert mock_req.call_count == 2
+        result = await client.get_orderbook("token-1")
+        assert result["bids"][0]["price"] == 0.5
+        assert client._http.request.call_count == 2
 
-        client.close()
-
-    def test_retry_on_timeout(self):
+    @pytest.mark.asyncio
+    async def test_retry_on_timeout(self):
         """Timeout should trigger retry and eventually succeed."""
         client = PublicClient(base_delay=0.01)
 
-        ok_resp = MagicMock()
-        ok_resp.status_code = 200
-        ok_resp.json.return_value = {"mid": "0.55"}
-        ok_resp.raise_for_status = MagicMock()
+        ok_resp = _mock_response(200, {"mid": "0.55"})
 
-        with patch.object(
-            client._http, "request",
-            side_effect=[httpx.ReadTimeout("timeout"), ok_resp],
-        ) as mock_req:
-            result = client.get_price("token-1")
-            assert result["price"] == "0.55"
-            assert mock_req.call_count == 2
+        client._http = AsyncMock()
+        client._http.request.side_effect = [httpx.ReadTimeout("timeout"), ok_resp]
 
-        client.close()
+        result = await client.get_price("token-1")
+        assert result["price"] == "0.55"
+        assert client._http.request.call_count == 2
 
-    def test_max_retries_exhausted(self):
+    @pytest.mark.asyncio
+    async def test_max_retries_exhausted(self):
         """After max_retries, should raise."""
         client = PublicClient(max_retries=2, base_delay=0.01)
 
-        fail_resp = MagicMock()
-        fail_resp.status_code = 503
+        fail_resp = _mock_response(503)
         fail_resp.raise_for_status.side_effect = httpx.HTTPStatusError(
             "503", request=MagicMock(), response=fail_resp,
         )
 
-        with patch.object(client._http, "request", return_value=fail_resp):
-            with pytest.raises(httpx.HTTPStatusError):
-                client.get_orderbook("token-1")
+        client._http = AsyncMock()
+        client._http.request.return_value = fail_resp
 
-        client.close()
+        with pytest.raises(httpx.HTTPStatusError):
+            await client.get_orderbook("token-1")

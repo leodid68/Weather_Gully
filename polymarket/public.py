@@ -1,8 +1,8 @@
-"""Public (read-only) Polymarket CLOB client — no private key required."""
+"""Public (read-only) Polymarket CLOB client — async, no private key required."""
 
+import asyncio
 import logging
 import random
-import time
 
 import httpx
 
@@ -14,7 +14,7 @@ _RETRYABLE_CODES = {429, 500, 502, 503, 504}
 
 
 class PublicClient:
-    """Lightweight read-only client for public CLOB endpoints (no private key).
+    """Lightweight async read-only client for public CLOB endpoints (no private key).
 
     Args:
         base_url: CLOB API base URL.
@@ -30,23 +30,23 @@ class PublicClient:
         max_retries: int = 3,
         base_delay: float = 1.0,
     ):
-        self._http = httpx.Client(base_url=base_url, timeout=timeout)
+        self._http = httpx.AsyncClient(base_url=base_url, timeout=timeout)
         self.max_retries = max_retries
         self.base_delay = base_delay
 
-    def _request(self, method: str, path: str) -> httpx.Response:
+    async def _request(self, method: str, path: str) -> httpx.Response:
         """Execute an HTTP request with retry + jitter on transient errors."""
         resp = None
         for attempt in range(self.max_retries + 1):
             try:
-                resp = self._http.request(method, path)
+                resp = await self._http.request(method, path)
                 if resp.status_code in _RETRYABLE_CODES and attempt < self.max_retries:
                     delay = self.base_delay * (2 ** attempt) * (0.5 + random.random())
                     logger.warning(
                         "PublicClient %d on %s %s — retry %d/%d in %.1fs",
                         resp.status_code, method, path, attempt + 1, self.max_retries, delay,
                     )
-                    time.sleep(delay)
+                    await asyncio.sleep(delay)
                     continue
                 resp.raise_for_status()
                 return resp
@@ -57,7 +57,7 @@ class PublicClient:
                         "PublicClient timeout on %s %s — retry %d/%d in %.1fs",
                         method, path, attempt + 1, self.max_retries, delay,
                     )
-                    time.sleep(delay)
+                    await asyncio.sleep(delay)
                     continue
                 raise
 
@@ -66,12 +66,12 @@ class PublicClient:
             resp.raise_for_status()
         raise httpx.ConnectError(f"All {self.max_retries} retries exhausted for {method} {path}")
 
-    def get_markets(self, **filters) -> list[dict]:
+    async def get_markets(self, **filters) -> list[dict]:
         limit = filters.pop("limit", None)
         from urllib.parse import urlencode
         params = urlencode(filters) if filters else ""
         path = "/sampling-markets" + (f"?{params}" if params else "")
-        resp = self._request("GET", path)
+        resp = await self._request("GET", path)
         data = resp.json()
         if isinstance(data, dict):
             items = data.get("data", data.get("markets", []))
@@ -81,23 +81,23 @@ class PublicClient:
             items = items[:int(limit)]
         return items
 
-    def get_orderbook(self, token_id: str) -> dict:
-        resp = self._request("GET", f"/book?token_id={token_id}")
+    async def get_orderbook(self, token_id: str) -> dict:
+        resp = await self._request("GET", f"/book?token_id={token_id}")
         return resp.json()
 
-    def get_price(self, token_id: str) -> dict:
-        resp = self._request("GET", f"/midpoint?token_id={token_id}")
+    async def get_price(self, token_id: str) -> dict:
+        resp = await self._request("GET", f"/midpoint?token_id={token_id}")
         data = resp.json()
         # Normalize: /midpoint returns {"mid": "0.xx"}, callers expect {"price": ...}
         if "mid" in data and "price" not in data:
             data["price"] = data["mid"]
         return data
 
-    def close(self):
-        self._http.close()
+    async def close(self):
+        await self._http.aclose()
 
-    def __enter__(self):
+    async def __aenter__(self):
         return self
 
-    def __exit__(self, *args):
-        self.close()
+    async def __aexit__(self, *args):
+        await self.close()

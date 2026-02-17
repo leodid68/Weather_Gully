@@ -1,5 +1,6 @@
-"""Polymarket CLOB REST client — sync, with connection pooling and retry."""
+"""Polymarket CLOB REST client — async, with connection pooling and retry."""
 
+import asyncio
 import json
 import logging
 import random
@@ -26,7 +27,7 @@ class CircuitOpenError(Exception):
 
 
 class _CircuitBreaker:
-    """Simple circuit breaker: CLOSED → OPEN (after failures) → HALF_OPEN → CLOSED.
+    """Simple circuit breaker: CLOSED -> OPEN (after failures) -> HALF_OPEN -> CLOSED.
 
     Args:
         failure_threshold: Number of consecutive failures before opening.
@@ -52,7 +53,7 @@ class _CircuitBreaker:
             if self.state == self.OPEN:
                 if time.monotonic() - self._last_failure_time >= self.recovery_timeout:
                     self.state = self.HALF_OPEN
-                    logger.info("Circuit breaker → HALF_OPEN (probe allowed)")
+                    logger.info("Circuit breaker -> HALF_OPEN (probe allowed)")
                     return True
                 return False
             # HALF_OPEN: allow one probe
@@ -61,7 +62,7 @@ class _CircuitBreaker:
     def record_success(self) -> None:
         with self._lock:
             if self.state == self.HALF_OPEN:
-                logger.info("Circuit breaker → CLOSED (probe succeeded)")
+                logger.info("Circuit breaker -> CLOSED (probe succeeded)")
             self._failure_count = 0
             self.state = self.CLOSED
 
@@ -72,13 +73,13 @@ class _CircuitBreaker:
             if self._failure_count >= self.failure_threshold:
                 self.state = self.OPEN
                 logger.warning(
-                    "Circuit breaker → OPEN after %d consecutive failures (cooldown %.0fs)",
+                    "Circuit breaker -> OPEN after %d consecutive failures (cooldown %.0fs)",
                     self._failure_count, self.recovery_timeout,
                 )
 
 
 class PolymarketClient:
-    """Synchronous client for the Polymarket CLOB API.
+    """Async client for the Polymarket CLOB API.
 
     Args:
         private_key: Ethereum private key (hex string with 0x prefix).
@@ -111,7 +112,7 @@ class PolymarketClient:
         self._secret = api_creds["secret"]
         self._passphrase = api_creds["passphrase"]
 
-        self._http = httpx.Client(base_url=base_url, timeout=15)
+        self._http = httpx.AsyncClient(base_url=base_url, timeout=15)
         self._breaker = _CircuitBreaker()
 
     def __repr__(self) -> str:
@@ -121,7 +122,7 @@ class PolymarketClient:
     # Low-level request
     # ------------------------------------------------------------------
 
-    def _request(
+    async def _request(
         self, method: str, path: str, body: dict | list | None = None, auth: bool = True
     ) -> dict | list:
         if not self._breaker.allow_request():
@@ -150,7 +151,7 @@ class PolymarketClient:
                 )
 
             try:
-                resp = self._http.request(
+                resp = await self._http.request(
                     method,
                     path,
                     content=body_str.encode() if body_str else None,
@@ -162,7 +163,7 @@ class PolymarketClient:
                         "CLOB %d on %s %s — retry %d/%d in %.1fs",
                         resp.status_code, method, path, attempt + 1, self.max_retries, delay,
                     )
-                    time.sleep(delay)
+                    await asyncio.sleep(delay)
                     continue
                 if resp.status_code >= 500:
                     logger.error("CLOB %d %s %s: %s", resp.status_code, method, path, resp.text)
@@ -179,7 +180,7 @@ class PolymarketClient:
                         "CLOB timeout on %s %s — retry %d/%d in %.1fs",
                         method, path, attempt + 1, self.max_retries, delay,
                     )
-                    time.sleep(delay)
+                    await asyncio.sleep(delay)
                     continue
                 self._breaker.record_failure()
                 raise
@@ -199,40 +200,40 @@ class PolymarketClient:
     # Markets
     # ------------------------------------------------------------------
 
-    def get_markets(self, **filters) -> list[dict]:
+    async def get_markets(self, **filters) -> list[dict]:
         """Fetch available markets with optional query filters."""
         path = "/markets" + (f"?{urlencode(filters)}" if filters else "")
-        return self._request("GET", path, auth=False)
+        return await self._request("GET", path, auth=False)
 
-    def get_market(self, condition_id: str) -> dict:
+    async def get_market(self, condition_id: str) -> dict:
         """Fetch a single market by condition ID."""
-        return self._request("GET", f"/markets/{condition_id}", auth=False)
+        return await self._request("GET", f"/markets/{condition_id}", auth=False)
 
     # ------------------------------------------------------------------
     # Orderbook
     # ------------------------------------------------------------------
 
-    def get_orderbook(self, token_id: str) -> dict:
+    async def get_orderbook(self, token_id: str) -> dict:
         """Fetch the orderbook for a token. Returns {bids: [...], asks: [...]}."""
-        return self._request("GET", f"/book?token_id={token_id}", auth=False)
+        return await self._request("GET", f"/book?token_id={token_id}", auth=False)
 
-    def get_price(self, token_id: str) -> dict:
+    async def get_price(self, token_id: str) -> dict:
         """Fetch current midpoint price for a token."""
-        data = self._request("GET", f"/midpoint?token_id={token_id}", auth=False)
+        data = await self._request("GET", f"/midpoint?token_id={token_id}", auth=False)
         # Normalize: /midpoint returns {"mid": "0.xx"}, callers expect {"price": ...}
         if "mid" in data and "price" not in data:
             data["price"] = data["mid"]
         return data
 
-    def is_neg_risk(self, token_id: str) -> bool:
+    async def is_neg_risk(self, token_id: str) -> bool:
         """Check if a token uses the neg-risk exchange."""
-        resp = self._request("GET", f"/neg-risk?token_id={token_id}", auth=False)
+        resp = await self._request("GET", f"/neg-risk?token_id={token_id}", auth=False)
         return resp.get("neg_risk", False)
 
-    def get_tick_size(self, token_id: str) -> str:
+    async def get_tick_size(self, token_id: str) -> str:
         """Fetch minimum tick size for a token from the CLOB API."""
         try:
-            resp = self._request("GET", f"/tick-size?token_id={token_id}", auth=False)
+            resp = await self._request("GET", f"/tick-size?token_id={token_id}", auth=False)
             return resp.get("minimum_tick_size", "0.01")
         except Exception as exc:
             logger.warning("Could not fetch tick_size for %s: %s", token_id[:16], exc)
@@ -242,7 +243,7 @@ class PolymarketClient:
     # Orders
     # ------------------------------------------------------------------
 
-    def post_order(
+    async def post_order(
         self,
         token_id: str,
         side: str,
@@ -258,9 +259,9 @@ class PolymarketClient:
         If neg_risk is None, auto-detects from the API.
         """
         if neg_risk is None:
-            neg_risk = self.is_neg_risk(token_id)
+            neg_risk = await self.is_neg_risk(token_id)
             logger.info("Auto-detected neg_risk=%s for token", neg_risk)
-        tick_size = self.get_tick_size(token_id)
+        tick_size = await self.get_tick_size(token_id)
         signed = build_signed_order(
             maker=self.address,
             token_id=token_id,
@@ -296,38 +297,38 @@ class PolymarketClient:
         }
         logger.debug("POST /order side=%s price=%s size=%s",
                      order_payload["side"], order_payload["makerAmount"], order_payload["takerAmount"])
-        return self._request("POST", "/order", body=body)
+        return await self._request("POST", "/order", body=body)
 
-    def cancel_order(self, order_id: str) -> dict:
+    async def cancel_order(self, order_id: str) -> dict:
         """Cancel an open order by its ID."""
-        return self._request("DELETE", "/order", body={"orderID": order_id})
+        return await self._request("DELETE", "/order", body={"orderID": order_id})
 
-    def cancel_all(self) -> dict:
+    async def cancel_all(self) -> dict:
         """Cancel all open orders."""
-        return self._request("DELETE", "/cancel-all")
+        return await self._request("DELETE", "/cancel-all")
 
-    def get_open_orders(self, **filters) -> list[dict]:
+    async def get_open_orders(self, **filters) -> list[dict]:
         """Fetch all open orders for the authenticated user."""
         path = "/data/orders" + (f"?{urlencode(filters)}" if filters else "")
-        return self._request("GET", path)
+        return await self._request("GET", path)
 
     # ------------------------------------------------------------------
     # Trades
     # ------------------------------------------------------------------
 
-    def get_trades(self, **filters) -> list[dict]:
+    async def get_trades(self, **filters) -> list[dict]:
         """Fetch trade history with optional filters."""
         path = "/data/trades" + (f"?{urlencode(filters)}" if filters else "")
-        return self._request("GET", path)
+        return await self._request("GET", path)
 
-    def get_order(self, order_id: str) -> dict:
+    async def get_order(self, order_id: str) -> dict:
         """Fetch a single order by ID to check fill status."""
-        return self._request("GET", f"/data/order/{order_id}")
+        return await self._request("GET", f"/data/order/{order_id}")
 
-    def is_order_filled(self, order_id: str) -> bool:
+    async def is_order_filled(self, order_id: str) -> bool:
         """Check whether an order has been fully filled."""
         try:
-            order = self.get_order(order_id)
+            order = await self.get_order(order_id)
             if order.get("status") == "MATCHED":
                 return True
             size_matched = order.get("size_matched")
@@ -343,12 +344,12 @@ class PolymarketClient:
     # Lifecycle
     # ------------------------------------------------------------------
 
-    def close(self) -> None:
+    async def close(self) -> None:
         """Close the underlying HTTP connection pool."""
-        self._http.close()
+        await self._http.aclose()
 
-    def __enter__(self):
+    async def __aenter__(self):
         return self
 
-    def __exit__(self, *args):
-        self.close()
+    async def __aexit__(self, *args):
+        await self.close()
