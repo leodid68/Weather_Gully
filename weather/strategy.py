@@ -1456,6 +1456,7 @@ async def run_weather_strategy(
                         traded_this_event = True
                         logger.info("Maker order queued: %s $%.2f @ $%.2f (order %s)",
                                     side.upper(), position_size, maker_price, result["order_id"])
+                        balance = max(0.0, balance - position_size)
                     else:
                         logger.info("Maker order rejected — falling back to taker")
                         use_taker = True
@@ -1542,10 +1543,10 @@ async def run_weather_strategy(
                             horizon=days_ahead,
                         ))
 
-                    # Update remaining balance
-                    balance = max(0.0, balance - position_size)
-                else:
-                    logger.error("Trade failed: %s", result.get("error", "Unknown"))
+                        # Update remaining balance
+                        balance = max(0.0, balance - position_size)
+                    else:
+                        logger.error("Trade failed: %s", result.get("error", "Unknown"))
 
     # Stop-loss: check if forecast has reversed away from our held positions
     if config.stop_loss_reversal:
