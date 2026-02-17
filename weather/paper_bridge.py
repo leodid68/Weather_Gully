@@ -123,6 +123,7 @@ class PaperBridge:
         amount: float,
         fill_timeout: float = 0.0,
         fill_poll_interval: float = 2.0,
+        **kwargs,
     ) -> dict:
         """Simulate a buy trade using cached market data."""
         gm = self._real._market_cache.get(market_id)
