@@ -60,6 +60,30 @@ logger = logging.getLogger(__name__)
 _TRADE_SOURCE = "clob:weather"
 
 
+def compute_yes_sum_deviation(event_markets: list[dict]) -> tuple[float, float, int]:
+    """Compute sum of YES prices and deviation from $1.00.
+
+    Returns (yes_sum, deviation, n_buckets).
+    Returns (0.0, 0.0, 0) if insufficient data.
+    """
+    yes_prices = []
+    for m in event_markets:
+        ask_str = m.get("best_ask") or m.get("external_price_yes") or "0"
+        try:
+            ask = float(ask_str)
+        except (ValueError, TypeError):
+            ask = 0.0
+        if ask > 0:
+            yes_prices.append(ask)
+
+    if len(yes_prices) < 3:
+        return 0.0, 0.0, 0
+
+    yes_sum = sum(yes_prices)
+    deviation = yes_sum - 1.0
+    return yes_sum, deviation, len(yes_prices)
+
+
 # --------------------------------------------------------------------------
 # Safeguards (ported from monolith, now uses logging)
 # --------------------------------------------------------------------------
@@ -1042,6 +1066,25 @@ async def run_weather_strategy(
 
         logger.info("%s %s (%s temp)", location, date_str, metric)
 
+        # --- Multi-choice: compute sum-YES deviation ---
+        yes_sum, deviation, n_buckets = compute_yes_sum_deviation(event_markets)
+        if n_buckets >= 3:
+            if abs(deviation) > 0.02:
+                logger.info("Multi-choice %s %s: sum_YES=$%.4f deviation=%+.4f (%d buckets)",
+                            location, date_str, yes_sum, deviation, n_buckets)
+
+            fee_rate = config.trading_fees
+            edge_per_bucket = abs(deviation) / n_buckets
+            net_edge = edge_per_bucket - fee_rate
+
+            if net_edge > 0.005:
+                arb_side = "NO" if deviation > 0 else "YES"
+                arb_profit = abs(deviation) - (n_buckets * fee_rate)
+                logger.warning(
+                    "ARB OPPORTUNITY %s %s: buy all %s — deviation=%+.4f net_profit=$%.4f (%d buckets)",
+                    location, date_str, arb_side, deviation, arb_profit, n_buckets,
+                )
+
         forecasts = noaa_cache.get(location, {})
         day_forecast = forecasts.get(date_str, {})
         noaa_temp = day_forecast.get(metric)
@@ -1123,8 +1166,8 @@ async def run_weather_strategy(
 
         # Adaptive sigma: compute from ensemble spread + model spread + feedback EMA
         adaptive_sigma_value = None
+        loc_data = LOCATIONS.get(location, {})
         if config.adaptive_sigma:
-            loc_data = LOCATIONS.get(location, {})
             ensemble_result = await fetch_ensemble_spread(
                 loc_data.get("lat", 0), loc_data.get("lon", 0),
                 date_str, metric,
@@ -1151,6 +1194,19 @@ async def run_weather_strategy(
             old_sigma = adaptive_sigma_value
             adaptive_sigma_value *= config.model_disagreement_multiplier
             logger.info("Sigma boosted for model disagreement: %.2f → %.2f", old_sigma, adaptive_sigma_value)
+
+        # Boost sigma for international cities (no NOAA → single source)
+        if loc_data.get("unit") == "C":
+            if adaptive_sigma_value is not None:
+                adaptive_sigma_value *= config.international_sigma_boost
+                logger.info("International sigma boost (no NOAA): → %.2f", adaptive_sigma_value)
+            else:
+                # Non-adaptive path: compute base sigma and apply boost
+                from .probability import _get_stddev
+                base_sigma = _get_stddev(date_str, location=location)
+                adaptive_sigma_value = base_sigma * config.international_sigma_boost
+                logger.info("International sigma boost (no NOAA, non-adaptive): %.2f → %.2f",
+                            base_sigma, adaptive_sigma_value)
 
         # Feedback bias correction (before delta detection so both use corrected temp)
         forecast_month = int(date_str.split("-")[1])

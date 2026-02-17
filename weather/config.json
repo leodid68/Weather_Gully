@@ -50,5 +50,6 @@
   "wu_cache_ttl": 3600,
   "noaa_cache_ttl": 900,
   "dynamic_weights": true,
-  "wu_weight_bonus": 0.20
+  "wu_weight_bonus": 0.20,
+  "international_sigma_boost": 1.3
 }

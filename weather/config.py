@@ -175,6 +175,9 @@ class Config:
     dynamic_weights: bool = True    # Use performance-based weights
     wu_weight_bonus: float = 0.20   # +20% bonus for WU (resolution source)
 
+    # International sigma boost (no NOAA → single source → higher uncertainty)
+    international_sigma_boost: float = 1.3
+
     @property
     def active_locations(self) -> list[str]:
         """Return canonical location keys matching LOCATIONS dict keys.
