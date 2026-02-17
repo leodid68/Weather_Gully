@@ -2,6 +2,8 @@
 
 import unittest
 
+import pytest
+
 from bot.gamma import (
     GammaMarket,
     MultiChoiceGroup,
@@ -109,7 +111,8 @@ class TestGroupMultiChoice(unittest.TestCase):
             event_title=kw.get("event_title", "Test Event"),
         )
 
-    def test_groups_by_event(self):
+    @pytest.mark.asyncio
+    async def test_groups_by_event(self):
         markets = [
             self._make_gm("ev1", 0.30, id="1", group_item_title="<250k"),
             self._make_gm("ev1", 0.50, id="2", group_item_title="250-500k"),
@@ -117,60 +120,66 @@ class TestGroupMultiChoice(unittest.TestCase):
             self._make_gm("ev2", 0.60, id="4"),
             self._make_gm("ev2", 0.40, id="5"),
         ]
-        groups = group_multi_choice(markets)
+        groups = await group_multi_choice(markets)
         self.assertEqual(len(groups), 2)
 
-    def test_yes_sum_correct(self):
+    @pytest.mark.asyncio
+    async def test_yes_sum_correct(self):
         markets = [
             self._make_gm("ev1", 0.30),
             self._make_gm("ev1", 0.50),
             self._make_gm("ev1", 0.20),
         ]
-        groups = group_multi_choice(markets)
+        groups = await group_multi_choice(markets)
         self.assertEqual(len(groups), 1)
         self.assertAlmostEqual(groups[0].yes_sum, 1.0)
         self.assertAlmostEqual(groups[0].deviation, 0.0)
 
-    def test_underpriced_group(self):
+    @pytest.mark.asyncio
+    async def test_underpriced_group(self):
         markets = [
             self._make_gm("ev1", 0.25),
             self._make_gm("ev1", 0.40),
             self._make_gm("ev1", 0.15),
         ]
-        groups = group_multi_choice(markets)
+        groups = await group_multi_choice(markets)
         self.assertAlmostEqual(groups[0].yes_sum, 0.80)
         self.assertAlmostEqual(groups[0].deviation, -0.20)
 
-    def test_overpriced_group(self):
+    @pytest.mark.asyncio
+    async def test_overpriced_group(self):
         markets = [
             self._make_gm("ev1", 0.40),
             self._make_gm("ev1", 0.50),
             self._make_gm("ev1", 0.20),
         ]
-        groups = group_multi_choice(markets)
+        groups = await group_multi_choice(markets)
         self.assertAlmostEqual(groups[0].yes_sum, 1.10)
         self.assertAlmostEqual(groups[0].deviation, 0.10)
 
-    def test_single_market_excluded(self):
+    @pytest.mark.asyncio
+    async def test_single_market_excluded(self):
         markets = [self._make_gm("ev1", 0.50)]
-        groups = group_multi_choice(markets)
+        groups = await group_multi_choice(markets)
         self.assertEqual(len(groups), 0)
 
-    def test_non_neg_risk_excluded(self):
+    @pytest.mark.asyncio
+    async def test_non_neg_risk_excluded(self):
         m = self._make_gm("ev1", 0.50)
         m.neg_risk = False
-        groups = group_multi_choice([m, self._make_gm("ev1", 0.30)])
+        groups = await group_multi_choice([m, self._make_gm("ev1", 0.30)])
         # Only 1 neg_risk market → group has < 2 members
         self.assertEqual(len(groups), 0)
 
-    def test_sorted_by_deviation(self):
+    @pytest.mark.asyncio
+    async def test_sorted_by_deviation(self):
         markets = [
             self._make_gm("ev1", 0.30, event_title="Small dev"),
             self._make_gm("ev1", 0.71, event_title="Small dev"),
             self._make_gm("ev2", 0.60, event_title="Big dev"),
             self._make_gm("ev2", 0.60, event_title="Big dev"),
         ]
-        groups = group_multi_choice(markets)
+        groups = await group_multi_choice(markets)
         # ev2 has deviation 0.20, ev1 has 0.01
         self.assertGreater(abs(groups[0].deviation), abs(groups[1].deviation))
 
@@ -304,10 +313,11 @@ class TestResolvePendingPredictions(unittest.TestCase):
         def __init__(self, resolutions):
             self._resolutions = resolutions
 
-        def check_resolution(self, condition_id):
+        async def check_resolution(self, condition_id):
             return self._resolutions.get(condition_id)
 
-    def test_resolves_closed_markets(self):
+    @pytest.mark.asyncio
+    async def test_resolves_closed_markets(self):
         state = TradingState()
         state.record_prediction("cid1", 0.7, 0.5)
         state.record_prediction("cid2", 0.3, 0.4)
@@ -317,38 +327,42 @@ class TestResolvePendingPredictions(unittest.TestCase):
             "cid2": None,  # still open
         })
 
-        count = resolve_pending_predictions(state, gamma)
+        count = await resolve_pending_predictions(state, gamma)
         self.assertEqual(count, 1)
         self.assertTrue(state.predictions["cid1"]["resolved"])
         self.assertEqual(state.predictions["cid1"]["outcome"], 1)
         self.assertFalse(state.predictions["cid2"]["resolved"])
 
-    def test_no_double_resolve(self):
+    @pytest.mark.asyncio
+    async def test_no_double_resolve(self):
         state = TradingState()
         state.record_prediction("cid1", 0.7, 0.5)
         state.resolve_prediction("cid1", True)
 
         gamma = self.FakeGamma({"cid1": {"resolved": True, "outcome": False}})
-        count = resolve_pending_predictions(state, gamma)
+        count = await resolve_pending_predictions(state, gamma)
         # Already resolved → should not re-resolve
         self.assertEqual(count, 0)
         self.assertEqual(state.predictions["cid1"]["outcome"], 1)  # stays True
 
-    def test_empty_predictions(self):
+    @pytest.mark.asyncio
+    async def test_empty_predictions(self):
         state = TradingState()
         gamma = self.FakeGamma({})
-        count = resolve_pending_predictions(state, gamma)
+        count = await resolve_pending_predictions(state, gamma)
         self.assertEqual(count, 0)
 
-    def test_outcome_false(self):
+    @pytest.mark.asyncio
+    async def test_outcome_false(self):
         state = TradingState()
         state.record_prediction("cid1", 0.2, 0.3)
         gamma = self.FakeGamma({"cid1": {"resolved": True, "outcome": False}})
-        count = resolve_pending_predictions(state, gamma)
+        count = await resolve_pending_predictions(state, gamma)
         self.assertEqual(count, 1)
         self.assertEqual(state.predictions["cid1"]["outcome"], 0)
 
-    def test_calibration_works_after_resolve(self):
+    @pytest.mark.asyncio
+    async def test_calibration_works_after_resolve(self):
         """After resolving, calibration scores should be computable."""
         state = TradingState()
         state.record_prediction("cid1", 0.8, 0.5)
@@ -358,7 +372,7 @@ class TestResolvePendingPredictions(unittest.TestCase):
             "cid1": {"resolved": True, "outcome": True},
             "cid2": {"resolved": True, "outcome": False},
         })
-        resolve_pending_predictions(state, gamma)
+        await resolve_pending_predictions(state, gamma)
 
         cal = state.get_calibration()
         self.assertEqual(cal["n"], 2)
@@ -480,7 +494,8 @@ class TestFetchEventsWithMarkets(unittest.TestCase):
         self.assertEqual(gm.event_id, "204111")
         self.assertEqual(gm.event_title, "Highest temperature in London on February 12?")
 
-    def test_weather_multi_choice_grouping(self):
+    @pytest.mark.asyncio
+    async def test_weather_multi_choice_grouping(self):
         """Temperature outcomes for a city should form a valid multi-choice group."""
         from bot.gamma import _parse_market
 
@@ -519,7 +534,7 @@ class TestFetchEventsWithMarkets(unittest.TestCase):
             )
             markets.append(gm)
 
-        groups = group_multi_choice(markets)
+        groups = await group_multi_choice(markets)
         self.assertEqual(len(groups), 1)
         g = groups[0]
         self.assertEqual(g.event_id, "204111")
@@ -527,7 +542,8 @@ class TestFetchEventsWithMarkets(unittest.TestCase):
         self.assertAlmostEqual(g.yes_sum, 1.0)
         self.assertAlmostEqual(g.deviation, 0.0, places=2)
 
-    def test_weather_3_days_grouping(self):
+    @pytest.mark.asyncio
+    async def test_weather_3_days_grouping(self):
         """Markets for the same city on different days form separate groups."""
         markets = []
         for day, event_id in [("Feb 12", "ev1"), ("Feb 13", "ev2"), ("Feb 14", "ev3")]:
@@ -549,7 +565,7 @@ class TestFetchEventsWithMarkets(unittest.TestCase):
                     event_title=f"Highest temperature in London on {day}?",
                 ))
 
-        groups = group_multi_choice(markets)
+        groups = await group_multi_choice(markets)
         self.assertEqual(len(groups), 3)  # One per day
         event_ids = {g.event_id for g in groups}
         self.assertEqual(event_ids, {"ev1", "ev2", "ev3"})

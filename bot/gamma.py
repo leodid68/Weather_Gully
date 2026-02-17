@@ -11,6 +11,7 @@ prices across the group should equal ~$1.00.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from dataclasses import dataclass
@@ -63,9 +64,9 @@ class GammaClient:
     """Read-only client for the Polymarket Gamma API."""
 
     def __init__(self, base_url: str = GAMMA_BASE_URL, timeout: float = 15):
-        self._http = httpx.Client(base_url=base_url, timeout=timeout)
+        self._http = httpx.AsyncClient(base_url=base_url, timeout=timeout)
 
-    def fetch_markets(
+    async def fetch_markets(
         self,
         *,
         limit: int = 100,
@@ -86,7 +87,7 @@ class GammaClient:
         if neg_risk is not None:
             params["neg_risk"] = str(neg_risk).lower()
 
-        resp = self._http.get("/markets", params=params)
+        resp = await self._http.get("/markets", params=params)
         resp.raise_for_status()
         raw = resp.json()
 
@@ -105,7 +106,7 @@ class GammaClient:
         )
         return markets
 
-    def fetch_events(
+    async def fetch_events(
         self,
         *,
         limit: int = 50,
@@ -129,19 +130,19 @@ class GammaClient:
         }
         if tag_slug:
             params["tag_slug"] = tag_slug
-        resp = self._http.get("/events", params=params)
+        resp = await self._http.get("/events", params=params)
         resp.raise_for_status()
         return resp.json()
 
-    def fetch_weather_events(self, *, limit: int = 100) -> list[dict]:
+    async def fetch_weather_events(self, *, limit: int = 100) -> list[dict]:
         """Fetch active weather/temperature events using tag_slug=weather.
 
         Daily temperature markets have tags ['Weather', 'Recurring', 'Hide From New']
         and are NOT returned by standard search/tag parameters.
         """
-        return self.fetch_events(limit=limit, tag_slug="weather")
+        return await self.fetch_events(limit=limit, tag_slug="weather")
 
-    def fetch_events_with_markets(
+    async def fetch_events_with_markets(
         self,
         *,
         tag_slug: str,
@@ -155,7 +156,7 @@ class GammaClient:
 
         Returns (events_raw, all_gamma_markets).
         """
-        events = self.fetch_events(limit=limit, tag_slug=tag_slug)
+        events = await self.fetch_events(limit=limit, tag_slug=tag_slug)
         all_markets: list[GammaMarket] = []
         for ev in events:
             event_id = str(ev.get("id", ""))
@@ -172,14 +173,14 @@ class GammaClient:
         )
         return events, all_markets
 
-    def fetch_event_markets(self, event_id: str, event_title: str = "") -> list[GammaMarket]:
+    async def fetch_event_markets(self, event_id: str, event_title: str = "") -> list[GammaMarket]:
         """Fetch ALL markets for a specific event (complete multi-choice group).
 
         The Gamma API's nested ``events`` field is unreliable (returns
         unrelated events), so we override ``event_id`` and ``event_title``
         on the parsed markets with the known values.
         """
-        resp = self._http.get("/markets", params={
+        resp = await self._http.get("/markets", params={
             "event_id": event_id,
             "closed": "false",
             "limit": "200",
@@ -194,14 +195,14 @@ class GammaClient:
                 gm.event_title = event_title
         return markets
 
-    def check_resolution(self, condition_id: str) -> dict | None:
+    async def check_resolution(self, condition_id: str) -> dict | None:
         """Check if a market is resolved via Gamma API.
 
         Returns {"resolved": True, "outcome": True/False} if the market
         is closed and has a winning outcome, or None if still open.
         """
         try:
-            resp = self._http.get("/markets", params={
+            resp = await self._http.get("/markets", params={
                 "conditionId": condition_id,
                 "limit": "1",
             })
@@ -238,14 +239,14 @@ class GammaClient:
             logger.debug("check_resolution(%s) failed: %s", condition_id[:16], exc)
             return None
 
-    def close(self):
-        self._http.close()
+    async def close(self):
+        await self._http.aclose()
 
-    def __enter__(self):
+    async def __aenter__(self):
         return self
 
-    def __exit__(self, *args):
-        self.close()
+    async def __aexit__(self, *args):
+        await self.close()
 
 
 def _parse_market(m: dict) -> GammaMarket:
@@ -313,7 +314,7 @@ def _parse_market(m: dict) -> GammaMarket:
     )
 
 
-def group_multi_choice(
+async def group_multi_choice(
     markets: list[GammaMarket],
     gamma_client: GammaClient | None = None,
     min_yes_sum: float = 0.80,
@@ -352,7 +353,7 @@ def group_multi_choice(
         # If close to valid range but just below, try completing
         if 0.5 <= yes_sum < min_yes_sum and gamma_client is not None:
             try:
-                full_markets = gamma_client.fetch_event_markets(event_id)
+                full_markets = await gamma_client.fetch_event_markets(event_id)
                 full_neg = [m for m in full_markets if m.neg_risk]
                 full_sum = sum(
                     m.outcome_prices[0] for m in full_neg if m.outcome_prices
@@ -450,7 +451,7 @@ def gamma_to_scanner_format(markets: list[GammaMarket]) -> list[dict]:
     return result
 
 
-def resolve_pending_predictions(state, gamma_client: GammaClient) -> int:
+async def resolve_pending_predictions(state, gamma_client: GammaClient) -> int:
     """Iterate over unresolved predictions and resolve via Gamma API.
 
     Returns the number of newly resolved predictions.
@@ -459,7 +460,7 @@ def resolve_pending_predictions(state, gamma_client: GammaClient) -> int:
     for market_id, pred in list(state.predictions.items()):
         if pred.get("resolved"):
             continue
-        result = gamma_client.check_resolution(market_id)
+        result = await gamma_client.check_resolution(market_id)
         if result and result.get("resolved"):
             state.resolve_prediction(market_id, result["outcome"])
             resolved_count += 1
