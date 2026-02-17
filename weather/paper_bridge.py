@@ -216,6 +216,41 @@ class PaperBridge:
             "trade_id": f"paper-sell-{market_id[:8]}-{int(datetime.now(timezone.utc).timestamp())}",
         }
 
+    def execute_maker_order(
+        self,
+        market_id: str,
+        side: str,
+        amount: float,
+        maker_price: float,
+    ) -> dict:
+        """Simulate a maker order. In paper mode, always returns posted."""
+        import uuid
+
+        gm = self._real._market_cache.get(market_id)
+        if not gm:
+            return {"success": False, "posted": False, "error": "no market data"}
+
+        price = round(maker_price, 2)
+        if price <= 0:
+            return {"success": False, "posted": False, "error": "invalid price"}
+
+        size = round(amount / price, 1)
+        order_id = f"paper-maker-{uuid.uuid4().hex[:8]}"
+
+        logger.info(
+            "[PAPER] Maker order: %s $%.2f @ $%.2f on '%s'",
+            side.upper(), amount, price, market_id[:16],
+        )
+
+        return {
+            "success": True,
+            "posted": True,
+            "order_id": order_id,
+            "price": price,
+            "size": size,
+            "token_id": gm.clob_token_ids[0] if gm.clob_token_ids else "",
+        }
+
     def verify_fill(self, order_id: str, **kwargs) -> dict:
         return {
             "filled": True,
