@@ -7,8 +7,6 @@ import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
-import pytest
-
 from weather.ensemble import (
     EnsembleResult,
     _cache_path,
@@ -176,9 +174,8 @@ class TestCache(unittest.TestCase):
         self.assertIsNone(result)
 
 
-class TestFetchEnsembleSpread(unittest.TestCase):
+class TestFetchEnsembleSpread(unittest.IsolatedAsyncioTestCase):
 
-    @pytest.mark.asyncio
     @patch("weather.ensemble.fetch_json", new_callable=AsyncMock)
     async def test_basic_fetch(self, mock_fetch):
         """Mock API returns member temps, verify stddev computed."""
@@ -194,7 +191,6 @@ class TestFetchEnsembleSpread(unittest.TestCase):
             self.assertGreater(result.ensemble_stddev, 0)
             self.assertEqual(result.n_members, 8)
 
-    @pytest.mark.asyncio
     @patch("weather.ensemble.fetch_json", new_callable=AsyncMock)
     async def test_api_failure_returns_empty(self, mock_fetch):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -203,7 +199,6 @@ class TestFetchEnsembleSpread(unittest.TestCase):
                                             cache_dir=tmpdir)
             self.assertEqual(result.n_members, 0)
 
-    @pytest.mark.asyncio
     @patch("weather.ensemble.fetch_json", new_callable=AsyncMock)
     async def test_cache_hit_skips_api(self, mock_fetch):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -227,7 +222,6 @@ class TestFetchEnsembleSpread(unittest.TestCase):
         from weather.ensemble import _stddev
         self.assertEqual(_stddev([]), 0.0)
 
-    @pytest.mark.asyncio
     @patch("weather.ensemble.fetch_json", new_callable=AsyncMock)
     async def test_new_api_format_model_in_key(self, mock_fetch):
         """New Open-Meteo format: model name embedded in member key suffix."""
@@ -251,7 +245,6 @@ class TestFetchEnsembleSpread(unittest.TestCase):
             self.assertGreater(result.ecmwf_stddev, 0)
             self.assertGreater(result.gfs_stddev, 0)
 
-    @pytest.mark.asyncio
     @patch("weather.ensemble.fetch_json", new_callable=AsyncMock)
     async def test_low_metric_uses_min(self, mock_fetch):
         """Metric 'low' should query temperature_2m_min."""

@@ -1,11 +1,8 @@
 """Tests for Open-Meteo multi-source forecasting."""
 
-import json
 import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
-
-import pytest
 
 from weather.open_meteo import compute_ensemble_forecast, _get_model_weights
 
@@ -110,10 +107,9 @@ class TestEnsembleWithLocation(unittest.TestCase):
         self.assertAlmostEqual(temp_no_loc, temp_empty_loc, places=1)
 
 
-class TestAuxiliaryWeatherVariables(unittest.TestCase):
+class TestAuxiliaryWeatherVariables(unittest.IsolatedAsyncioTestCase):
     """Test that auxiliary variables are extracted from Open-Meteo response."""
 
-    @pytest.mark.asyncio
     @patch("weather.open_meteo.fetch_json", new_callable=AsyncMock)
     async def test_extracts_auxiliary_variables(self, mock_fetch):
         from weather.open_meteo import get_open_meteo_forecast
@@ -157,7 +153,6 @@ class TestAuxiliaryWeatherVariables(unittest.TestCase):
         self.assertIn("precip_sum", day)
         self.assertIn("precip_prob_max", day)
 
-    @pytest.mark.asyncio
     @patch("weather.open_meteo.fetch_json", new_callable=AsyncMock)
     async def test_handles_missing_aux_variables(self, mock_fetch):
         """When auxiliary variables are absent, entry should still have temps."""
@@ -182,7 +177,7 @@ class TestAuxiliaryWeatherVariables(unittest.TestCase):
         self.assertNotIn("cloud_cover_max", day)
 
 
-class TestGetOpenMeteoForecastMulti(unittest.TestCase):
+class TestGetOpenMeteoForecastMulti(unittest.IsolatedAsyncioTestCase):
     """Tests for multi-location batch forecast fetching."""
 
     def setUp(self):
@@ -201,7 +196,6 @@ class TestGetOpenMeteoForecastMulti(unittest.TestCase):
             }
         }
 
-    @pytest.mark.asyncio
     @patch("weather.open_meteo.fetch_json", new_callable=AsyncMock)
     async def test_single_location(self, mock_fetch):
         """Single location — API returns a dict with 'daily' key."""
@@ -221,7 +215,6 @@ class TestGetOpenMeteoForecastMulti(unittest.TestCase):
         self.assertEqual(day["ecmwf_high"], 87)
         mock_fetch.assert_called_once()
 
-    @pytest.mark.asyncio
     @patch("weather.open_meteo.fetch_json", new_callable=AsyncMock)
     async def test_multiple_locations_same_timezone(self, mock_fetch):
         """Multiple locations in the same timezone — API returns a list."""
@@ -245,7 +238,6 @@ class TestGetOpenMeteoForecastMulti(unittest.TestCase):
         # Same timezone → single API call
         mock_fetch.assert_called_once()
 
-    @pytest.mark.asyncio
     @patch("weather.open_meteo.fetch_json", new_callable=AsyncMock)
     async def test_multiple_timezone_groups(self, mock_fetch):
         """Locations in different timezones — multiple API calls."""
@@ -269,7 +261,6 @@ class TestGetOpenMeteoForecastMulti(unittest.TestCase):
         self.assertEqual(result["Chicago"]["2025-06-15"]["gfs_high"], 90)
         self.assertEqual(mock_fetch.call_count, 2)
 
-    @pytest.mark.asyncio
     @patch("weather.open_meteo.fetch_json", new_callable=AsyncMock)
     async def test_api_failure_partial_data(self, mock_fetch):
         """One timezone group fails — that group returns empty, others succeed."""
@@ -294,7 +285,6 @@ class TestGetOpenMeteoForecastMulti(unittest.TestCase):
         # Chicago group failed — empty dict
         self.assertEqual(result["Chicago"], {})
 
-    @pytest.mark.asyncio
     @patch("weather.open_meteo.fetch_json", new_callable=AsyncMock)
     async def test_empty_locations(self, mock_fetch):
         """Empty locations dict — returns empty result, no API calls."""
@@ -306,7 +296,7 @@ class TestGetOpenMeteoForecastMulti(unittest.TestCase):
         mock_fetch.assert_not_called()
 
 
-class TestForecastCache(unittest.TestCase):
+class TestForecastCache(unittest.IsolatedAsyncioTestCase):
     """Tests for TTL cache in get_open_meteo_forecast_multi."""
 
     def setUp(self):
@@ -325,7 +315,6 @@ class TestForecastCache(unittest.TestCase):
         k2 = _cache_key("41.9,-87.9", "America/Chicago")
         self.assertNotEqual(k1, k2)
 
-    @pytest.mark.asyncio
     @patch("weather.open_meteo.fetch_json", new_callable=AsyncMock)
     async def test_cache_hit_skips_fetch(self, mock_fetch):
         from weather.open_meteo import get_open_meteo_forecast_multi
@@ -347,7 +336,6 @@ class TestForecastCache(unittest.TestCase):
         self.assertEqual(mock_fetch.call_count, 1)
         self.assertEqual(result1, result2)
 
-    @pytest.mark.asyncio
     @patch("weather.open_meteo.fetch_json", new_callable=AsyncMock)
     async def test_cache_expires(self, mock_fetch):
         from weather.open_meteo import get_open_meteo_forecast_multi, _CACHE_TTL
@@ -437,10 +425,9 @@ class TestLocalModelEnsemble(unittest.TestCase):
         self.assertLess(temp, 35)
 
 
-class TestGetForecastWithLocalModel(unittest.TestCase):
+class TestGetForecastWithLocalModel(unittest.IsolatedAsyncioTestCase):
     """Test get_open_meteo_forecast with local_model parameter."""
 
-    @pytest.mark.asyncio
     @patch("weather.open_meteo.fetch_json", new_callable=AsyncMock)
     async def test_local_model_parsed(self, mock_fetch):
         from weather.open_meteo import get_open_meteo_forecast
@@ -467,7 +454,6 @@ class TestGetForecastWithLocalModel(unittest.TestCase):
         self.assertEqual(day["local_high"], 86.0)
         self.assertEqual(day["local_low"], 67.5)
 
-    @pytest.mark.asyncio
     @patch("weather.open_meteo.fetch_json", new_callable=AsyncMock)
     async def test_local_model_missing_data_graceful(self, mock_fetch):
         """If local model returns no data, local_high/low simply absent."""
@@ -492,7 +478,6 @@ class TestGetForecastWithLocalModel(unittest.TestCase):
         self.assertIn("gfs_high", day)
         self.assertNotIn("local_high", day)
 
-    @pytest.mark.asyncio
     @patch("weather.open_meteo.fetch_json", new_callable=AsyncMock)
     async def test_models_param_includes_local(self, mock_fetch):
         """URL should include the local model in the models= parameter."""
@@ -509,14 +494,13 @@ class TestGetForecastWithLocalModel(unittest.TestCase):
         self.assertIn("ecmwf_ifs025", url)
 
 
-class TestMultiForecastLocalModel(unittest.TestCase):
+class TestMultiForecastLocalModel(unittest.IsolatedAsyncioTestCase):
     """Test get_open_meteo_forecast_multi with local model grouping."""
 
     def setUp(self):
         import weather.open_meteo as om
         om._forecast_cache.clear()
 
-    @pytest.mark.asyncio
     @patch("weather.open_meteo.fetch_json", new_callable=AsyncMock)
     async def test_different_local_models_separate_requests(self, mock_fetch):
         """Locations with different local_model values need separate API calls."""
@@ -558,7 +542,6 @@ class TestMultiForecastLocalModel(unittest.TestCase):
         self.assertEqual(result["London"]["2025-06-15"]["local_high"], 86.0)
         self.assertEqual(result["Paris"]["2025-06-15"]["local_high"], 71.0)
 
-    @pytest.mark.asyncio
     @patch("weather.open_meteo.fetch_json", new_callable=AsyncMock)
     async def test_no_local_model_no_local_keys(self, mock_fetch):
         """US cities without local_model should not have local_high/low."""
