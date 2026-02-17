@@ -25,6 +25,7 @@ from .probability import (
 from .bridge import CLOBWeatherBridge
 from .feedback import FeedbackState
 from .mean_reversion import PriceTracker
+from .pending_state import PendingOrders, pending_lock
 from .sigma_log import log_sigma_signals
 from .sizing import compute_exit_threshold, compute_position_size
 from .state import PredictionRecord, TradingState
@@ -742,6 +743,7 @@ def run_weather_strategy(
     show_config: bool = False,
     use_safeguards: bool = True,
     state_path: str | None = None,
+    pending: PendingOrders | None = None,
 ) -> None:
     """Run the weather trading strategy."""
     feedback = FeedbackState.load()
@@ -965,12 +967,21 @@ def run_weather_strategy(
         missing = "NOAA" if noaa_ok == 0 else "Open-Meteo"
         logger.warning("HEALTH CHECK: %s returned no data — trading with reduced sources", missing)
 
-    # Compute current exposure for budget-aware sizing
+    # Load pending maker orders
+    from pathlib import Path
+    _config_dir = str(Path(state_path).parent) if state_path else str(Path(__file__).parent)
+    _pending_path = str(Path(_config_dir) / "pending_orders.json")
+    if pending is None:
+        pending = PendingOrders(_pending_path)
+        with pending_lock(_pending_path):
+            pending.load()
+
+    # Compute current exposure for budget-aware sizing (include pending maker orders)
     current_exposure = sum(
         t.shares * (t.cost_basis or 0)
         for t in state.trades.values()
         if t.shares >= MIN_SHARES_PER_ORDER
-    )
+    ) + pending.total_exposure()
 
     for event_id, event_markets in events.items():
         event_name = event_markets[0].get("event_name", "") if event_markets else ""
@@ -1329,6 +1340,9 @@ def run_weather_strategy(
             if market_id in state.trades:
                 logger.info("Already hold position in market %s — skip", market_id)
                 continue
+            if pending.has_market(market_id):
+                logger.debug("Pending maker order for market %s — skip", market_id)
+                continue
 
             opportunities_found += 1
 
@@ -1358,84 +1372,152 @@ def run_weather_strategy(
                         side.upper(), position_size, position_size / price, outcome_name, confidence * 100,
                     )
             else:
-                logger.info("Executing trade: %s $%.2f on '%s'...", side.upper(), position_size, outcome_name)
-                result = client.execute_trade(
-                    market_id, side, position_size,
-                    fill_timeout=config.fill_timeout_seconds,
-                    fill_poll_interval=config.fill_poll_interval,
-                    depth_fill_ratio=config.depth_fill_ratio,
-                    vwap_max_levels=config.vwap_max_levels,
-                    limit_price=prob,
-                )
+                # --- Taker vs Maker decision ---
+                edge = prob - price
+                gm = client._market_cache.get(market_id)
+                best_bid = 0.0
+                best_ask = price
+                if gm and gm.clob_token_ids:
+                    try:
+                        book = client.clob.get_orderbook(gm.clob_token_ids[0])
+                        bids = book.get("bids") or []
+                        asks = book.get("asks") or []
+                        if bids:
+                            best_bid = float(bids[0]["price"])
+                        if asks:
+                            best_ask = float(asks[0]["price"])
+                    except Exception:
+                        logger.debug("Orderbook fetch failed for maker decision")
 
-                if result.get("success"):
-                    trades_executed += 1
-                    shares = result.get("shares_bought") or result.get("shares") or 0
-                    trade_id = result.get("trade_id")
-                    logger.info("Bought %.1f shares @ $%.2f", shares, price)
+                spread = best_ask - best_bid
+                use_taker = (edge > config.maker_edge_threshold and spread < config.maker_spread_threshold)
+                maker_price = 0.0
 
-                    # Circuit breaker: record position opened
-                    today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-                    state.record_position_opened(today_str)
+                if not use_taker:
+                    tick = MIN_TICK_SIZE
+                    maker_price = min(prob, best_bid + tick * config.maker_tick_buffer)
+                    maker_price = round(maker_price, 2)
+                    # No room for maker if bid + tick >= ask
+                    if best_bid + tick >= best_ask:
+                        logger.info("No room for maker (bid $%.2f + tick >= ask $%.2f) — taker", best_bid, best_ask)
+                        use_taker = True
+                    elif maker_price <= 0:
+                        use_taker = True
 
-                    # Record in state for dynamic exits
-                    state.record_trade(
-                        market_id=market_id,
-                        outcome_name=outcome_name,
-                        side=side,
-                        cost_basis=price,
-                        shares=shares,
-                        location=location,
-                        forecast_date=date_str,
-                        forecast_temp=forecast_temp,
-                        metric=metric,
-                        event_id=event_id,
+                if not use_taker:
+                    # --- MAKER path: post GTC postOnly bid ---
+                    logger.info("Posting MAKER %s $%.2f @ $%.2f on '%s'...",
+                                side.upper(), position_size, maker_price, outcome_name)
+                    result = client.execute_maker_order(market_id, side, position_size, maker_price)
+                    if result.get("posted"):
+                        order_entry = {
+                            "order_id": result["order_id"],
+                            "market_id": market_id,
+                            "token_id": result.get("token_id", ""),
+                            "side": side,
+                            "price": result["price"],
+                            "size": result["size"],
+                            "amount_usd": position_size,
+                            "submitted_at": datetime.now(timezone.utc).isoformat(),
+                            "ttl_seconds": config.maker_ttl_seconds,
+                            "location": location,
+                            "outcome_name": outcome_name,
+                            "forecast_date": date_str,
+                            "prob": prob,
+                        }
+                        with pending_lock(_pending_path):
+                            pending.load()
+                            pending.add(order_entry)
+                            pending.save()
+                        trades_executed += 1
+                        current_exposure += position_size
+                        traded_this_event = True
+                        logger.info("Maker order queued: %s $%.2f @ $%.2f (order %s)",
+                                    side.upper(), position_size, maker_price, result["order_id"])
+                    else:
+                        logger.info("Maker order rejected — falling back to taker")
+                        use_taker = True
+
+                if use_taker:
+                    # --- TAKER path: immediate fill (existing behavior) ---
+                    logger.info("Executing TAKER trade: %s $%.2f on '%s'...", side.upper(), position_size, outcome_name)
+                    result = client.execute_trade(
+                        market_id, side, position_size,
+                        fill_timeout=config.fill_timeout_seconds,
+                        fill_poll_interval=config.fill_poll_interval,
+                        depth_fill_ratio=config.depth_fill_ratio,
+                        vwap_max_levels=config.vwap_max_levels,
+                        limit_price=prob,
                     )
 
-                    # Update exposure for budget-aware sizing within this run
-                    current_exposure += position_size
+                    if result.get("success"):
+                        trades_executed += 1
+                        shares = result.get("shares_bought") or result.get("shares") or 0
+                        trade_id = result.get("trade_id")
+                        logger.info("Bought %.1f shares @ $%.2f", shares, price)
 
-                    # Correlation guard: record event → market mapping
-                    if config.correlation_guard:
-                        state.record_event_position(event_id, market_id)
+                        # Circuit breaker: record position opened
+                        today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+                        state.record_position_opened(today_str)
 
-                    # Break: max 1 position per event per run
-                    traded_this_event = True
-
-                    # Trade log: record for model improvement
-                    bucket = entry["bucket"]
-                    try:
-                        log_trade(
-                            location=location,
-                            date=date_str,
-                            metric=metric,
-                            bucket=tuple(bucket),
-                            prob_raw=entry.get("prob_raw", prob),
-                            prob_platt=prob,
-                            market_price=price,
-                            position_usd=position_size,
+                        # Record in state for dynamic exits
+                        state.record_trade(
+                            market_id=market_id,
+                            outcome_name=outcome_name,
+                            side=side,
+                            cost_basis=price,
                             shares=shares,
+                            location=location,
+                            forecast_date=date_str,
                             forecast_temp=forecast_temp,
-                            sigma=adaptive_sigma_value,
-                            horizon=get_horizon_days(date_str),
+                            metric=metric,
+                            event_id=event_id,
                         )
-                    except Exception:
-                        logger.debug("Failed to write trade log", exc_info=True)
 
-                    # Calibration: record prediction
-                    state.record_prediction(PredictionRecord(
-                        market_id=market_id,
-                        event_id=event_id,
-                        location=location,
-                        forecast_date=date_str,
-                        metric=metric,
-                        our_probability=prob,
-                        forecast_temp=forecast_temp,
-                        bucket_low=bucket[0],
-                        bucket_high=bucket[1],
-                        timestamp=datetime.now(timezone.utc).isoformat(),
-                        horizon=days_ahead,
-                    ))
+                        # Update exposure for budget-aware sizing within this run
+                        current_exposure += position_size
+
+                        # Correlation guard: record event → market mapping
+                        if config.correlation_guard:
+                            state.record_event_position(event_id, market_id)
+
+                        # Break: max 1 position per event per run
+                        traded_this_event = True
+
+                        # Trade log: record for model improvement
+                        bucket = entry["bucket"]
+                        try:
+                            log_trade(
+                                location=location,
+                                date=date_str,
+                                metric=metric,
+                                bucket=tuple(bucket),
+                                prob_raw=entry.get("prob_raw", prob),
+                                prob_platt=prob,
+                                market_price=price,
+                                position_usd=position_size,
+                                shares=shares,
+                                forecast_temp=forecast_temp,
+                                sigma=adaptive_sigma_value,
+                                horizon=get_horizon_days(date_str),
+                            )
+                        except Exception:
+                            logger.debug("Failed to write trade log", exc_info=True)
+
+                        # Calibration: record prediction
+                        state.record_prediction(PredictionRecord(
+                            market_id=market_id,
+                            event_id=event_id,
+                            location=location,
+                            forecast_date=date_str,
+                            metric=metric,
+                            our_probability=prob,
+                            forecast_temp=forecast_temp,
+                            bucket_low=bucket[0],
+                            bucket_high=bucket[1],
+                            timestamp=datetime.now(timezone.utc).isoformat(),
+                            horizon=days_ahead,
+                        ))
 
                     # Update remaining balance
                     balance = max(0.0, balance - position_size)
