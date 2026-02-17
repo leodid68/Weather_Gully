@@ -29,7 +29,7 @@ class TestConfigIntegration:
         cfg = Config()
         assert cfg.active_metrics == ["high"]
         assert cfg.correlation_threshold == 0.3
-        assert cfg.slippage_edge_ratio == 0.5
+        assert cfg.slippage_edge_ratio == 0.8
 
 
 class TestBudgetSizingIntegration:

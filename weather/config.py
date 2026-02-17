@@ -157,6 +157,12 @@ class Config:
     model_disagreement_threshold: float = 3.0   # °F — boost sigma when models diverge more than this
     model_disagreement_multiplier: float = 1.5  # sigma multiplier when disagreement detected
 
+    # Maker orders (hybrid taker/maker execution)
+    maker_edge_threshold: float = 0.05     # Edge below this → use maker
+    maker_spread_threshold: float = 0.10   # Spread above this → use maker
+    maker_ttl_seconds: int = 900           # 15 min before cancel
+    maker_tick_buffer: int = 1             # Ticks above best bid
+
     @property
     def active_locations(self) -> list[str]:
         """Return canonical location keys matching LOCATIONS dict keys.

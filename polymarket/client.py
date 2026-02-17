@@ -250,6 +250,7 @@ class PolymarketClient:
         size: float,
         neg_risk: bool | None = None,
         order_type: str = "GTC",
+        post_only: bool = False,
         **kwargs,
     ) -> dict:
         """Build, sign, and submit an order to the CLOB.
@@ -290,7 +291,7 @@ class PolymarketClient:
             "order": order_payload,
             "owner": self._api_key,
             "orderType": order_type,
-            "postOnly": False,
+            "postOnly": post_only,
             "tickSize": tick_size,
         }
         logger.debug("POST /order side=%s price=%s size=%s",

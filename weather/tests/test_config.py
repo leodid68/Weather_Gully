@@ -19,7 +19,7 @@ class TestCircuitBreakerConfig(unittest.TestCase):
 
 def test_new_execution_config_defaults():
     cfg = Config()
-    assert cfg.slippage_edge_ratio == 0.5
+    assert cfg.slippage_edge_ratio == 0.8
     assert cfg.depth_fill_ratio == 0.5
     assert cfg.vwap_max_levels == 5
     assert cfg.trade_metrics == "high"
